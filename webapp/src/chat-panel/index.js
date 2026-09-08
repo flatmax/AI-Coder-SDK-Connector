@@ -149,7 +149,7 @@ import {
 } from './search.js';
 import { installReactiveAccessors, makeTabState } from './state.js';
 import { STYLES } from './styles.js';
-import { installTabHandlers } from './tabs.js';
+import { installTabHandlers, loadSubagentFeedIfEmpty } from './tabs.js';
 
 export class ChatPanel extends RpcMixin(LitElement) {
   static properties = PROPERTIES;
@@ -412,6 +412,14 @@ export class ChatPanel extends RpcMixin(LitElement) {
         composed: true,
       }),
     );
+    // A settled subagent tab that mirrored no blocks — a background subagent
+    // whose output was translated against a later turn — fills from its
+    // transcript when the user opens it. Here rather than in `onTabClick` so
+    // every route in reaches it: the tab button, its LED, the overflow menu
+    // and the Alt+` shortcut. Deliberately not awaited; the switch itself must
+    // not wait on disk I/O, and the read repaints when it lands. See
+    // `loadSubagentFeedIfEmpty` in tabs.js.
+    loadSubagentFeedIfEmpty(this, value);
   }
 
   // ---------------------------------------------------------------

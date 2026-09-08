@@ -343,6 +343,12 @@ export function syncSubagentTab(panel, requestId, row, ownerTab) {
     unknown: previous?.unknown || false,
     errored: previous?.errored || false,
     feedMessage: previous?.feedMessage || false,
+    // Carried for the same reason as `feedMessage`: the transcript fallback
+    // (`loadSubagentFeedIfEmpty` in tabs.js) latches here, and a trailing
+    // `notification` arriving after an `updated` already settled the tab would
+    // otherwise reset the latch and read the transcript a second time into the
+    // same feed.
+    transcriptRead: previous?.transcriptRead || false,
     // Label state, carried across the wholesale replace above: the strip's
     // number and the sentence behind its keyword, both resolved once.
     ordinal: previous?.ordinal || ordinal,

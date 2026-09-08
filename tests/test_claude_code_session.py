@@ -1910,6 +1910,27 @@ class TestBackgroundDrain:
         assert result["background_tasks"] == []
         assert engine._drain is None
 
+    async def test_a_bash_task_stays_filtered_in_the_turns_after_it(self, engine):
+        """The session owns the latch, so a slow command that finishes two
+        turns later is still a shell command and not a subagent.
+
+        This is the whole path the 2026-09-08 report exercised: because the
+        engine does *not* hold the run open for a bash task (the test above),
+        its turn ends, and its ``task_notification`` is read by whichever turn
+        is current when the command exits. That turn's translator has to
+        recognise it, and it can only do that from the session's latch —
+        ``TaskNotificationMessage`` has no ``task_type`` field.
+        """
+        await self.drained(
+            engine, [task_started("b1", task_type="local_bash"), result_message()]
+        )
+        assert engine._non_subagent_tasks == {"b1"}
+
+        events, _ = await self.drained(
+            engine, [task_notification("b1"), result_message()]
+        )
+        assert [e.name for e in events if e.name == "subagentEvent"] == []
+
     async def test_a_kill_ends_the_drain_with_no_notification_at_all(self, engine):
         """`stop_task()` reports `status: "killed"` through `updated` and sends
         no notification, so a terminal status has to count on its own."""

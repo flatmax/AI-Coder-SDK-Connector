@@ -388,6 +388,13 @@ class EngineSession:
         # Consumes the stream between turns while a background task is still
         # running. Never concurrent with a pump: see _stop_background_drain.
         self._drain: asyncio.Task[None] | None = None
+        # Task ids the CLI typed as something other than a subagent — in
+        # practice a backgrounded `Bash` command. Held here rather than on the
+        # translator because a slow command outlives the turn that ran it and
+        # only its *first* message says what it is; a per-turn latch lets the
+        # trailing `task_notification` through as a subagent row and an empty
+        # tab. See `TurnTranslator._is_not_a_subagent`.
+        self._non_subagent_tasks: set[str] = set()
         # Guards connect/disconnect against each other; turn admission is
         # a synchronous check, not a lock, because a rejected turn must be
         # rejected rather than made to wait.
@@ -935,7 +942,9 @@ class EngineSession:
         # including the ones the drain reads after the first — is differenced
         # against the same point and reports the turn's running total.
         self._cost.start_turn()
-        translator = TurnTranslator(turn.request_id)
+        translator = TurnTranslator(
+            turn.request_id, non_subagent_tasks=self._non_subagent_tasks
+        )
         active = ActiveTurn(
             request_id=turn.request_id,
             translator=translator,

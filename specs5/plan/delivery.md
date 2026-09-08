@@ -3268,5 +3268,75 @@ open-work note about retiring it — the map has since been retired.
 the alternative to the drain that item 3(a) built on. Left open deliberately; the agreement was to watch
 for A's residual mis-attribution first and take B only if it shows up. Nothing has shown up.
 
+> **2026-09-08:** something has. The interlude below is A's residual mis-attribution arriving exactly
+> where it was predicted — a task's trailing message read by a turn that is not its own — and it did not
+> need per-translator routing to fix, because the state the later turn was missing was one *fact* about
+> the task rather than its whole translator. Option B stays on the watch-list, one observation heavier.
+
 **Not carried over, deliberately:** the fix list's test-baseline totals. A pass count in a rolling
 document is stale by the next commit — run `pytest tests/ -q` and `npx vitest run src/` in `webapp/`.
+
+## Interlude — the shell command that came back as a subagent (2026-09-08)
+
+Found by a user pointing at two screenshots: a card headed **Subagent**, stuck to the bottom of the
+chat, reading *Background command "Run the phase 10 agy consultant probe" completed (exit code 0)*; and
+the tab beside it, empty but for `🤖 bo5c69b73`. Two complaints — "subagents are pinned to the bottom of
+the chat, I can switch to the tab instead" and "the subagent's tab is empty?" — and one bug under both.
+
+### The latch was scoped to the wrong lifetime
+
+`local_bash` tasks have been filtered since 2026-08-17 (§ *The live run, and the sixteen tabs nobody
+asked for*), and that filter has always latched the task id, because only `TaskStartedMessage` carries
+`task_type`. The latch lived on the `TurnTranslator` — **one instance per turn** — and a backgrounded
+command does not respect that boundary:
+
+- `run_in_background` returns immediately, so the task never enters `tasks_in_flight`; `DEFERRING_TASK_TYPES` excludes `local_bash` deliberately, and the engine does not hold the run open for a shell command.
+- The turn ends. Minutes later the command exits and the CLI sends `task_notification` on whatever turn is current.
+- That translator was built after the `started` went by. Empty latch, `task_type=None` — the field does not exist on `TaskNotificationMessage` at all — and the shell command is a subagent.
+
+Reproduced in eleven lines against the real SDK dataclasses before anything was changed, which is what
+made the rest of the diagnosis cheap: the row came out carrying `description: ''`, `tool_use_id:
+'toolu_bash_1'` and the exact summary string from the screenshot.
+
+### Both complaints are that one row
+
+Neither symptom was a design question, which is the part worth recording — the user's two asks read as
+requests to change how subagents are presented, and the answer to both was that this was not a subagent.
+
+- **"Pinned to the bottom."** The row's `tool_use_id` names a `Bash` card in a turn that had already ended, so no block in the current turn matches it, and `groupBlocksByScope` sends an unmatched row to the end of its list. On a streaming turn the end of the list is the bottom of the feed, re-rendered below each new block as the turn grows — a row that appears pinned there because it is being sorted there, over and over.
+- **"The tab is empty."** A shell command produces no blocks carrying an `agent_id`, so there is nothing to mirror. This is the same measurement the original filter was written from (`local_agent/has-blocks: 4, local_bash/empty: 17`), reappearing one task at a time instead of sixteen at once — which is why it read as a puzzle rather than as the known bug.
+- **The bare id** in both places is the third face of it: `description` is empty on a `notification`, so the row falls back to the noun "Subagent" and the tab to `bo5c69b73`.
+
+Fixed by giving `EngineSession` the set and passing it to every translator it builds. Two ids, one line
+of wiring, and the default stays a private set so a translator built alone — every test, any one-turn
+use — behaves as before.
+
+### The tab fallback, which is the ask that survived the bug
+
+The user's second question was worth answering on its own: a real background *subagent* has the same
+cross-turn shape, and its later blocks are translated against another turn, so its tab is empty for a
+reason no filter fixes. Asked which way to go, they chose reading the transcript.
+
+So a subagent tab with an empty feed now reads `get_subagent_transcript(agent_id)` — the historical
+tabs' read, on a live tab — gated four ways so it never displaces mirroring: settled only (a live
+subagent's blocks may still be coming, and § Empty States already says what an empty live tab shows),
+empty only, once per tab, and on the user's gesture rather than eagerly. The limit is stated rather than
+worked around: a row that only ever reported a `task_id` cannot be read, and the panel does not match a
+transcript by description to find one.
+
+### Tests
+
+Three in `test_claude_code_messages.py` — the cross-turn leak, a late *subagent* notification as the
+control that the shared latch drops bash tasks and not delegations, and the default-private-set case.
+One in `test_claude_code_session.py` pinning the wiring end to end, sitting next to
+`test_a_bash_task_is_not_a_reason_to_keep_reading`, which is the test that explains why the notification
+lands in a later turn at all. Nine in a new `subagent-feed-fallback.test.js` for the tab read, most of
+them about when it declines to fire.
+
+Both suites green: **4,472 webapp tests across 107 files**, **4,612 pytest**.
+
+### Deliberately not built
+
+- **Persisting the latch.** A server restarted mid-command has nothing to recognise the notification by, and the phantom returns once. Writing task ids to the session directory to suppress a row costs more than the row does.
+- **Guessing an `agent_id`.** `list_subagent_transcripts` would let a tab find a transcript by description. That is inventing a tab's contents, and the invariant against inventing tabs was written for the same reason.
+- **Changing the row's placement rule.** Rows with no matching card still land at the end. The rule is right — a running subagent the user cannot see is worse than one in the wrong place — and it was only ever reached by a task that should not have had a row.

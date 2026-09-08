@@ -295,8 +295,12 @@ interlude that found it; this list exists so that none of them has to be redisco
    pre-existing bug that only became visible when each row also became a tab. Fixed in
    `messages.py` by filtering them where the one rule serves every surface at once, and **re-verified live
    after a restart**: three long commands in the main scope and two subagents' own sleeps opened nothing,
-   while the two subagents opened exactly two tabs and settled green with their real counters. The run
-   left three things open; two are now closed:
+   while the two subagents opened exactly two tabs and settled green with their real counters. **The
+   filter's latch was scoped to the turn until 2026-09-08**, so a command backgrounded with
+   `run_in_background` — which finishes in a *later* turn than the one that ran it — leaked back through
+   as a single phantom row and empty tab; see
+   [*Interlude — the shell command that came back as a subagent*](delivery.md#interlude--the-shell-command-that-came-back-as-a-subagent-2026-09-08).
+   The run left three things open; two are now closed:
    - **⏹ Stop and the amber LED path are still unverified** — the one still open, and now for a better
      reason. The first reason was wrong and the docstring carrying it is corrected: `stop_task` is its own
      control subtype (`SDKControlStopTaskRequest`, a sibling of the interrupt request), and `client.py:454`

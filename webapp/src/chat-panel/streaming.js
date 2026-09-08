@@ -63,7 +63,7 @@ import {
   settleLiveSubagentTabs,
   syncSubagentTab,
 } from './subagent-tabs.js';
-import { findTabForRequest } from './tabs.js';
+import { findTabForRequest, loadSubagentFeedIfEmpty } from './tabs.js';
 import { formatResetTime, limitTypeLabel } from '../rate-limit.js';
 
 // ---------------------------------------------------------------
@@ -906,6 +906,13 @@ export function onStreamComplete(panel, event) {
       ownerTab.lastEditOutcome.status === 'error',
       backgroundTasks,
     );
+    // A subagent tab the user is *currently reading* that settles with an
+    // empty feed fills from its transcript now, rather than making them click
+    // away and back to trigger the read the active-tab setter would have done.
+    // The active tab alone, so a turn that fanned out to twelve empty tabs
+    // costs one read and not twelve — the same rule § Refresh and Reconnect
+    // applies to reconnects.
+    loadSubagentFeedIfEmpty(panel, panel._activeTabId);
     // The turn's *presentation* is finished either way — footer rendered,
     // spinner stopped, composer released — but a turn with background work
     // still on the stream keeps the state that work arrives through: emptying
