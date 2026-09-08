@@ -379,7 +379,16 @@ class AgyService(AntigravityService):
         except Exception as exc:  # noqa: BLE001
             return self._record_error("connect", exc)
 
-        translator = AgyTranslator(request_id)
+        # The conversation id is read here rather than inside the pump
+        # because `init` is consumed by the session, before a translator
+        # for this turn exists. It is what names the directory `agy` puts
+        # a generated image in, and the repo root is where that image has
+        # to end up — neither is anywhere in the turn's own frames.
+        translator = AgyTranslator(
+            request_id,
+            repo_root=self._repo_root,
+            conversation_id=session.conversation_id,
+        )
         self._turns[request_id] = translator
         import asyncio
 

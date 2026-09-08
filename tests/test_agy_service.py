@@ -578,7 +578,10 @@ class TestTheWriteGuidance:
         monkeypatch.setattr(AgyService, "_run_agy_turn", fake_run)
 
         async def fake_ensure(self):
-            return object()
+            # Not `object()`: the turn reads the session's conversation id
+            # to build the translator, since that is what names the
+            # directory `agy` writes a generated image into.
+            return types.SimpleNamespace(conversation_id="b1d377c5")
 
         monkeypatch.setattr(AgyService, "_ensure_session", fake_ensure)
         svc = service(tmp_path)

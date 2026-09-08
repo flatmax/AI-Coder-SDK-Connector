@@ -119,7 +119,13 @@ ARG_ALIASES: dict[str, dict[str, str]] = {
         "CodeContent": "content",
         "Description": "description",
     },
-    "generate_image": {"OutputPath": "file_path", "Prompt": "description"},
+    # No path entry, because this tool has no path argument — see
+    # `steps.BRAIN_DIR`. `OutputPath` sat here until 2026-09-08 and never
+    # matched a real call: it is one of `generate_image`'s *results* on
+    # the SDK transport, and `agy` does not merge results into arguments.
+    # A mapping that cannot fire is not inert, it is a claim that the
+    # dialog can show a PATH for this call, and it cannot.
+    "generate_image": {"Prompt": "description"},
     "run_command": {
         "CommandLine": "command",
         "Cwd": "cwd",

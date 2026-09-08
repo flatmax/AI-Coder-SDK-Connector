@@ -108,7 +108,12 @@ from aic_dc.agy.session import (
     AgySession,
     PromptNotSentError,
 )
-from aic_dc.agy.steps import AgyTranslator, unwrap
+from aic_dc.agy.steps import (
+    BRAIN_DIR,
+    AgyTranslator,
+    locate_generated_image,
+    unwrap,
+)
 from aic_dc.antigravity.consultant import (
     ConsultationError,
     ImageResult,
@@ -171,30 +176,13 @@ _IMAGE_ONLY_REASON = (
     "not read, search, or run commands."
 )
 
-#: Where ``agy`` puts an image, because the caller cannot say.
-#:
-#: **Measured on 2026-09-08, and it falsified the question AG-16 left
-#: open.** That question was *which name does ``agy`` give
-#: ``generate_image``'s output path* — and the answer is that there is no
-#: such argument on either transport. The tool's own schema declares
-#: ``ImageName``, *"Short descriptive name for the saved file"*, and the
-#: observed call carried exactly ``{"ImageName", "Prompt"}``. The harness
-#: chooses the location: ``brain/<conversation_id>/<ImageName>_<epoch_ms>.jpg``,
-#: outside the repository and invisible to the file tree and the viewer.
-#:
-#: ``output_path`` is a **result** field, which
-#: [`sdk-surface.md`](../../../specs5/plan-ag/sdk-surface.md) had recorded
-#: in the right column all along. It reads as an argument on the SDK
-#: transport only because that stream merges a tool's results back into
-#: its ``args`` at ``DONE`` (phase 3, finding 1); ``agy`` does not merge,
-#: so on this transport the path is nowhere in the machine-readable stream
-#: at all — only in the model's prose, which AG-R-3 forbids believing.
-#:
-#: So the image is **collected** rather than requested, and it is located
-#: from data the frame does carry: the conversation's own id, and the name
-#: the model chose. A consultation is one process holding one conversation,
-#: so this directory belongs to this call and nothing else writes into it.
-BRAIN_DIR = Path.home() / ".gemini" / "antigravity-cli" / "brain"
+#: Where ``agy`` puts an image, because the caller cannot say. Imported
+#: from :mod:`aic_dc.agy.steps`, which holds both it and the locator and
+#: says why the path has to be collected rather than requested. It was
+#: defined here until the engine needed the same collection, and is still
+#: named here — and passed explicitly to
+#: :func:`~aic_dc.agy.steps.locate_generated_image` — so this module's
+#: tests can redirect the directory without reaching into another one.
 
 #: A second opinion: prose in, prose out, nothing else permitted.
 SECOND_OPINION_POLICY = StaticPolicy.of(CONTROL_TOOLS, _NO_TOOLS_REASON)
@@ -426,7 +414,13 @@ class AgyConsultant:
         params = params if isinstance(params, dict) else {}
         image_name = str(params.get("ImageName") or params.get("image_name") or "")
 
-        source = _locate_image(BRAIN_DIR, conversation_id, image_name)
+        # `allow_newest` because a consultation is one process holding one
+        # conversation for the length of one call, so nothing else writes
+        # into that directory. The engine, whose conversation outlives the
+        # turn, must not pass it.
+        source = locate_generated_image(
+            BRAIN_DIR, conversation_id, image_name, allow_newest=True
+        )
         if source is None:
             raise ConsultationError(
                 f"Antigravity generated an image named {image_name!r} and it "
@@ -811,30 +805,3 @@ def _conversation_id(frames: list[dict[str, Any]]) -> str:
     return ""
 
 
-def _locate_image(brain_dir: Path, conversation_id: str, image_name: str) -> Path | None:
-    """The file ``agy`` wrote for this conversation, or ``None``.
-
-    Matched by the name the model chose first, then by anything in the
-    directory. The fallback is safe rather than lax: the directory is
-    ``agy``'s own per-conversation one, a consultation holds exactly one
-    conversation for the length of one call, and nothing else writes
-    there — so "the newest file in it" is this call's image or there is
-    none. Sub-directories (``scratch``, ``.system_generated``,
-    ``.user_uploaded``) are skipped, since an image is a file.
-    """
-    if not conversation_id:
-        return None
-    directory = brain_dir / conversation_id
-    if not directory.is_dir():
-        return None
-    stem = image_name.strip()
-    patterns = [f"{stem}_*", f"{stem}.*"] if stem else []
-    patterns.append("*")
-    for pattern in patterns:
-        try:
-            files = [path for path in directory.glob(pattern) if path.is_file()]
-        except OSError:
-            return None
-        if files:
-            return max(files, key=lambda path: path.stat().st_mtime)
-    return None

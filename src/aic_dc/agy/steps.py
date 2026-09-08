@@ -49,6 +49,8 @@ Governing spec: ``specs5/plan-ag/`` — AG-14, AG-R-4;
 from __future__ import annotations
 
 import logging
+import shutil
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -95,8 +97,32 @@ class AgyTranslator:
     wants the running total. Everything else could be a function.
     """
 
-    def __init__(self, request_id: str, *, agent_id: str | None = None) -> None:
+    def __init__(
+        self,
+        request_id: str,
+        *,
+        agent_id: str | None = None,
+        repo_root: Path | None = None,
+        conversation_id: str | None = None,
+    ) -> None:
         self.request_id = request_id
+        # Both are needed to collect a generated image, and neither is in
+        # the stream: `generate_image` names no path (see `BRAIN_DIR`), so
+        # the destination is this repository and the source is found under
+        # the conversation's own directory. Supplied by the service, which
+        # has the session, rather than scraped from frames — the engine's
+        # `init` frame is consumed before this translator exists.
+        #
+        # Left unset by the consultant, which builds a translator of its
+        # own and collects after the turn from the whole frame list. That
+        # is not a second implementation of this: it locates with the same
+        # function, and the two differ only in that one of them may fall
+        # back to the newest file in the directory.
+        self._repo_root = Path(repo_root).resolve() if repo_root else None
+        self._conversation_id = conversation_id or ""
+        # A file older than the turn belongs to an earlier turn of the
+        # same conversation. See `locate_generated_image`.
+        self._started_at = time.time()
         # When set, every block and card this translator produces is
         # attributed to that agent rather than to the main thread — which
         # is how a consultation on this transport gets its own tab
@@ -318,6 +344,19 @@ class AgyTranslator:
         # refused write modified nothing, and saying otherwise would make
         # the tree reload for a file that is not there.
         files = [] if failed else files_written_by(name, params)
+        content = "" if output is None else str(output)
+        # `files_written_by` is a table of tools to their *path arguments*
+        # and `generate_image` has none, so it cannot answer for this one
+        # on any transport — adding `ImageName` to that table would encode
+        # a name as a path and no file exists at it. The image is found
+        # instead, and only then is there a path to report.
+        if name == "generate_image" and not failed:
+            collected = self._collect_image(params)
+            if collected:
+                files = [collected]
+                content = (
+                    f"{content}\nCollected into the repository: {collected}"
+                ).strip()
         for path in files:
             if path not in self.stats.files_modified:
                 self.stats.files_modified.append(path)
@@ -328,13 +367,63 @@ class AgyTranslator:
                     "tool_use_id": call_id,
                     "name": name,
                     "status": "error" if failed else "success",
-                    "content": "" if output is None else str(output),
+                    "content": content,
                     "duration_ms": _duration_ms(step.get("duration_seconds")),
                     "agent_id": self._agent_id,
                     "files_modified": files,
                 },
             )
         ]
+
+    def _collect_image(self, params: dict[str, Any]) -> str:
+        """Copy a generated image into the repository, and say where.
+
+        Returns ``""`` and logs rather than raising, on every failure. The
+        consultant's equivalent raises, and the difference is the caller:
+        there, one call exists to produce one image and a collection that
+        failed is the call failing. Here it is one step of a turn that has
+        others, and a pump that raised would lose the rest of the turn to
+        a picture.
+
+        The destination keeps the name the model chose — it is required to
+        be lowercase, underscored and at most three words, which is
+        already a filename — and takes the extension ``agy`` actually
+        produced, since the tool honours no requested one. ``agy``'s own
+        ``<name>_<epoch_ms>`` spelling is the fallback when that name is
+        taken, so a second image never silently overwrites the first.
+        """
+        if self._repo_root is None or not self._conversation_id:
+            return ""
+        image_name = str(params.get("ImageName") or params.get("image_name") or "")
+        source = locate_generated_image(
+            BRAIN_DIR,
+            self._conversation_id,
+            image_name,
+            # A second of slack for coarse mtime granularity, not for a
+            # previous turn — those are minutes away, not milliseconds.
+            min_mtime=self._started_at - 1.0,
+        )
+        if source is None:
+            logger.warning(
+                "agy generated an image named %r and it was not found under %s",
+                image_name,
+                BRAIN_DIR / self._conversation_id,
+            )
+            return ""
+        # `.name` because the model chose this string: the schema asks for
+        # a name, but nothing enforces that it is one, and a destination
+        # is not a place to find out.
+        stem = Path(image_name.strip()).name or source.stem
+        try:
+            destination = self._repo_root / f"{stem}{source.suffix}"
+            if destination.exists():
+                destination = self._repo_root / source.name
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, destination)
+        except OSError as exc:
+            logger.warning("agy generated %s and it could not be collected: %s", source, exc)
+            return ""
+        return str(destination)
 
     def _absorb_result(self, result: dict[str, Any]) -> list[Event]:
         self._status = str(result.get("status") or "")
@@ -407,6 +496,89 @@ class AgyTranslator:
 #: See :data:`aic_dc.antigravity.rules` for why this is not simply a
 #: ``trustedWorkspaces`` question.
 SCRATCH_DIR = Path.home() / ".gemini" / "antigravity-cli" / "scratch"
+
+#: Where ``agy`` puts an image, because the caller cannot say.
+#:
+#: **Measured on 2026-09-08**, and it falsified the question AG-16 left
+#: open — *which name does ``generate_image``'s output path carry* — by
+#: showing there is no such argument on either transport. The binary's own
+#: declaration for that tool, read back out of the conversation store, has
+#: exactly six properties (``Prompt``, ``ImageName``, ``AspectRatio``,
+#: ``ImagePaths``, ``toolAction``, ``toolSummary``) under
+#: ``additionalProperties: false``, so a path cannot even be smuggled in:
+#: the call would be rejected inside ``agy`` while declaring permissions,
+#: which is before any hook runs. The harness chooses the location,
+#: ``brain/<conversation_id>/<ImageName>_<epoch_ms>.jpg``, and the
+#: requested extension is not honoured — a request for ``.png`` produced
+#: JPEG.
+#:
+#: ``output_path`` is a **result** field, which
+#: [`sdk-surface.md`](../../../specs5/plan-ag/sdk-surface.md) recorded in
+#: the right column all along. It reads as an argument on the SDK
+#: transport only because that stream merges a tool's results back into
+#: its ``args`` at ``DONE`` (phase 3, finding 1); ``agy`` does not merge,
+#: so on this transport the path is nowhere in the machine-readable stream
+#: at all — only in the model's prose, which AG-R-3 forbids believing.
+#:
+#: So the image is **collected** rather than requested, from data the
+#: frames do carry: the conversation's own id and the name the model
+#: chose. Lives here rather than in ``consultant.py``, where it was
+#: written, because the engine needs the same collection and two copies of
+#: a path into another product's application directory is the copy that
+#: drifts.
+BRAIN_DIR = Path.home() / ".gemini" / "antigravity-cli" / "brain"
+
+
+def locate_generated_image(
+    brain_dir: Path,
+    conversation_id: str,
+    image_name: str,
+    *,
+    allow_newest: bool = False,
+    min_mtime: float = 0.0,
+) -> Path | None:
+    """The file ``agy`` wrote for this conversation, or ``None``.
+
+    Matched by the name the model chose, which is the only handle the
+    frames give. Sub-directories (``scratch``, ``.system_generated``,
+    ``.user_uploaded``) are skipped, since an image is a file.
+
+    ``allow_newest`` adds a final "anything in the directory" pass and is
+    **the consultant's option, not the engine's**. It is safe there for a
+    reason that does not survive the move: a consultation is one process
+    holding one conversation for the length of one call, so nothing else
+    ever writes into that directory. An engine conversation is long-lived
+    and resumable, so its directory accumulates every image of every turn
+    and "the newest file in it" would confidently return one from an hour
+    ago.
+
+    ``min_mtime`` is the guard that replaces it for the engine: the
+    translator is built per turn, so a file older than the turn belongs to
+    an earlier one. Without it, a resumed conversation whose model reuses
+    an ``ImageName`` would collect the previous turn's picture and report
+    success.
+    """
+    if not conversation_id:
+        return None
+    directory = brain_dir / conversation_id
+    if not directory.is_dir():
+        return None
+    stem = image_name.strip()
+    patterns = [f"{stem}_*", f"{stem}.*"] if stem else []
+    if allow_newest:
+        patterns.append("*")
+    for pattern in patterns:
+        try:
+            files = [
+                path
+                for path in directory.glob(pattern)
+                if path.is_file() and path.stat().st_mtime >= min_mtime
+            ]
+        except OSError:
+            return None
+        if files:
+            return max(files, key=lambda path: path.stat().st_mtime)
+    return None
 
 
 def _diverted_copy(params: dict[str, Any]) -> tuple[str, str] | None:
