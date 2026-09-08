@@ -9,6 +9,14 @@ header's two-column grid (read by hand at 520, 400 and 300px, twice), and
 the ~570px of empty editor the dialog drew for a one-line diff in front of
 60 passing dialog tests.
 
+§ B1's residue joined them: whether five usage-HUD sections and their heads
+fit 300px on a real screen. Its collapse behaviour *is* asserted by the unit
+suite, honestly — a collapsed section's body is absent and its headline is
+not, which is presence rather than layout — and the two claims underneath it
+are neither. "Closing one costs no height" is an equality between two
+rendered heights, and "the model name gives way before the numbers do" is
+about which half of a token row the ellipsis lands on.
+
 **This is a measurement harness that writes screenshots, not a screenshot
 harness.** The distinction is the whole design. An image is only a
 regression test if somebody looks at it, and nobody looks at a passing run;
@@ -91,6 +99,26 @@ CARD_WIDTHS = (520, 400, 300)
 # a name that wraps to its own line — leaving a caret and a dot alone above
 # it — is the one thing in this header that must not happen.
 LONGEST_TOOL_NAME = "NotebookEdit"
+
+# The HUD's four collapsible sections, by the name each displays. The fifth
+# section — "This turn" — is deliberately a plain row with no head: its
+# entire content is its headline, so a caret there would hide the figure the
+# HUD exists to show (usage-hud.js § _section).
+#
+# "7-day Sonnet limit" rather than "5-hour limit" because the scene drives
+# `seven_day_sonnet`, the longest label in `rate-limit.js`'s table. The name
+# a section displays is not the key its collapse is stored under, and that is
+# the reason: this one changes with the window the account is billed against.
+HUD_SECTIONS = ("Context", "Per-model usage", "7-day Sonnet limit", "Files modified")
+
+# The turn `usage-hud.js`'s own max-height comment calls an ordinary
+# refactor, and the reason the ceiling was written: "a turn that touches
+# forty files is an ordinary refactor, and without a ceiling the overlay runs
+# off the bottom of the screen".
+HUD_FILES_MANY = 40
+
+# `.hud` is `width: 300px`, fixed by the spec since phase 3.
+HUD_WIDTH = 300
 
 
 # ---------------------------------------------------------------------------
@@ -459,6 +487,254 @@ def check_tool_header(page: Page, out: Path, report: Report) -> None:
         )
 
 
+def check_usage_hud(page: Page, out: Path, report: Report) -> dict:
+    """Five HUD sections in 300px, and the two rules that are pure layout.
+
+    specs5/next.md § B1 shipped the HUD's last three sections and left one
+    clause behind, which § D2 then named as this harness's: the collapse
+    behaviour is asserted from the DOM, and jsdom answers that honestly
+    because it is *presence* — a collapsed section's body is absent and its
+    headline is not — while nothing measures whether five sections and
+    their heads fit 300px on a real screen.
+
+    Two claims in `usage-hud.js` are layout and nothing else, so they have
+    never been checked by anything. "The head keeps the section's headline
+    figure, so closing one costs no height and hides no answer" is an
+    equality between two rendered heights. And "the model name gives way
+    before the numbers do" is a statement about which half of a token row
+    the ellipsis lands on, which is decided by `flex: none` against
+    `min-width: 0` and is invisible to a stylesheet assertion.
+    """
+    print("\n[5] the usage HUD, five sections in 300px")
+    scene = build(page, "usage-hud", files=3)
+    shot = page.shot(
+        out / "usage-hud-open.png",
+        clip={
+            "x": scene["hud"]["x"],
+            "y": scene["hud"]["y"],
+            "width": max(scene["hud"]["w"], 1),
+            "height": max(scene["hud"]["h"], 1),
+        },
+    )
+    print(f"      HUD {scene['hud']['w']}×{scene['hud']['h']}px "
+          f"(declared {scene['declaredWidth']}, max {scene['declaredMaxHeight']}), "
+          f"content {scene['contentHeight']}px, "
+          f"{scene['sectionCount']} collapsible sections")
+
+    # The content box, not the border box. `.hud` declares `width: 300px`
+    # under the default `box-sizing: content-box` and draws a 1px border, so
+    # its footprint on screen is 302px — and asserting 300 against the border
+    # box would be asserting a `box-sizing: border-box` the component never
+    # declared and nothing asks it for. The footprint is printed anyway,
+    # because "300px wide" and "occupies 300px" are two claims and only one
+    # of them is true.
+    report.add(
+        "the HUD is 300px wide",
+        abs(scene["contentWidth"] - HUD_WIDTH) <= 1,
+        f"content box {scene['contentWidth']}px against a declared "
+        f"{scene['declaredWidth']}; footprint {scene['borderBoxWidth']}px "
+        f"with its border",
+        shot,
+    )
+    # The one number the whole item reduces to. `.hud` clips its y-axis, so
+    # its x-axis computes to `auto` — anything too wide for 300px shows up
+    # here as a horizontal scrollbar in a corner overlay.
+    report.add(
+        "nothing overflows those 300px",
+        scene["overflowsX"] is False,
+        f"scrollWidth against clientWidth: overflowsX={scene['overflowsX']}",
+    )
+
+    # Four heads plus the plain "This turn" row is the five sections § B1's
+    # clause counts. Asserted rather than assumed: a section that failed to
+    # render would otherwise make every per-section check below vacuous.
+    names = [s["name"] for s in scene["sections"]]
+    report.add(
+        "all four collapsible sections rendered",
+        names == list(HUD_SECTIONS),
+        f"heads: {names}",
+    )
+    report.add(
+        "and the fifth section is the plain turn row",
+        scene["turnRow"] is not None and scene["turnRowOverflows"] is False,
+        f"{scene['turnRowText']!r}",
+    )
+
+    for section in scene["sections"]:
+        name = section["name"]
+        report.add(
+            f"{name}: the headline shares the name's line",
+            section["headlineOnNameRow"] is True,
+            f"name at y={section['nameBox']['y'] if section['nameBox'] else '—'}, "
+            f"headline {section['headlineText']!r} at "
+            f"y={section['headline']['y'] if section['headline'] else '—'}",
+        )
+        report.add(
+            f"{name}: the head does not overflow",
+            section["overflows"] is False,
+            f"head {section['head']['w']}px, overflows={section['overflows']}",
+        )
+
+    # The rule the token row's two CSS declarations exist for. It is a claim
+    # about which half yields *when a row cannot fit*, so it takes two
+    # assertions: no row may ever clip its count, and at least one row has to
+    # be narrow enough to make the question live. Two dated model ids fit
+    # 300px with room to spare — so a fixture holding only those would pass
+    # the first assertion while demonstrating nothing, which is the shape
+    # check 2 exists to rule out for the dialog.
+    for row in scene["tokenRows"]:
+        report.add(
+            f"token row {row['model']}: the count is never clipped",
+            row["valueClipped"] is False,
+            f"value {row['valueText']!r} clipped={row['valueClipped']}, "
+            f"name clipped={row['modelClipped']}",
+        )
+        report.add(
+            f"token row {row['model']}: name and count share a line",
+            row["sameRow"] is True,
+            f"sameRow={row['sameRow']}",
+        )
+    clipped = [row for row in scene["tokenRows"] if row["modelClipped"]]
+    report.add(
+        "and where a row cannot fit, the name is what gives way",
+        len(clipped) >= 1,
+        f"{len(clipped)} of {len(scene['tokenRows'])} rows clipped their name: "
+        f"{[row['model'] for row in clipped]}",
+    )
+
+    return scene
+
+
+def check_hud_collapse(page: Page, out: Path, report: Report, open_scene: dict) -> None:
+    """Closing a section costs no height and hides no answer.
+
+    Both halves of one sentence in `usage-hud.js` § _section, and both are
+    measurements. jsdom can see that a body element went away; it cannot
+    see that the head left behind is exactly as tall as it was, which is
+    the whole reason the headline was put on the head rather than in the
+    body.
+    """
+    print("\n[6] the HUD with every section closed")
+    scene = build(page, "usage-hud", files=3, collapse=list(HUD_SECTIONS))
+    shot = page.shot(
+        out / "usage-hud-collapsed.png",
+        clip={
+            "x": scene["hud"]["x"],
+            "y": scene["hud"]["y"],
+            "width": max(scene["hud"]["w"], 1),
+            "height": max(scene["hud"]["h"], 1),
+        },
+    )
+    print(f"      HUD {scene['hud']['w']}×{scene['hud']['h']}px, "
+          f"was {open_scene['hud']['h']}px open")
+
+    was = {s["name"]: s for s in open_scene["sections"]}
+    for section in scene["sections"]:
+        name = section["name"]
+        before = was.get(name)
+        if before is None:
+            report.add(f"{name}: was open a moment ago", False,
+                       "the open build had no section by this name", shot)
+            continue
+        report.add(
+            f"{name}: closing costs no height",
+            section["collapsed"] is True
+            and abs(section["head"]["h"] - before["head"]["h"]) <= 1,
+            f"head {section['head']['h']}px closed against "
+            f"{before['head']['h']}px open, collapsed={section['collapsed']}",
+            shot,
+        )
+        report.add(
+            f"{name}: closing hides no answer",
+            section["bodyHeight"] == 0 and bool(section["headlineText"]),
+            f"body {section['bodyHeight']}px, headline {section['headlineText']!r}",
+        )
+
+    # The HUD as a whole has to actually get shorter, or "costs no height"
+    # is being satisfied by a collapse that collapsed nothing.
+    report.add(
+        "the HUD is shorter with everything closed",
+        scene["hud"]["h"] < open_scene["hud"]["h"],
+        f"{scene['hud']['h']}px against {open_scene['hud']['h']}px open",
+    )
+    report.add(
+        "and still fits 300px",
+        scene["overflowsX"] is False,
+        f"overflowsX={scene['overflowsX']}",
+    )
+
+
+def check_hud_ceiling(page: Page, out: Path, report: Report) -> None:
+    """The positive control, and check 5 means little without it.
+
+    Check 5 asks whether five sections fit. A HUD short enough to fit
+    anything would pass it, and the `max-height` those checks never reach
+    is the one thing standing between a forty-file turn and an overlay that
+    runs off the bottom of the screen — taking the dismiss button, which is
+    at the top, out of reach of the part that is off-screen. That is the
+    reason `usage-hud.js` gives for the ceiling, and it had never been
+    demonstrated: a ceiling nothing has reached has not been shown to exist.
+
+    **What this does not demonstrate, measured rather than assumed.** With
+    the ceiling deleted, forty files make the HUD 1069px in this probe's
+    1100px window — unbounded and no longer scrolling, which the first two
+    assertions catch, but still 15px inside the viewport. So "the overlay
+    stays on screen" passes either way at this window height and is the one
+    assertion here whose failure has not been witnessed. The comment's
+    stated consequence is real on a shorter screen (a 1080p laptop gives a
+    browser about 900px) and the fixture is deliberately not inflated past
+    the forty files that comment calls an ordinary refactor to manufacture
+    it. WINDOW is where that would be changed, and changing it moves every
+    vh-derived number in this file.
+    """
+    print(f"\n[7] positive control: a {HUD_FILES_MANY}-file turn")
+    scene = build(page, "usage-hud", files=HUD_FILES_MANY)
+    shot = page.shot(
+        out / "usage-hud-many-files.png",
+        clip={
+            "x": scene["hud"]["x"],
+            "y": scene["hud"]["y"],
+            "width": max(scene["hud"]["w"], 1),
+            "height": max(scene["hud"]["h"], 1),
+        },
+    )
+    ceiling = px(scene["declaredMaxHeight"]) or 0.8 * scene["window"]["h"]
+    print(f"      HUD {scene['hud']['h']}px for {scene['contentHeight']}px of "
+          f"content, ceiling {ceiling:.0f}px, bottom at {scene['bottom']}px "
+          f"of a {scene['window']['h']}px window")
+
+    report.add(
+        "a long turn is capped, not unbounded",
+        scene["contentHeight"] > scene["hud"]["h"]
+        and abs(scene["hud"]["h"] - ceiling) <= 4,
+        f"{scene['hud']['h']}px box for {scene['contentHeight']}px of content, "
+        f"ceiling {ceiling:.0f}px",
+        shot,
+    )
+    report.add(
+        "and it scrolls rather than truncating",
+        scene["scrollsY"] is True,
+        f"scrollsY={scene['scrollsY']}",
+    )
+    # The reason the ceiling was written, stated as a measurement.
+    report.add(
+        "the overlay stays on screen",
+        scene["bottom"] is not None and scene["bottom"] <= scene["window"]["h"],
+        f"bottom edge at {scene['bottom']}px of {scene['window']['h']}px",
+    )
+    report.add(
+        "the dismiss button stays inside the overlay",
+        scene["dismissInside"] is True,
+        f"dismiss at x={scene['dismiss']['x'] if scene['dismiss'] else '—'}, "
+        f"HUD spans {scene['hud']['x']}–{round(scene['hud']['x'] + scene['hud']['w'], 1)}px",
+    )
+    report.add(
+        "forty file chips still fit 300px",
+        scene["overflowsX"] is False,
+        f"overflowsX={scene['overflowsX']}",
+    )
+
+
 # ---------------------------------------------------------------------------
 
 def main() -> int:
@@ -563,6 +839,13 @@ def main() -> int:
         # pitch and stacked line numbers, and one line cannot show either.
         check_monaco_layout(long_scene, out, report, out / "dialog-200-lines.png")
         check_tool_header(page, out, report)
+        # The collapse check needs the open build to compare against, so it
+        # takes the scene rather than building a second one: two builds of
+        # "open" could differ, and then the equality would be measuring the
+        # harness instead of the HUD.
+        open_hud = check_usage_hud(page, out, report)
+        check_hud_collapse(page, out, report, open_hud)
+        check_hud_ceiling(page, out, report)
 
         print(f"\n{len(report.rows)} checks, {report.failures} failed")
         if report.failures:

@@ -641,6 +641,49 @@ on one profile — or a downgrade — do not each clear the other's preferences.
 `Files modified` is new to the HUD and earns its place: the single most useful thing to know
 immediately after an agentic turn is which files changed.
 
+### Five Sections In 300px Is Measured Now
+
+**Measured 2026-09-08**, by a `usage-hud` scene in
+[`scripts/layout_probe.py`](../../scripts/layout_probe.py) — checks [5]–[7], 34 of them. Everything above
+was asserted from the DOM, which jsdom answers honestly because collapse is *presence*; whether the
+sections fit had only ever been read by eye ([next.md § D2](../next.md) held the residue). The fixture is
+the worst case rather than a typical turn: a 1M window at 100% for the widest possible headline
+(`100% · 1.00M/1.00M`), the longest label in the rate-limit table ("7-day Sonnet limit"), three model
+rows, and a far-future `resets_at` so the window never closes and the long reset form renders every run.
+
+**The 300px is the content box, and the footprint is 302px.** `.hud` declares `width: 300px` and draws a
+`1px` border under the default `box-sizing: content-box`, so the overlay occupies 302px on the
+background. The check asserts the content box and prints the footprint beside it: asserting 300 on the
+border box would be asserting a `box-sizing: border-box` this component never declares and nothing asks
+it for. Open, the worst case measures **302×366px** with a 280px head per section, and nothing overflows
+horizontally.
+
+**Closing costs no height and hides no answer, in numbers.** Each head measures the same closed as open
+(14–15px, equal within a pixel), each body goes to exactly 0px, and each headline still has text —
+`100% · 1.00M/1.00M`, `3 models`, `87%`, `3`. The whole HUD goes from 366px to **157px** with all four
+closed, and still fits.
+
+**The name is the half that gives way, and it takes an ARN to prove it.** `.token-value` is `flex: none`
+against a `.token-model` that ellipsises, so a row too narrow for both loses model characters and never
+count characters — deleting that one declaration makes the count the clipped half, which is the mutation
+the check was verified against. What the measurement adds is *when the rule bites*: a dated id
+(`claude-opus-4-6-20260514`) fits at 300px with room, and so does the `us.anthropic.claude-opus-5-v1:0`
+form this file's own Bedrock examples use. It takes a full cross-region inference-profile ARN as the
+`turn_model_usage` key to clip anything. So the fixture carries one, as a positive control — a fixture
+whose rows all fit demonstrates nothing about an ellipsis rule — and the honest reading is that the rule
+is real but only reachable on ARN-shaped keys, which is exactly the case
+[§ Per-Model Rows Are Not Summed](#per-model-rows-are-not-summed) has to survive.
+
+**The ceiling holds, and the reason given for it is weaker than the ceiling.** Forty file chips produce
+1067px of content in an **882px** box (`max-height: 80vh` at a 1100px window) and it scrolls rather than
+truncating. But the comment in `usage-hud.js` justifies the ceiling by saying such a turn "runs off the
+bottom of the screen", and with the ceiling removed the overlay reached 1085px of that 1100px window —
+still on screen. That claim needs a shorter viewport (~900px, an ordinary 1080p laptop with browser
+chrome) before it is true. What the ceiling does unconditionally is stop an overlay becoming a page,
+which is the part worth keeping; the off-screen consequence is viewport-dependent and is recorded that
+way rather than inflated by a fixture larger than the forty files the comment itself calls an ordinary
+refactor. It is the one assertion here whose failure has not been witnessed.
+
 ### Rate Limits Is A Gauge, Not A Second Alarm
 
 **It renders at any status, including `allowed`.** The chat panel's toast is the alarm and stays silent
@@ -930,6 +973,13 @@ tier-distribution HUD.
 - Memory files, system prompt sections, and every MCP server including `aic-dc` appear in the Session section with their token cost.
 - The HUD renders the turn without waiting on an RPC. The context breakdown is a follow-up control
   request and fills in when it lands.
+- Nothing in the HUD overflows its 300px of content — no section head, no token row, no file chip — and
+  that is measured in a browser rather than asserted from a stylesheet. The 300px is the content box;
+  302px is the footprint the border makes of it.
+- A collapsed section costs no height in its head and leaves its headline figure on screen. Both halves
+  are numbers: the head measures the same closed as open, and the body measures zero.
+- Where a token row cannot fit, the model name is what gives way and the count is never clipped.
+- The HUD is bounded and scrolls. No turn, however many files it touched, makes the overlay a page.
 - The HUD sends no `get_context_usage` while the engine is known gone, and says so rather than leaving
   the last good breakdown on screen looking current.
 - "Gone" is never concluded from `connected` alone; that field is also false before the first prompt.

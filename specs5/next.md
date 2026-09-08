@@ -3,8 +3,9 @@
 **Status:** the implementation queue. Current as of **2026-09-03**, HEAD `a698fdb`. The tree is clean at
 that SHA, so every claim here is about a committed state and nothing is owed to a working copy.
 
-**One entry post-dates that survey:** § D3 closed on 2026-09-08. Everything else was last checked at the
-SHA above, and closing D3 re-checked nothing else.
+**Four entries post-date that survey, all on 2026-09-08:** § D2 and § D3 closed, § B1's layout residue
+closed with D2's harness, and § A2 (d)'s "never on a runner" was corrected from the remote. Everything
+else was last checked at the SHA above, and closing those re-checked nothing else.
 
 **This file covers the Claude engine and the app around it. It does not cover the second engine.**
 [`plan-ag/`](plan-ag/) is a separate plan of record with its own decisions (`AG-n`), risks (`AG-R-n`)
@@ -61,9 +62,17 @@ runner and **R-7's option 2 is proven on the matrix, not just inherited from `uv
 **What that run does not cover is the commit that verifies it.** It built `0e46991` at 04:21 UTC;
 `1986d45` — `--check-engine`, the `ubuntu:24.04` clean-container step, the wheel-carries-webapp assertion
 — landed at 06:40 UTC and is the one commit `master` does not have. So the published binary was built
-*before* the tripwire existed, and phase 7's stated exit criterion has still never run on a runner.
+*before* the tripwire existed, and phase 7's stated exit criterion had not yet run on a runner.
 **Nothing in this file is finished by a green matrix**, and this matrix was green without the check that
 would make it mean what § A2 (d) wants it to mean.
+
+**Phase 7 is finished, and has been since 2026-08-29** — read 2026-09-08, eleven days after the fact.
+Five further pull requests (#2–#6) merged into `master`, every one of them carrying `1986d45`, and every
+one published a three-artefact release. The verification steps live in the `build` job that the `release`
+job declares `needs:` on, so three attached artefacts *are* three green legs including the clean-container
+`--check-engine`. § A2 (d) has the evidence and the reason the paragraph above stayed stale for a
+fortnight: `gh`'s token expired, and a broken tool was allowed to stand for an unanswerable question when
+the repository is public and the release list is one unauthenticated request away.
 
 That gap closes on the next real pull request into `master` and by no other route: **manual runs are
 declined by decision** (2026-08-28), and `workflow_dispatch` has been removed from the workflow so the
@@ -168,6 +177,14 @@ so what the browser bought was not a pile of findings but a *measurement* of thr
 only ever been read by eye. The remaining queue is C9 (waiting on an event), D4, and § E's declined —
 plus [`plan-ag/README.md`](plan-ag/README.md), which needs a machine that can run `agy`.
 
+**And the residue it left closed the same week (2026-09-08, later).** D2's own last clause said B1's
+question — five HUD sections and their heads in 300px — was "now a function rather than a project", and it
+was: a third scene, 34 more checks, 53 in total. The prediction held, which is the useful part of it — the
+second and third scenes cost a fraction of the first, so the launch cost D2 waited on since phase 3 was
+almost all fixed cost. Two findings came back, and one of them goes the *unwelcome* way: a claim in a
+source comment turned out to be weaker than the ceiling it justifies (§ D2 below, and
+[`5-webapp/viewers-hud.md`](5-webapp/viewers-hud.md) § *Five Sections In 300px Is Measured Now*).
+
 **§ C3 closed 2026-08-28**, and with it § C: everything left in this file is § D's verification debt or
 § E's declined. The convergence went the way the item guessed, onto the client-side rule, and the item
 turned out to be **three deletions rather than one** — the server-side `relPath` enrichment it named, plus
@@ -198,14 +215,19 @@ the immediate exit, because `add_signal_handler` is not available there to run a
 
 ## A. The two phases the plan has not shipped
 
+**Both have, now.** A1 closed 2026-08-28 and A2's last clause closed 2026-09-08; the section is kept for
+the reasoning under it, and the heading is left standing rather than rewritten because what it named was
+true for the fortnight it took.
+
 **A1 — Phase 8, index freshness after `Bash`.** ✅ *Built 2026-08-28 — leaves this queue.* Above for
 what shipped and what was accepted; [`plan/decisions.md#cc-18`](plan/decisions.md) holds the reasoning
 and the fifth option that closed it. The work-log's § *Landed since* carries the record.
 
-**A2 — Phase 7, packaging and the release path.** *(a)–(d) all landed 2026-08-27, and (a)–(c) are now
-confirmed on a runner: a green three-platform build and a published release, read from the Actions tab
-2026-08-28. What remains is (d) alone — the verification steps postdate the run that would have exercised
-them, and only the next PR into `master` can close that.*
+**A2 — Phase 7, packaging and the release path.** ✅ *(a)–(d) all landed 2026-08-27 and all four are now
+confirmed on a runner — **the whole item leaves this queue** (closed 2026-09-08).* (a)–(c) had a green
+three-platform build and a published release from 2026-08-28; (d) was the last thing owed, and five more
+merges have since carried it. Six releases exist, one per pull request #1–#6, each with all three
+artefacts attached — see (d) for why that is proof rather than circumstance.
 
 **(a) The build command described a deleted engine.** ✅ *Fixed.* `.github/workflows/release.yml` predated
 the conversion, and its PyInstaller step named, as things to bundle, packages phase 3 removed from
@@ -310,8 +332,8 @@ comment were all corrected:
 Users who want their own CLI keep `engine.json`'s `cli_path`, which bypasses discovery entirely
 (`claude_code/health.py:259`).
 
-**(d) The exit criterion is a fresh machine, not a green build.** ✅ *Built 2026-08-27; verified locally,
-not yet on a runner.* Phase 7's own wording: "a fresh machine can install and run without a manual
+**(d) The exit criterion is a fresh machine, not a green build.** ✅ *Built 2026-08-27; **confirmed on a
+runner 2026-09-08**, five times over, after a fortnight of reading as owed.* Phase 7's own wording: "a fresh machine can install and run without a manual
 `npm i -g @anthropic-ai/claude-code`". The build-time half was the archive assertion and `--version`; the
 runtime half is now `aic-dc --check-engine`, which resolves the binary the SDK would spawn, runs it, and
 exits 1 when nothing resolves or 2 when something resolved and would not run. The Linux leg runs it inside
@@ -330,12 +352,29 @@ the wheel now carries `webapp/dist` at `aic_dc/webapp_dist` — the third entry 
 priority list, which until now had no producer. The include is conditional, because the declarative form
 fails a dev checkout that has not run Vite; CI asserts on the built wheel instead of trusting step order.
 
-**What is still owed here** is a run on a runner — and as of 2026-08-28 that is the *only* thing owed in
-phase 7, because (a)–(c) have one. The three verification steps were committed after the green run, so
-they have executed locally and nowhere else. They will run on the next pull request merged into `master`
-and, by decision, on no earlier occasion; a manual dispatch is not available and is not wanted (§ E).
-Two platforms stay weaker even then: Windows and macOS get the resolve-and-run check but no
-clean-environment guarantee, because a Linux container cannot speak for them.
+~~**What is still owed here** is a run on a runner.~~ **It has had five, and this paragraph was stale for
+eleven days** (corrected 2026-09-08). The steps were committed as `1986d45` on 2026-08-27, after the run
+that published the first release — that much was true. Since then five more pull requests have merged into
+`master` (#2 `f9d6c5e` through #6 `ab7475c`), `1986d45` is an ancestor of every one of them, and each
+published a release with all three artefacts attached: `2026.08.29-12.26-f9d6c5ef` onward, the newest
+`2026.09.06-05.37-ab7475c6` at 248.2 / 223.7 / 236.9 MB. **A release is proof and not circumstance**
+because the verification steps live in the `build` job and `release` declares `needs: build` — three
+attached artefacts mean three green matrix legs, so the archive assertion, `--version`, `--check-engine`
+and the fresh-`ubuntu:24.04` container step all passed on a runner, on every one of those merges. The
+sanctioned substitute in § E worked exactly as designed: the next real PR carried it, and nobody had to
+spend a dispatch.
+
+**Windows and macOS stay weaker, as predicted**, and that part of the paragraph survives: they get the
+resolve-and-run check but no clean-environment guarantee, because a Linux container cannot speak for them.
+
+**How this went unnoticed is the finding, and it is § A2 (b)'s lesson from the other side.** That item's
+rule is *check the remote before writing a plan that turns on its state*; the reason it was learnt there
+is that `gh` had been authenticated the whole time while the plan reasoned from a local `git log`. Here
+`gh`'s keyring token has since gone invalid (`gh auth status`: "The token in keyring is invalid"), so the
+tool the lesson was written about is the one that no longer works — and the check was still possible,
+because the repository is public and its release list is an unauthenticated `GET` away. **One broken tool
+is not evidence that a claim is unverifiable**, which is the same shape as the lesson above and the more
+expensive half of it: a stale "owed" reads as work remaining and quietly keeps a phase open.
 
 Spec homes: [`6-deployment/packaging.md`](6-deployment/packaging.md),
 [`6-deployment/build.md`](6-deployment/build.md).
@@ -915,10 +954,13 @@ and browser both reading `status: null, terminal: false` and the LED cyan. So th
 interchangeable and **the webapp's own ⏹ is the only thing that can verify itself.**
 [`plan/README.md`](plan/README.md) open item 9, last clause.
 
-**B1's own residue is D2's, not this section's.** The HUD's collapse behaviour is asserted from the
-DOM — a collapsed section's body is absent and its headline is not — which jsdom answers honestly
-because it is presence, not layout. What jsdom cannot answer is whether five sections and their heads
-fit 300px on a real screen, which is the same distance from a pixel that § D2 already records.
+~~**B1's own residue is D2's, not this section's.**~~ **Closed 2026-09-08 with D2's harness — leaves this
+queue.** The HUD's collapse behaviour was asserted from the DOM — a collapsed section's body is absent and
+its headline is not — which jsdom answers honestly because it is presence, not layout. What jsdom could
+not answer is whether five sections and their heads fit 300px on a real screen. A `usage-hud` scene now
+measures it: 34 checks in
+[`scripts/layout_probe.py`](../scripts/layout_probe.py) [5]–[7], recorded in
+[`5-webapp/viewers-hud.md`](5-webapp/viewers-hud.md) § *Five Sections In 300px Is Measured Now*.
 
 ~~**D2 — Two rendering behaviours cannot be tested from jsdom.**~~ **Built 2026-09-08 — leaves this
 queue.** ~~The `Bash` summary's three-row clamp is layout,~~ and the permission dialog's Monaco
@@ -926,8 +968,8 @@ style-clone tests assert that the rules *arrive*, not that the editor lays out. 
 regression harness is the only thing that would catch a re-break, and it **must write files rather than
 return images inline** — raising the buffer ceiling made one inline screenshot survivable, and a ceiling
 is not a budget. [`plan/README.md`](plan/README.md) open item 6. What landed is
-`scripts/layout_probe.py` over `webapp/src/layout-harness.js`, 19 checks across all three cases; the
-recipe and the six traps it cost are in
+`scripts/layout_probe.py` over `webapp/src/layout-harness.js`, 19 checks across all three cases — 53
+after B1's residue joined it later the same day; the recipe and the eleven traps it cost are in
 [`0-overview/implementation-guide.md`](0-overview/implementation-guide.md)
 § *Measuring Layout in a Real Browser*, and the account is in the work-log's § *Landed since*.
 
@@ -948,9 +990,20 @@ against the 164px of the rail-at-300px layout it replaced. The dialog's empty ed
 [`5-webapp/permission-dialog.md`](5-webapp/permission-dialog.md)): 116px of box for a 38px diff where it
 was 520px, with five unit tests on the height writer that fail without it.
 
-**Residue, and it is not this item's.** B1's clause above — whether five HUD sections and their heads fit
-300px on a real screen — is a scene nobody has written yet; the harness is where it goes, and adding one
-is now a function rather than a project. D4 below is not a layout question and does not belong here.
+~~**Residue, and it is not this item's.**~~ **Taken 2026-09-08, later the same day, and the estimate held.**
+B1's clause above — whether five HUD sections and their heads fit 300px on a real screen — was a scene
+nobody had written; adding one was a function rather than a project, and it came to 34 checks over one
+scene and three builds of it. D4 below is not a layout question and did not belong here.
+
+**Two findings, and the second is why measuring beats asserting in both directions.** The token-row
+ellipsis rule (`.token-value { flex: none }` against a model name that clips) is real and was verified by
+mutation — but no ordinary model id is long enough to trip it at 300px, and it takes a full Bedrock
+cross-region inference-profile ARN as a `turn_model_usage` key to clip anything, so the check carries one
+as a positive control. And `usage-hud.js` justifies its `max-height: 80vh` by saying forty files "runs off
+the bottom of the screen": with the ceiling removed the overlay reached 1085px of an 1100px window and
+stayed on screen. The ceiling is right and the reason given for it needs a ~900px viewport before it is
+true. **A harness that only ever confirms comments is not reading them** — that one is now recorded as
+viewport-dependent rather than repeated.
 
 **A third case joined it on 2026-09-03, from the first live Antigravity turn.** The permission dialog
 renders roughly 570px of empty editor for a one-line diff — a +1 −0 change filling the viewport,

@@ -574,6 +574,60 @@ The classification tests work because they refuse to be read past, and that is t
 
 ### Landed since
 
+- **The HUD in 300px, measured — and phase 7 turned out to have finished eleven days ago** — 2026-09-08.
+  Closes § B1's layout residue, § D2's last clause, and § A2 (d) of [`../next.md`](../next.md). The
+  measurements are in [`../5-webapp/viewers-hud.md`](../5-webapp/viewers-hud.md) § *Five Sections In 300px
+  Is Measured Now*; the new traps are in
+  [`../0-overview/implementation-guide.md`](../0-overview/implementation-guide.md#measuring-layout-in-a-real-browser).
+
+  **D2's estimate was the thing under test as much as the HUD was.** Its closing clause said adding a
+  scene was "now a function rather than a project", and it was: one scene in `layout-harness.js`, three
+  checks in `layout_probe.py`, 34 assertions, 53 in the suite. The launch cost D2 deferred since phase 3
+  was almost entirely fixed cost, which is the argument for taking the *next* layout question to the
+  harness rather than reading it by eye one more time.
+
+  **What it measures are two sentences `usage-hud.js` states and jsdom can only half-answer.** That five
+  sections and their heads fit `width: 300px`, and that closing one "costs no height and hides no answer".
+  Collapse is presence, so jsdom was honest about the part it could see; the numbers are new. Open, the
+  worst case — a 1M window at 100% for the widest headline, the longest rate-limit label, three model rows
+  — measures 302×366px with 280px heads and no horizontal overflow. Closed, every head measures the same
+  as it did open (14–15px), every body is exactly 0px, every headline still has text, and the overlay goes
+  to 157px.
+
+  **The 300px is the content box and the check said so the hard way.** The first run failed with "302px
+  against a declared 300px": `.hud` draws a 1px border under the default `box-sizing: content-box`. The fix
+  is to assert `clientWidth` and print the footprint beside it, because asserting 300 on the border box
+  would assert a `box-sizing` the component never declared and nothing asks it for.
+
+  **Two findings, and neither is a defect.** The token-row rule — the model name ellipsises, the count is
+  `flex: none` — is real, verified by deleting the declaration and watching the count become the clipped
+  half. But no ordinary model id is long enough to reach it at 300px, and neither is
+  `us.anthropic.claude-opus-5-v1:0`; it takes a full Bedrock cross-region inference-profile ARN as a
+  `turn_model_usage` key to clip anything, so the fixture carries one as a positive control. **A fixture
+  whose rows all fit demonstrates nothing about an ellipsis rule** — the check passed clipping nothing
+  before that, which is the same failure mode the harness's own positive-control rule exists to catch, one
+  level down. And `max-height: 80vh` is justified in a comment by forty files "running off the bottom of
+  the screen": with the ceiling removed the overlay reached 1085px of an 1100px window and stayed on
+  screen. The ceiling is right — it stops an overlay becoming a page — and the reason given for it needs a
+  ~900px viewport before it is true. Recorded as viewport-dependent rather than repeated, and it is the one
+  assertion here whose failure has not been witnessed; the check's docstring says so.
+
+  **§ A2 (d) closed by reading the remote, and had been closed for eleven days.** Phase 7's exit criterion
+  — a fresh machine, checked by `--check-engine` inside a `claude`-less `ubuntu:24.04` — was committed as
+  `1986d45` *after* the run that published the first release, so `next.md` recorded it as owed. Since then
+  pull requests #2–#6 merged into `master`, `1986d45` is an ancestor of all five, and each published a
+  release with three artefacts (`2026.08.29-12.26-f9d6c5ef` … `2026.09.06-05.37-ab7475c6`). The
+  verification steps live in the `build` job that `release` declares `needs:` on, so **an attached artefact
+  is a green leg** and the criterion has been met on five real builds. § E's sanctioned substitute worked
+  as designed: the next real PR carried the unproven steps, and no dispatch was spent.
+
+  **The reason it read as owed is § A2 (b)'s lesson inverted.** That item's rule is *check the remote
+  before writing a plan that turns on its state*, learnt when `gh` was authenticated all along. `gh`'s
+  keyring token has since gone invalid, so the tool the lesson was about is the one that no longer works —
+  and the answer was still one unauthenticated `GET` away, because the repository is public. **One broken
+  tool is not evidence that a claim is unverifiable**, and a stale "owed" is the expensive direction to be
+  wrong in: it reads as work remaining and keeps a finished phase open.
+
 - **A layout probe, the empty editor it caught, and C11** — 2026-09-08. Closes § D2 and § C11 of
   [`../next.md`](../next.md). Recipe in
   [`../0-overview/implementation-guide.md`](../0-overview/implementation-guide.md#measuring-layout-in-a-real-browser);

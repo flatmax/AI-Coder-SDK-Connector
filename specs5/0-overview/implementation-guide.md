@@ -263,6 +263,23 @@ emitted by Monaco at runtime: there is no build-time CSS transform for the two m
 tall would pass "the editor is content-driven", so a 200-line diff must be *at* the ceiling and must
 scroll. Both checks run every time.
 
+**Adding a scene is a function, not a project, and the third one shows what that buys.** The usage HUD
+(2026-09-08, checks [5]–[7]) had two claims nothing could reach: that five sections and their heads fit
+300px, and that closing one costs no height. `usage-hud.js` states both and jsdom could only confirm the
+half that is presence. 34 checks now measure them, plus a 40-file positive control — see
+[`5-webapp/viewers-hud.md`](../5-webapp/viewers-hud.md) § *Five Sections In 300px Is Measured Now* for
+what they found, including one claim in a source comment that the measurement made *weaker* rather than
+confirming. That is the shape to expect: a scene is cheap enough that the reason to write one is a
+sentence in a stylesheet nobody has ever put a number to.
+
+**Mutation-test a new claim before believing the PASS.** Delete the declaration the check exists to
+protect, confirm the check fails, put it back. Two of the HUD's three claims were verified this way
+(remove `flex: none` from the token count → the count becomes the clipped half; remove `max-height` →
+the HUD grows unbounded and stops scrolling), and the third's failure has never been witnessed, which is
+recorded in the check's own docstring rather than left to be assumed. A green check that has never been
+red is a check that has not been shown to test anything — the same argument as the positive control, one
+level down.
+
 ### Traps
 
 - **Read the bound port out of Vite's log.** `strictPort: false` means the port requested is not
@@ -281,3 +298,22 @@ scroll. Both checks run every time.
   `.view-line` exists measures a pane that is about to change size.
 - **A scene's wait must reject, not resolve false.** A scene that measures something which never appeared
   returns zeros, and zeros read as a finding.
+- **Clear `localStorage` at the top of a scene that measures a persisted preference.** The HUD stores its
+  collapsed-section set; a previous build in the same page decides what the next one measures, and the
+  first symptom is a check that passes or fails depending on the order the scenes ran in.
+- **Content box or border box — decide before asserting a declared width.** `.hud` declares `width: 300px`
+  and draws a 1px border under the default `box-sizing: content-box`, so `getBoundingClientRect()` says
+  302 and the check said "302px against a declared 300px". Assert `clientWidth` against the declaration
+  and print the footprint beside it; asserting 300 on the border box asserts a `box-sizing` the component
+  never declared.
+- **A fixture whose worst row still fits proves nothing about an ellipsis rule.** Two model-id forms fit
+  the HUD's 300px with room, so the "the name gives way, not the count" check passed while clipping
+  nothing. Split it: *every* row's count is unclipped, *and* at least one row clipped its name. The second
+  half is the positive control, and finding the input that trips it (a full Bedrock inference-profile ARN)
+  is how you learn where the rule actually bites.
+- **Drive a component's own gesture, not its private timers.** The HUD auto-hides after 8s; the way to
+  hold it open for a measurement is a real `PointerEvent('pointerenter')`, which is the documented pause.
+  A scene that reached into the timer would be measuring a state no user can produce.
+- **Set the app-level context a label depends on.** File chips render `toRepoPath(...)`, so a harness that
+  never called `setRepoRoot` measured absolute paths — wider than the app ever draws, and a width no user
+  will see. Screenshots caught it; the numbers looked fine.
