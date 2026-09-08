@@ -808,6 +808,10 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
      */
     this._engineErrors = null;
     this._debugError = '';
+    // Which failure, in the same vocabulary `_errorReason` uses: the
+    // service names it, because a viewer guessing from the error string
+    // goes wrong the first time either side rewords anything.
+    this._debugErrorReason = '';
     this._debugLoading = false;
 
     this._sessionUsage = null;
@@ -966,6 +970,7 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
     // rather than carried over, on the same principle as the health pill.
     this._serverInfo = null;
     this._debugError = '';
+    this._debugErrorReason = '';
     this._hooks = [];
     if (this._isTabActive()) this._refresh();
     else this._stale = true;
@@ -1360,12 +1365,22 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
       this._engineErrors = errors;
       if (info && info.error) {
         this._debugError = String(info.error);
+        // A backend older than the reason field leaves this empty, and an
+        // unlabelled error keeps the error colour: red on a state that
+        // turned out to be ordinary is a smaller fault than grey on a
+        // real failure.
+        this._debugErrorReason = info.reason ? String(info.reason) : '';
       } else {
         this._serverInfo = info && typeof info === 'object' ? info : {};
         this._debugError = '';
+        this._debugErrorReason = '';
       }
     } catch (err) {
       this._debugError = err?.message || 'Could not read server info.';
+      // The request left and did not come back — a timeout, or a socket
+      // that dropped under it. A request failed, whatever the engine's
+      // state; this is the one case the service cannot name for us.
+      this._debugErrorReason = 'failed';
     } finally {
       this._debugLoading = false;
       this._debugUpdate();
@@ -3144,8 +3159,17 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
       return html`<p class="note">Asking the engine what it advertises…</p>`;
     }
     if (this._debugError) {
-      return html`<p class="error">
-        Server info unavailable: ${this._debugError}
+      // Grey for the pre-session state, red for a failure, and the same
+      // distinction the breakdown above already draws — the Initialize
+      // reply *is* the handshake, so having none is what a window nobody
+      // has prompted in looks like, not a fault. "unavailable" rather
+      // than the breakdown's wording because this call is not retried on
+      // a timer: it is read once per session.
+      const calm = this._debugErrorReason === 'no-engine';
+      return html`<p class=${calm ? 'note' : 'error'}>
+        ${calm
+          ? 'No initialize reply yet — the engine sends it when a session starts.'
+          : html`Server info unavailable: ${this._debugError}`}
       </p>`;
     }
     const info = this._serverInfo;
@@ -3321,8 +3345,21 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
 
   _renderFooter() {
     if (this._error) {
-      // A failed refresh with usable prior numbers: say so rather than
-      // leaving stale figures looking current.
+      // A refresh that did not land, with usable prior numbers still on
+      // screen: say so rather than leaving stale figures looking current.
+      //
+      // Two wordings, because this footer sits under numbers that are
+      // real. A session that has *ended* did not fail — the figures above
+      // it are the last true reading of a window that no longer exists,
+      // and "failed" sends the reader to look for a fault instead of
+      // telling them what they are looking at. Grey for the same reason
+      // the no-breakdown branch above uses grey.
+      if (this._errorReason === 'no-engine') {
+        return html`<p class="note">
+          No session to ask — the numbers above are the last reading of
+          the one that ended.
+        </p>`;
+      }
       return html`<p class="error">
         Last refresh failed: ${this._error}
       </p>`;

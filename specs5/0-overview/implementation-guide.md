@@ -222,3 +222,62 @@ about the probe itself, both of which would have shipped as findings:
 
 Anything a probe bounds — a top-N, a sampling, a skipped retry — gets logged as dropped. Silent
 truncation reads as "covered everything".
+
+## Measuring Layout in a Real Browser
+
+jsdom does no layout. Every UI test in the suite therefore asserts that a CSS rule *arrives*, and none of
+them can see what it lays out — which is how a permission dialog shipped with 520px of empty editor for a
+38px diff in front of 60 passing dialog tests, and why the tool-card header's grid had been read by hand at
+three widths, twice, with neither reading repeatable by anything in the suite.
+
+[`scripts/layout_probe.py`](../../scripts/layout_probe.py) closes that gap, and the shape of it is the part
+worth copying:
+
+**It is a measurement harness that writes screenshots, not a screenshot harness.** Every check asserts on
+numbers read out of a real layout engine; the PNGs beside them are evidence for whoever has to understand a
+failure, never the assertion. A picture nobody looks at is not a regression test — it is a file. This also
+avoids a golden-image maintenance burden, where every deliberate visual change is a diff to re-bless and the
+suite teaches people to re-bless without looking.
+
+**Screenshots go to files, never inline.** Raising the buffer ceiling made one inline screenshot survivable,
+and a ceiling is not a budget. Output defaults to `.aic-dc/layout-probe/`, which is gitignored.
+
+**The app declares the bounds; the probe reads them.** Where a check needs a number the CSS already knows —
+a floor, a ceiling, a rail width — it reads the custom property off the computed style instead of carrying a
+copy. A number duplicated into the harness that checks it is a number that will disagree with itself.
+
+**Components are mounted directly, on synthetic payloads.** [`webapp/src/layout-harness.js`](../../webapp/src/layout-harness.js)
+exposes `window.__layout.build(scene, opts)` and each scene returns measurements. These are layout
+questions, so a live engine would add credentials, a turn of latency and a non-deterministic payload to
+answer a question about pixels — the argument for driving the real app in the section above is about claims
+in prose and mechanisms in our own code. What is load-bearing is that the CSS, the component and the browser
+are the real ones.
+
+**Served by Vite dev, off its own bare page.** A harness pointed at `webapp/dist` reports on whatever was
+last built, and a regression harness that can pass against stale bytes is worse than none. The
+serving-mode caveat above does not bite here because every style involved is either a Lit `css` literal or
+emitted by Monaco at runtime: there is no build-time CSS transform for the two modes to disagree about.
+`webapp/layout-harness.html` is not in the shipped bundle — Vite's build input is `index.html` alone.
+
+**And it has a positive control**, per the section above: an implementation that made every editor 90px
+tall would pass "the editor is content-driven", so a 200-line diff must be *at* the ceiling and must
+scroll. Both checks run every time.
+
+### Traps
+
+- **Read the bound port out of Vite's log.** `strictPort: false` means the port requested is not
+  necessarily the port served.
+- **Keep the page's console and print it on failure.** The first real run of this probe hit a module that
+  failed to parse and reported only "the harness page never became ready" — true, useless, and a sitting's
+  worth of guessing away from the parse error Chrome had already printed. Enable both `Log.enable` and
+  `Runtime.enable`: a parse failure arrives as a Log entry, a throw during evaluation as a Runtime
+  exception. A harness that watches a page and discards what the page said is reporting an absence it
+  created.
+- **No backticks inside a Lit `css` tagged template literal**, including in comments. One backtick in a
+  comment in `permission-dialog/styles.js` terminated the literal and made the module a syntax error.
+  `node --check` on the file catches it in a second and the browser will not tell you.
+- **Wait on a *decoration*, not on a rendered line.** Monaco computes the diff asynchronously and the
+  alignment view zones it inserts are part of the content height, so a scene that measures as soon as a
+  `.view-line` exists measures a pane that is about to change size.
+- **A scene's wait must reject, not resolve false.** A scene that measures something which never appeared
+  returns zeros, and zeros read as a finding.

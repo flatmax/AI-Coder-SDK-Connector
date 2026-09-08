@@ -574,6 +574,55 @@ The classification tests work because they refuse to be read past, and that is t
 
 ### Landed since
 
+- **A layout probe, the empty editor it caught, and C11** — 2026-09-08. Closes § D2 and § C11 of
+  [`../next.md`](../next.md). Recipe in
+  [`../0-overview/implementation-guide.md`](../0-overview/implementation-guide.md#measuring-layout-in-a-real-browser);
+  the sizing rule in [`../5-webapp/permission-dialog.md`](../5-webapp/permission-dialog.md);
+  C11 in [`../5-webapp/viewers-hud.md`](../5-webapp/viewers-hud.md) § *When the breakdown fails*.
+
+  D2 had waited since phase 3 for a reason worth the launch cost, and by 2026-09-03 it held three cases —
+  the Monaco style clone, the tool-card header grid, and a permission dialog drawing ~570px of empty
+  editor for a `+1 −0` diff. `scripts/layout_probe.py` over `webapp/src/layout-harness.js` now answers all
+  three in 19 checks.
+
+  **The item asked for a screenshot harness and that framing was half wrong.** What earns a browser is
+  that it *measures*: every check asserts on numbers from a real layout engine, and the PNGs it writes
+  beside them are evidence for whoever reads a failure, never the assertion. That satisfies the item's
+  write-files-not-inline requirement as a consequence rather than as a rule, and it skips the golden-image
+  maintenance burden — a suite where every deliberate visual change is a diff to re-bless is a suite that
+  teaches people to re-bless without looking. The half the item had exactly right is the positive control,
+  and it was needed: an implementation making every editor 90px tall passes "the editor is
+  content-driven", so a 200-line diff must be at the ceiling *and* must scroll, both checked every run.
+
+  **Built before the fix, deliberately.** The first run reported 18 checks, 1 failed — "520px of box for
+  38px of content" — and `dialog-one-line.png` showed one changed line above ~490px of nothing. That
+  ordering is what makes the fix a regression test rather than an edit. The height is now a CSS `clamp()`
+  whose middle term `diff-editor.js` writes from Monaco's own `getContentHeight()`; the bounds are custom
+  properties the probe reads off the computed style, because a number copied into Python is a number that
+  will disagree with itself. Five unit tests hold the writer and fail without it; a sixth guards the
+  zero-height check and passes either way, which it says so in place.
+
+  **The 17 checks that passed on unfixed code are worth as much as the one that failed.** Two behaviours
+  that had only ever been read by eye are now measured — and the container query turned out to do more
+  than the spec recorded: 282px of summary at a 300px card against the 164px of the layout it replaced.
+
+  **Three lessons the harness charged for.** A backtick inside a Lit `css` literal — in a *comment* —
+  terminated the template and made the module a syntax error, and all the probe said was "the harness page
+  never became ready": true, useless, and a sitting away from the parse error Chrome had already printed.
+  It now keeps the page's console and prints it on any failure. `node --check` catches that class of fault
+  in a second. And a scene must wait on a diff *decoration*, not a rendered line: Monaco's alignment view
+  zones are part of the content height and arrive later.
+
+  **C11 came along in the same tab and was not a colour bug.** `get_server_info` sent no `reason`, so the
+  browser could not tell "no engine yet" from "a request failed" even in principle — the ternary would
+  have had to guess from the error string, which is exactly what the breakdown's note stopped doing five
+  days earlier. A service-side `_control_failure()` now names the reason for `get_server_info` and
+  `get_context_usage` alike, replacing two hand-written pairs. The Debug section reads *"No initialize
+  reply yet"* in grey and the footer *"No session to ask — the numbers above are the last reading of the
+  one that ended"*; an unlabelled reason keeps the error colour, since red on an ordinary state is a
+  smaller fault than grey on a real failure. **A vocabulary the viewer branches on, spelled out separately
+  at each site, grows a third spelling** — this item is what that looks like from the far end.
+
 - **Phase 3's probe ran for the first time and found three bugs** — 2026-09-02. Reasoning in
   [`../plan-ag/delivery.md`](../plan-ag/delivery.md#phase-3--the-live-run-and-the-three-bugs-it-found-2026-09-02).
 

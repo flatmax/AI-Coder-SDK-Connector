@@ -111,6 +111,32 @@ decision does not accumulate watchers.
 The initial scroll position is the first changed hunk, not the top of the file. A dialog that opens on
 line 1 of a 2 000-line file asks the user to hunt for the change they are approving.
 
+**The editor is as tall as its content, between a floor and a ceiling.** A flat height — which this was —
+drew a screenful of empty editor for a one-line change: a `+1 −0` diff filling 520px of viewport, with the
+decision buttons pushed to the bottom of the screen and nothing between them and the one line being
+approved. The ceiling (`min(52vh, 520px)`) is what a 3 000-line diff needs and is unchanged; the fault was
+using it as the height rather than as the limit.
+
+The bounds live in three CSS custom properties on `.diff-host`, not in a single declaration, because the
+middle one has a writer and the outer two have a reader:
+`diff-editor.js` writes `--diff-content-height` from Monaco's own `getContentHeight()`, and
+[`scripts/layout_probe.py`](../../scripts/layout_probe.py) reads `--diff-min-height` and
+`--diff-max-height` off the computed style rather than carrying a copy of either number in Python.
+
+Three details are load-bearing:
+
+- **The taller pane wins.** A hunk that only deletes leaves the left pane taller than the right, and the left pane is the one the user has to be able to read.
+- **Two signals, because neither covers the other's case.** A diff's alignment view zones are part of the content height and do not exist until Monaco has computed the diff (`onDidUpdateDiff`); and the right pane is editable, so a user who adds ten lines has changed the content height with no diff update in it (`onDidContentSizeChange`). A 2px threshold on the write keeps `automaticLayout` from relayouting itself in a loop.
+- **Unmeasured falls back to the floor and grows, never to the ceiling and shrinks.** The growth lands inside `SETTLING_MS`, while every decision control is still inert, so nothing the user could click has moved while it was clickable. The floor is `.body`'s own `min-height` less its padding — about six lines at Monaco's 19px pitch — so the smallest diff and the smallest body are the same size and neither forces the other. Shrinking the editor below it would only move the same empty space outside the editor's border.
+
+The height belongs to the request, not to the editor: the instance is re-targeted as the queue advances, and
+a 400-line diff followed by a one-line one must not open at the first one's height.
+
+None of this is visible to a jsdom test, which is the point — 60 passing dialog tests watched this ship. The
+unit suite owns the writer (who writes the property, from what, and when it is cleared); the clamp is a
+layout question and belongs to the probe. See
+[implementation-guide.md § Measuring Layout in a Real Browser](../0-overview/implementation-guide.md#measuring-layout-in-a-real-browser).
+
 Multi-edit calls (`MultiEdit`, or an `Edit` whose input carries several replacements) render as one diff
 per target with a count in the header — "3 changes in 2 files". Each is individually scrollable; the
 decision covers the call as a whole, because the tool call is atomic.

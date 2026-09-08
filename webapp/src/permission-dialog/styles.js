@@ -141,9 +141,37 @@ export const PERMISSION_DIALOG_STYLES = css`
     padding: 0;
   }
 
+  /* Sized to its content, between a floor and the ceiling this always
+     had. A flat height here — which is what this was — drew a screenful of
+     empty editor for a one-line change: a +1 −0 diff filling 520px of
+     viewport, seen in a browser on 2026-09-03 and invisible to 60 passing
+     dialog tests, because a fixed height is a rule that arrives correctly
+     (specs5/next.md § D2).
+
+     Three custom properties rather than one declaration, because the
+     middle one has a writer and the outer two have a reader.
+     diff-editor.js sets --diff-content-height from Monaco's own content
+     height, and scripts/layout_probe.py asserts against the bounds rather
+     than carrying a copy of them in Python — a number duplicated into the
+     harness that checks it is a number that will disagree with itself.
+
+     The floor is .body's own min-height less its padding, so the
+     smallest diff and the smallest body are the same size and neither
+     forces the other; it comes to about six lines at Monaco's 19px pitch.
+     Anything shorter reads as a letterbox onto a change rather than as the
+     diff this body exists to show. Unmeasured falls back to the floor and
+     grows, not to the ceiling and shrinks: the growth lands inside
+     SETTLING_MS, while every decision control is still inert, so nothing
+     the user could click has moved while it was clickable. */
   .diff-host {
+    --diff-min-height: 116px;
+    --diff-max-height: min(52vh, 520px);
     width: 100%;
-    height: min(52vh, 520px);
+    height: clamp(
+      var(--diff-min-height),
+      var(--diff-content-height, var(--diff-min-height)),
+      var(--diff-max-height)
+    );
   }
 
   .new-file-pane,

@@ -161,6 +161,13 @@ the newest one — a permission dialog with 570px of empty editor for a one-line
 single frame with no resizing, which is the cheapest a screenshot harness will ever be to justify.
 C11 is a small companion to it. C9 still waits on an event.
 
+**Both landed 2026-09-08, and the pairing paid for itself.** The harness was built *before* the dialog was
+fixed, and the run that witnessed the 520px editor is what makes the fix a regression test rather than an
+edit. It also settled the argument in D's favour a third time: 17 of the 19 checks passed on unfixed code,
+so what the browser bought was not a pile of findings but a *measurement* of three behaviours that had
+only ever been read by eye. The remaining queue is C9 (waiting on an event), D4, and § E's declined —
+plus [`plan-ag/README.md`](plan-ag/README.md), which needs a machine that can run `agy`.
+
 **§ C3 closed 2026-08-28**, and with it § C: everything left in this file is § D's verification debt or
 § E's declined. The convergence went the way the item guessed, onto the client-side rule, and the item
 turned out to be **three deletions rather than one** — the server-side `relPath` enrichment it named, plus
@@ -778,13 +785,23 @@ it before planning a sitting rather than only when it is cited.
 *(It refilled and emptied again: a stale-reference-twin entry noticed 2026-08-28 was cleared 2026-08-29,
 and clearing it produced § B6. The advice above earned itself in one day.)*
 
-**C11 — The Debug section still paints "no engine yet" red.** ✳ *Open, small.* The Usage and Session
-sections were corrected on 2026-09-03 — a `no-engine` headline renders in secondary grey, because a
-window nobody has prompted in yet is not a fault — but the Debug section's *"Server info unavailable"*
-and *"Last refresh failed"* still use the error colour for the same pre-session state, and *"failed"*
-is the wrong word for a call that never had an engine to reach. Defensible where it sits, since Debug
-is where raw facts belong; recorded because the two halves of one tab now disagree about what red
-means. Reasoning in [`5-webapp/viewers-hud.md`](5-webapp/viewers-hud.md) § *When the breakdown fails*.
+~~**C11 — The Debug section still paints "no engine yet" red.**~~ **Built 2026-09-08 — leaves this
+queue.** The Usage and Session sections were corrected on 2026-09-03 — a `no-engine` headline renders in
+secondary grey, because a window nobody has prompted in yet is not a fault — but the Debug section's
+*"Server info unavailable"* and *"Last refresh failed"* still used the error colour for the same
+pre-session state, and *"failed"* is the wrong word for a call that never had an engine to reach.
+Defensible where it sat, since Debug is where raw facts belong; recorded because the two halves of one
+tab disagreed about what red meant. Reasoning in
+[`5-webapp/viewers-hud.md`](5-webapp/viewers-hud.md) § *When the breakdown fails*.
+
+**It was not a colour bug, which is why it was worth taking rather than patching.** `get_server_info`
+sent no `reason` at all, so the browser could not tell "no engine yet" from "a request failed" *even in
+principle* — a `class=${...}` ternary would have had to guess from the error string, which is what the
+breakdown's own note stopped doing on 2026-09-03. The fix is a service-side `_control_failure()` naming
+the reason for `get_server_info` and `get_context_usage` alike, replacing the two hand-written pairs:
+**a vocabulary the viewer branches on, spelled out separately at each site, is a vocabulary that grows a
+third spelling** — and this item is what that looks like from the far end, five days after the first
+spelling was corrected alone.
 
 **C10 — `/usage` opened onto a tab that did not hold what its reply named.** ✅ *Built 2026-08-29 —
 leaves this queue.* Reported by a user against the CLI's own `/usage` panel: "I don't see that level of
@@ -903,12 +920,37 @@ DOM — a collapsed section's body is absent and its headline is not — which j
 because it is presence, not layout. What jsdom cannot answer is whether five sections and their heads
 fit 300px on a real screen, which is the same distance from a pixel that § D2 already records.
 
-**D2 — Two rendering behaviours cannot be tested from jsdom.** ~~The `Bash` summary's three-row clamp is
-layout,~~ and the permission dialog's Monaco style-clone tests assert that the rules *arrive*, not that
-the editor lays out. A screenshot-based regression harness is the only thing that would catch a
-re-break, and it **must write files rather than return images inline** — raising the buffer ceiling
-made one inline screenshot survivable, and a ceiling is not a budget.
-[`plan/README.md`](plan/README.md) open item 6.
+~~**D2 — Two rendering behaviours cannot be tested from jsdom.**~~ **Built 2026-09-08 — leaves this
+queue.** ~~The `Bash` summary's three-row clamp is layout,~~ and the permission dialog's Monaco
+style-clone tests assert that the rules *arrive*, not that the editor lays out. A screenshot-based
+regression harness is the only thing that would catch a re-break, and it **must write files rather than
+return images inline** — raising the buffer ceiling made one inline screenshot survivable, and a ceiling
+is not a budget. [`plan/README.md`](plan/README.md) open item 6. What landed is
+`scripts/layout_probe.py` over `webapp/src/layout-harness.js`, 19 checks across all three cases; the
+recipe and the six traps it cost are in
+[`0-overview/implementation-guide.md`](0-overview/implementation-guide.md)
+§ *Measuring Layout in a Real Browser*, and the account is in the work-log's § *Landed since*.
+
+**The item's framing was half wrong, and the harness is what showed it.** It asked for a *screenshot*
+harness; what earns a browser is that it **measures**. Every check asserts on numbers read out of a real
+layout engine and the PNGs are evidence for a human reading a failure, never the assertion — which
+satisfies the write-files-not-inline requirement as a consequence rather than as a rule, and skips the
+golden-image maintenance burden a screenshot-comparison harness would have brought. The one requirement
+the item was exactly right about is the positive control, and it was needed: an implementation making
+every editor 90px tall passes "the editor is content-driven", so a 200-line diff must be at the ceiling
+and must scroll.
+
+**Its first run found the defect it was built for and 17 things that were already right**, which is worth
+as much: the Monaco style clone and the tool-card grid are now *measured* correct at 520, 400 and 300px,
+and the container query is doing more than the spec recorded — the summary gets 282px at a 300px card
+against the 164px of the rail-at-300px layout it replaced. The dialog's empty editor is fixed under it
+(§ *`write` — the diff is the feature* in
+[`5-webapp/permission-dialog.md`](5-webapp/permission-dialog.md)): 116px of box for a 38px diff where it
+was 520px, with five unit tests on the height writer that fail without it.
+
+**Residue, and it is not this item's.** B1's clause above — whether five HUD sections and their heads fit
+300px on a real screen — is a scene nobody has written yet; the harness is where it goes, and adding one
+is now a function rather than a project. D4 below is not a layout question and does not belong here.
 
 **A third case joined it on 2026-09-03, from the first live Antigravity turn.** The permission dialog
 renders roughly 570px of empty editor for a one-line diff — a +1 −0 change filling the viewport,

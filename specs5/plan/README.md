@@ -263,12 +263,18 @@ interlude that found it; this list exists so that none of them has to be redisco
    deferred. The multi-root concern it raised is unaffected either way; the absolute path is one hover
    away, and a multi-root future changes what the *root* is, not how a path is named against it.
    [`../5-webapp/shell.md`](../5-webapp/shell.md) § *The Same Rule Names Files On Screen*.
-6. **Two rendering behaviours have no test and cannot get one from jsdom.** The `Bash` summary's
-   three-row clamp is layout, and jsdom has none; the dialog's Monaco style-clone tests assert that the
-   rules *arrive*, not that the editor lays out. Both were verified by driving a live tab and probing the
-   DOM. A screenshot-based regression harness is the only thing that would catch a re-break, and it should
-   still write files rather than return images inline — item 1 raised the ceiling that made one inline
-   screenshot fatal, but a harness returns many per run and a ceiling is not a budget.
+6. ~~**Two rendering behaviours have no test and cannot get one from jsdom.**~~ **Built 2026-09-08.** The
+   `Bash` summary's three-row clamp is layout, and jsdom has none; the dialog's Monaco style-clone tests
+   assert that the rules *arrive*, not that the editor lays out. Both were verified by driving a live tab
+   and probing the DOM. A screenshot-based regression harness is the only thing that would catch a
+   re-break, and it should still write files rather than return images inline — item 1 raised the ceiling
+   that made one inline screenshot fatal, but a harness returns many per run and a ceiling is not a budget.
+   What landed is `scripts/layout_probe.py`, which **measures** and writes its PNGs as evidence rather than
+   comparing images; its first run caught a third case the item never named (a permission dialog drawing
+   520px of editor for a 38px diff) and confirmed the two above are correct at three card widths. Recipe in
+   [`../0-overview/implementation-guide.md`](../0-overview/implementation-guide.md#measuring-layout-in-a-real-browser),
+   account in the work-log's § *Landed since*. Residue: the HUD-at-300px question in `next.md` § B1 is a
+   scene nobody has written yet, and writing one is now a function rather than a project.
 7. **The permission dialog re-clones the whole document head per editor creation.** The same cost the
    diff viewer has always paid, for the same reason (Monaco's constructor adds rules synchronously), and a
    request builds at most one editor — so it is unmeasured rather than known-cheap. Incremental cloning is

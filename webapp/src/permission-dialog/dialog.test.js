@@ -28,7 +28,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 // state has to come from `vi.hoisted` to be in scope for both. Same
 // approach as diff-viewer/test-helpers.js.
 const { monacoState, makeModel, makeEditor } = vi.hoisted(() => {
-  const state = { editors: [], models: [], languages: new Set() };
+  // `contentHeight` is what the *next* editor will report. Zero by default,
+  // which is Monaco's own pre-measurement state and the one the height
+  // writer is required to ignore; a test that wants the writer to run sets
+  // it before the request arrives.
+  const state = {
+    editors: [], models: [], languages: new Set(), contentHeight: 0,
+  };
 
   function _makeModel(content, language) {
     const model = {
@@ -52,6 +58,8 @@ const { monacoState, makeModel, makeEditor } = vi.hoisted(() => {
       _revealed: [],
       _contentListeners: [],
       _diffListeners: [],
+      _sizeListeners: [],
+      _contentHeight: state.contentHeight,
       _lineChanges: [],
       setModel: (pair) => { models = pair; },
       getModel: () => models,
@@ -60,11 +68,22 @@ const { monacoState, makeModel, makeEditor } = vi.hoisted(() => {
           editor._contentListeners.push(cb);
           return { dispose: () => {} };
         },
+        onDidContentSizeChange: (cb) => {
+          editor._sizeListeners.push(cb);
+          return { dispose: () => { editor._sizeListeners = []; } };
+        },
+        getContentHeight: () => editor._contentHeight,
         updateOptions: (opts) => { Object.assign(editor._options, opts); },
         revealLineInCenter: (line) => { editor._revealed.push(line); },
         focus: () => {},
         getValue: () => models?.modified?._content ?? '',
         getModel: () => models?.modified ?? null,
+      }),
+      // The left pane, which real Monaco also has. It matters to the height
+      // writer and nowhere else: a deletion-only hunk makes the original
+      // pane the taller of the two.
+      getOriginalEditor: () => ({
+        getContentHeight: () => editor._originalContentHeight ?? 0,
       }),
       onDidUpdateDiff: (cb) => {
         editor._diffListeners.push(cb);
@@ -82,6 +101,12 @@ const { monacoState, makeModel, makeEditor } = vi.hoisted(() => {
       _simulateDiffComputed(lineChanges) {
         editor._lineChanges = lineChanges;
         for (const cb of [...editor._diffListeners]) cb();
+      },
+      /** Pretend the content grew or shrank — a wrap, an edit, a view zone. */
+      _simulateContentHeight(height, { original } = {}) {
+        editor._contentHeight = height;
+        if (original != null) editor._originalContentHeight = original;
+        for (const cb of [...editor._sizeListeners]) cb();
       },
     };
     state.editors.push(editor);
@@ -398,6 +423,7 @@ beforeEach(() => {
   document.title = ORIGINAL_TITLE;
   monacoState.editors = [];
   monacoState.models = [];
+  monacoState.contentHeight = 0;
 });
 
 afterEach(() => {
@@ -1662,6 +1688,114 @@ describe('an edit', () => {
     // A dialog that opened on line 1 of a 2,000-line file would ask the
     // user to hunt for the change they are approving.
     expect(monacoState.editors[0]._revealed).toEqual([42]);
+  });
+
+  // The editor's height. jsdom does no layout, so what these assert is the
+  // one thing that is mechanism rather than layout: who writes
+  // `--diff-content-height`, from what, and when it is cleared. The
+  // clamping itself is a layout question and belongs to
+  // scripts/layout_probe.py, which is what caught this in the first place —
+  // a flat height drew 520px of editor for a 38px diff in front of every
+  // other test in this file (specs5/next.md § D2).
+  describe('its height', () => {
+    /** The custom property as the container actually carries it. */
+    function declaredHeight(el) {
+      return el.shadowRoot.querySelector('.diff-host')
+        .style.getPropertyValue('--diff-content-height');
+    }
+
+    it('is published from the content height, not assumed', async () => {
+      monacoState.contentHeight = 38;
+      publishRpc();
+      const el = mount();
+      await settle(el);
+      await ask(el, writePayload());
+
+      expect(declaredHeight(el)).toBe('38px');
+    });
+
+    it('follows the taller pane, so a deletion is not cut off', async () => {
+      publishRpc();
+      const el = mount();
+      await settle(el);
+      await ask(el, writePayload());
+
+      // A hunk that only deletes leaves the left pane taller than the
+      // right, and it is the left pane the user has to be able to read.
+      monacoState.editors[0]._simulateContentHeight(38, { original: 209 });
+      expect(declaredHeight(el)).toBe('209px');
+    });
+
+    it('grows when the content does', async () => {
+      monacoState.contentHeight = 38;
+      publishRpc();
+      const el = mount();
+      await settle(el);
+      await ask(el, writePayload());
+
+      // Monaco's alignment view zones arrive after the diff is computed,
+      // and a user editing the right pane adds lines with no diff update
+      // in it at all. Either way the box has to follow.
+      monacoState.editors[0]._simulateContentHeight(285);
+      expect(declaredHeight(el)).toBe('285px');
+    });
+
+    it('ignores a zero, which is Monaco not having measured yet', async () => {
+      publishRpc();
+      const el = mount();
+      await settle(el);
+      await ask(el, writePayload());
+
+      // Writing the zero would collapse the pane to its floor for a frame
+      // and gain nothing; the stylesheet's fallback already says floor.
+      //
+      // Alone among the six here, this one also passes with the height
+      // writer deleted outright — nothing writing the property satisfies
+      // it too. It guards the guard, against a later edit that drops the
+      // zero check, and not the behaviour the other five witness.
+      expect(declaredHeight(el)).toBe('');
+    });
+
+    it('does not thrash on a sub-pixel relayout', async () => {
+      monacoState.contentHeight = 200;
+      publishRpc();
+      const el = mount();
+      await settle(el);
+      await ask(el, writePayload());
+
+      // `automaticLayout` relayouts on the height this writes, which
+      // reports a content height again: a writer with no threshold is a
+      // loop, so a 1px difference must not be published.
+      monacoState.editors[0]._simulateContentHeight(201);
+      expect(declaredHeight(el)).toBe('200px');
+      monacoState.editors[0]._simulateContentHeight(260);
+      expect(declaredHeight(el)).toBe('260px');
+    });
+
+    it('belongs to the request, not to the editor', async () => {
+      monacoState.contentHeight = 3800;
+      publishRpc();
+      const el = mount();
+      await settle(el);
+      await ask(el, writePayload());
+      expect(declaredHeight(el)).toBe('3800px');
+
+      // The same editor instance is re-targeted at the next request — the
+      // queue can hold a second write behind this one. A 400-line diff
+      // followed by a one-line one must not open at the first one's height.
+      broadcast(writePayload({ permission_id: 'perm_write_2' }));
+      await settle(el);
+      monacoState.editors[0]._contentHeight = 0;
+      resolveBroadcast({
+        permission_id: 'perm_write', action: 'allow', resolved_by: 'c2',
+      });
+      await settle(el);
+      await tick(el, SETTLING_MS + 40);
+      expect(el.current?.permission_id).toBe('perm_write_2');
+
+      expect(monacoState.editors).toHaveLength(1);
+      expect(declaredHeight(el)).toBe('');
+    });
   });
 
   it('shows the diff stats alongside it', async () => {

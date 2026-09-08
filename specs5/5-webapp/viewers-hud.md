@@ -532,6 +532,28 @@ than fix it. This is the same family as [`chat.md` § *Engine Indicator and Noti
 (AG-9): a surface that is unbuilt or not yet started must say so in its own register, not borrow the one
 that means broken.
 
+**The same rule, at the two other places on this tab that report an engine's absence.** Fixed 2026-09-08;
+the breakdown headline above had been corrected five days earlier and these two were left saying the same
+wrong thing in the same colour, which is what a rule stated at one site rather than as a rule looks like.
+
+- **The Debug section's Initialize reply.** `get_server_info` sent no `reason` at all, so the browser could
+  not tell the two apart even in principle and painted every failure red. The fix is on the service:
+  `_control_failure()` now names the reason for `get_server_info` and `get_context_usage` alike, one
+  function rather than the two hand-written pairs it replaces — a vocabulary the viewer branches on,
+  spelled out separately at each site, is a vocabulary that grows a third spelling. `no-engine` reads
+  *"No initialize reply yet — the engine sends it when a session starts"* in grey. The reply **is** the
+  handshake, so having none is precisely what a window nobody has prompted in looks like.
+- **The footer under numbers that are real.** With a breakdown already on screen and the session then
+  ending, *"Last refresh failed"* blamed a refresh for a session's ordinary end and sent the reader
+  looking for a fault. `no-engine` now reads *"No session to ask — the numbers above are the last reading
+  of the one that ended"*, which is what the reader is actually looking at. Still stated, not silent:
+  stale figures must never look current.
+
+**An unlabelled error keeps the error colour** at both sites, and at the headline above. Red on a state
+that turns out to be ordinary is a smaller fault than grey on a real failure, so the fallback keeps the
+louder of the two — the same reason the absent-`reason` row of the table above gets the advice that holds
+either way.
+
 **Deadlines are laid out so the innermost one fires first.** The engine bounds a control request at
 60s; the transport waits 75s; this tab's own deadline is 90s. Each layer knows more about the call than
 the layer outside it, so the useful error is the innermost one, and a layer that fires first steals the

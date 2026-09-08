@@ -304,6 +304,27 @@ def _log_control_failure(exc: Exception, what: str) -> None:
     logger.exception("%s failed", what)
 
 
+def _control_failure(exc: Exception, what: str, prefix: str) -> dict[str, Any]:
+    """A failed control request, named in the vocabulary the viewer reads.
+
+    ``reason`` is the load-bearing key. *There is no engine yet* and *a
+    request to a live engine failed* arrive as one error string, look
+    identical to a browser holding it, and have opposite answers — wait, or
+    try again. ``get_context_usage`` learned to say which; ``get_server_info``
+    did not, so the Debug tab painted a window nobody had prompted in yet in
+    the error colour and told its reader a call had *failed* when no call had
+    ever been made (specs5/next.md § C11).
+
+    One function rather than the two hand-written pairs it replaces: a
+    vocabulary the viewer branches on, spelled out separately at each site,
+    is a vocabulary that grows a third spelling.
+    """
+    if isinstance(exc, EngineNotReadyError | SessionLostError):
+        return {"error": str(exc), "reason": "no-engine"}
+    _log_control_failure(exc, what)
+    return {"error": f"{prefix}: {exc}", "reason": "failed"}
+
+
 def _review_file_paths(changed_files: Any) -> list[str]:
     """Just the paths out of a review's changed-file dicts.
 
@@ -1917,14 +1938,10 @@ class ClaudeCodeService:
         """
         try:
             usage = await self.session.get_context_usage()
-        except (EngineNotReadyError, SessionLostError) as exc:
-            return {"error": str(exc), "reason": "no-engine"}
         except Exception as exc:
-            _log_control_failure(exc, "get_context_usage")
-            return {
-                "error": f"Could not read context usage: {exc}",
-                "reason": "failed",
-            }
+            return _control_failure(
+                exc, "get_context_usage", "Could not read context usage"
+            )
         # The memory-file list crosses the wire exactly as the engine
         # reported it, absolute paths and all. This used to enrich each
         # entry with a ``relPath`` — the repo-relative name, added only
@@ -2003,11 +2020,8 @@ class ClaudeCodeService:
         """Advertised commands, tools, and output styles from initialize."""
         try:
             info = await self.session.get_server_info()
-        except (EngineNotReadyError, SessionLostError) as exc:
-            return {"error": str(exc)}
         except Exception as exc:
-            _log_control_failure(exc, "get_server_info")
-            return {"error": f"Could not read server info: {exc}"}
+            return _control_failure(exc, "get_server_info", "Could not read server info")
         return info or {}
 
     async def list_commands(self) -> dict[str, Any]:

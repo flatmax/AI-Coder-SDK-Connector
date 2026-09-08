@@ -77,6 +77,12 @@ export function syncDiffEditor(host, payload) {
   }
 
   const previous = host._diffEditor.getModel?.();
+  // The height belongs to the request, not to the editor: a 400-line diff
+  // followed by a one-line one must not open at the first one's height.
+  // Clearing it falls back to the stylesheet's floor, which is where the
+  // measurement below grows from.
+  host._diffContentHeight = null;
+  container.style.removeProperty('--diff-content-height');
   try {
     host._diffEditor.setModel({ original, modified });
   } catch (err) {
@@ -92,8 +98,56 @@ export function syncDiffEditor(host, payload) {
 
   host._diffKey = key;
   attachEditListener(host);
+  trackContentHeight(host);
   applyReadOnly(host);
   revealFirstChange(host);
+}
+
+/**
+ * Keep the container's height on the editor's content height.
+ *
+ * The stylesheet clamps it between `--diff-min-height` and
+ * `--diff-max-height`; all this writes is the middle term. What it buys is
+ * the whole of § D2's newest case — a one-line change no longer opens 520px
+ * of empty editor — and the clamp is what keeps a 3 000-line one from
+ * opening a page-tall dialog instead.
+ *
+ * Two signals, because neither covers the other's case. A diff's alignment
+ * view zones are part of the content height and do not exist until Monaco
+ * has computed the diff, which is `onDidUpdateDiff`; and the right pane is
+ * editable, so a user who adds ten lines has changed the content height
+ * with no diff update in it, which is `onDidContentSizeChange`. Both are
+ * cheap and idempotent, so subscribing to both costs a comparison.
+ */
+function trackContentHeight(host) {
+  const editor = host._diffEditor;
+  const container = host.shadowRoot?.querySelector('.diff-host');
+  if (!editor || !container) return;
+
+  const apply = () => {
+    const height = Math.max(
+      editor.getModifiedEditor?.()?.getContentHeight?.() ?? 0,
+      editor.getOriginalEditor?.()?.getContentHeight?.() ?? 0,
+    );
+    // A zero means Monaco has not measured yet. Writing it would collapse
+    // the pane to the floor for a frame and gain nothing.
+    if (!height) return;
+    // `automaticLayout` relayouts on the height this sets, which reports a
+    // content height again — so a writer with no threshold is a loop.
+    if (host._diffContentHeight != null
+        && Math.abs(host._diffContentHeight - height) <= 2) return;
+    host._diffContentHeight = height;
+    container.style.setProperty('--diff-content-height', `${height}px`);
+  };
+
+  apply();
+  for (const pane of [editor.getOriginalEditor?.(), editor.getModifiedEditor?.()]) {
+    if (typeof pane?.onDidContentSizeChange !== 'function') continue;
+    host._diffSubscriptions.push(pane.onDidContentSizeChange(apply));
+  }
+  if (typeof editor.onDidUpdateDiff === 'function') {
+    host._diffSubscriptions.push(editor.onDidUpdateDiff(apply));
+  }
 }
 
 /**
@@ -185,6 +239,7 @@ export function disposeDiffEditor(host) {
   try { models?.modified?.dispose(); } catch (_) { /* already gone */ }
   host._diffEditor = null;
   host._diffKey = null;
+  host._diffContentHeight = null;
 }
 
 /** Re-apply the edit-mode flag after the user toggles it. */
