@@ -817,6 +817,59 @@ A `$0.00` is still never printed for a turn whose cost is unknown
 naming the reason, not labelling a billing mode. An unpriced turn's spend is not lost: the baseline is
 deliberately not advanced, so it lands on the next turn the engine can price.
 
+#### Three Of The Four Rows Are Measured Now
+
+**Verified live 2026-09-09** — [`scripts/turn_cost_probe.py`](../../scripts/turn_cost_probe.py), 19
+checks in one session against a real CLI, every figure read back out of the DOM. This closes
+[`../next.md`](../next.md) § D4, whose complaint was that "nothing extra" and "cost unknown" held in 60
+unit tests and **no ordinary turn causes either**.
+
+| Turn | What provoked it | Basis | Chip |
+|---|---|---|---|
+| A | an ordinary prompt (the positive control) | `measured` `0.0623465` | `$0.0623` |
+| B | `/help` — forwarded, 4ms, **0 engine turns** | `measured` **`0`** | `nothing extra` |
+| C | `/help` again | `measured` `0` | `nothing extra` |
+| D | a second ordinary prompt | `measured` `0.0126215` | `$0.0126` |
+| E | `SIGKILL` on the CLI child, 6s into a streaming turn | `unpriced` `None` | `cost unknown` |
+
+**Phase 6's two-turns-minimum rule is what the table is arranged around.** Turn A, being the session's
+first, reported `turn_cost_usd == total_cost_usd == 0.0623465` — it *cannot* distinguish a difference
+from a running total, so on its own it proves nothing about the arithmetic. Turn D is the one that does:
+`0.0126215` against a session total that went `0.0623465 → 0.074968`, which is the delta exactly. The
+chip showed `$0.0126`, not `$0.0750`.
+
+**A forwarded slash command is where a real measured zero comes from.** `/help` reaches the CLI, returns
+in 4ms with `num_turns: 0`, and moves nothing — so `total - baseline` is a genuine `0.0` rather than a
+missing number, which is the distinction the `measured` row's "**zero is an answer**" claims and had
+never been watched making. The chip read `nothing extra` with no `turn-cost-unknown` class and the
+tooltip *"The session's cost estimate did not move for this turn — it was served entirely from what had
+already been paid for."* Twice, so it is not a once-per-session artefact. The session's own cumulative
+total was byte-identical before and after, and `session_models` still carried the model while
+`turn_model_usage` was empty — a zero-cost turn adds no model row and erases none.
+
+**A prediction this spec got wrong, kept because the correction is the useful part.** The probe was first
+written expecting `/help` to produce `reset` — that a forwarded command returns `total_cost_usd: 0`,
+which is `total < baseline`, which re-anchors the ledger and over-reports the *next* turn. The evidence
+was a `scripts/engine_smoke.py` run whose `/help` reported a zero total. That reading was wrong: in the
+smoke run `/help` was the session's only turn, so the total was zero **because nothing had been spent**,
+not because the command zeroes it. Measured in a session that had already spent, the same command
+reports `0.062346` before and after. *A zero read from a session with one turn in it is not evidence
+about what that turn did.*
+
+**`reset` is unreachable from the app, and is skipped out loud rather than left as a silent gap.** The
+CLI restarts its ledger on `/clear`, and `SLASH_ROUTES` routes `/clear` to a new AIC⚡DC session before
+the CLI ever sees it; a resume reconnects and calls `CostLedger.reset()`, so the next turn is measured
+against no baseline and comes back `measured`. The renderer stays regardless, because the CLI's own
+schema warns the total can restart — its coverage is the unit tests, and no browser can add to it.
+
+**"Cost unknown" was earned the honest way**: the CLI child was found by a `/proc` walk and `SIGKILL`ed
+six seconds into a streaming turn, so the turn failed *late* — the case the tooltip is written for. The
+footer that arrived is one AIC⚡DC wrote (`_fail_turn`: `basis='unpriced'`, `turn=None`, `total=None`,
+`is_error=True`), and the chip read `cost unknown` with *"…what it spent is not lost — it lands on the
+next turn the engine prices. A turn that fails late has usually spent real money."* The check that
+matters is the one asserting it is **not** `nothing extra`: both are cheap-looking chips, and the
+difference between them is the whole reason `turn_cost_basis` exists.
+
 Cost is formatted in the CLI's own format — four decimals up to fifty cents, two above — so a figure
 here reads like the one the terminal shows. Two decimals throughout would render most per-turn costs as
 `$0.00`.

@@ -574,6 +574,79 @@ The classification tests work because they refuse to be read past, and that is t
 
 ### Landed since
 
+- **§ D is empty: ⏹ and the cost chip were both watched doing their job** — 2026-09-09. Closes § D1 and
+  § D4 of [`../next.md`](../next.md), which leaves that file's verification debt with nothing in it. The
+  findings are in [`../5-webapp/subagent-browser.md`](../5-webapp/subagent-browser.md) § *Amber Is
+  Measured Now, And The Engine Answers Twice* and
+  [`../5-webapp/viewers-hud.md`](../5-webapp/viewers-hud.md) § *Three Of The Four Rows Are Measured Now*;
+  the recipe and its seven new traps are in
+  [`../0-overview/implementation-guide.md`](../0-overview/implementation-guide.md#the-launch-cost-is-shared-now--scripts_live_app_probepy).
+
+  **Both items needed the *whole app* live, which is what made them the last two.** D2's harness mounts a
+  component on a synthetic payload, because a pixel does not need an engine. Neither of these could take
+  that shortcut: a hand-built `stop_task` reply is a restatement of the assumption under test, and a
+  hand-built result footer prices nothing. So the shared support — `scripts/_live_app_probe.py`: pick free
+  ports, launch a backend, parse the real ones out of its log, drive an independent Chrome over plain CDP,
+  record every window event from document start — is the durable artefact, and the two probes on top of it
+  are files of scenarios. 36 checks between them, all green.
+
+  **The stop was clicked in the browser, and the engine answered twice with two different words.** One ⏹,
+  and the stream carried a `task_updated` patch of `killed` followed by a `task_notification` of
+  `stopped` — where `stop_task`'s docstring said *or*, and had been read as exclusive. The tooltip is
+  therefore decided by arrival order, and that is unobservable only because `_TERMINAL_LED` maps both
+  words to the same amber. **A table whose value is usually described as its default was earning its keep
+  through a synonym instead.** Neither terminal event carried a description or a task type, and the tab's
+  label survived on `labelDescription` being carried across the wholesale row replace: a terminal event is
+  a status, not a description of the thing it settles.
+
+  **D1's stated reason for existing was confirmed rather than assumed.** The entry said the cheap
+  substitute had failed — an agent's own `TaskStop` killed a live background subagent with the CLI
+  emitting no terminal message at all, LED left cyan. The webapp's ⏹ gets two. **The two paths are not
+  interchangeable, and the old cyan reading was not a defect in this surface** — which is a conclusion
+  only the expensive route could reach, and the argument for a section like § D at all.
+
+  **The cost chip's exceptional renderings came from a forwarded `/help` and a `SIGKILL`.** `/help`
+  reaches the CLI, returns in 4ms with `num_turns: 0` and moves the total by nothing, so `measured` with
+  a genuine `0.0` is a shape an ordinary turn never makes — chip `nothing extra`, twice, with the session
+  total byte-identical either side and `session_models` intact while `turn_model_usage` was empty. Then
+  the CLI child was found by a `/proc` ppid walk and killed six seconds into a stream, so the turn failed
+  *late* and the footer that arrived is one we wrote: `unpriced`, chip `cost unknown`. The check worth
+  having is the one asserting it is **not** `nothing extra`; both are cheap-looking chips and telling
+  them apart is the entire reason `turn_cost_basis` exists.
+
+  **Phase 6's two-turns rule was the design of the run, not a note on it.** Turn A, being first, reported
+  `turn_cost_usd == total_cost_usd` exactly — it cannot distinguish a difference from a running total, so
+  the delta was proved by a *fourth* turn: `0.0126215` against a total that went `0.0623465 → 0.074968`.
+
+  **And a wrong prediction is recorded in the probe rather than deleted.** It was written expecting
+  `/help` to produce `reset`, on the strength of a smoke run whose `/help` reported a zero total. That
+  reading was wrong: in the smoke run `/help` was the session's only turn, so the zero meant nothing had
+  been spent. **A zero read from a single-turn session is not evidence about what that turn did** —
+  measured in a session that had already spent, the same command reports `0.062346` on both sides. The
+  fourth basis, `reset`, is unreachable from the app at all (`SLASH_ROUTES` takes `/clear` before the CLI
+  sees it; a resume calls `CostLedger.reset()`), and the run says so out loud as a skip rather than
+  leaving a silent gap.
+
+- **A backgrounded shell command is not a subagent, in any turn** — 2026-09-08, `32d04ce7`. Recorded in
+  [`../5-webapp/subagent-browser.md`](../5-webapp/subagent-browser.md) § *A backgrounded shell command is
+  not a subagent, in any turn* and § *A tab that mirrored nothing reads its transcript*. Found by driving
+  the app, like everything else this week, and it never reached [`../next.md`](../next.md) at all.
+
+  Only `TaskStartedMessage` carries `task_type`, so the filter that drops `local_bash` tasks has to latch
+  the id — and the latch lived on the *turn's* translator. A command run with `run_in_background` returns
+  immediately and finishes on a later turn, whose translator has never heard of the task and gets an
+  untyped `task_notification`: the command came back as a **subagent**, a row headed "Subagent" with no
+  description, sorted to the bottom of an unrelated turn because its `tool_use_id` matched no card there,
+  beside a tab with no blocks to mirror. The latch now lives on `EngineSession` and is passed to every
+  translator it builds, so **a task's type outlives the turn that started it** — the same lesson as the
+  cost baseline one section up, in a different mechanism: per-turn state cannot answer a question about
+  something that outlives a turn.
+
+  The empty tab it produced turned out to be a real shape for a background *subagent* too, whose later
+  blocks are translated against another turn and can never be mirrored. A settled subagent tab with an
+  empty feed now reads `get_subagent_transcript`, gated so it can never displace mirroring: settled only,
+  empty only, once per tab, and on the user's gesture.
+
 - **The HUD in 300px, measured — and phase 7 turned out to have finished eleven days ago** — 2026-09-08.
   Closes § B1's layout residue, § D2's last clause, and § A2 (d) of [`../next.md`](../next.md). The
   measurements are in [`../5-webapp/viewers-hud.md`](../5-webapp/viewers-hud.md) § *Five Sections In 300px

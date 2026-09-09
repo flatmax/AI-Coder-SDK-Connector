@@ -223,6 +223,64 @@ about the probe itself, both of which would have shipped as findings:
 Anything a probe bounds — a top-N, a sampling, a skipped retry — gets logged as dropped. Silent
 truncation reads as "covered everything".
 
+### The launch cost is shared now — `scripts/_live_app_probe.py`
+
+Two of these probes existed before the third made the pattern obvious, and everything above the first
+assertion was the same in all of them: pick free ports, launch a backend, parse the real ones out of its
+log, launch a Chrome nobody else owns, install a recorder, wait for the app, send a turn, wait for it to
+end, write a screenshot, tally. [`scripts/_live_app_probe.py`](../../scripts/_live_app_probe.py) is that
+support — `Backend`, `Browser`, `Page`, `Report`, `send_turn`, `wait_for_turn` — and it is what made
+[`scripts/turn_cost_probe.py`](../../scripts/turn_cost_probe.py) and
+[`scripts/subagent_stop_probe.py`](../../scripts/subagent_stop_probe.py) each a file of *scenarios*.
+The same economics as a layout scene: the second live probe costs a fraction of the first, so the reason
+to write one is now a single sentence in a spec that no test can reach.
+
+**Record at the window, not on the instance.** The app shell re-dispatches every server push as a window
+`CustomEvent`, so a document-start `window.addEventListener` sees `stream-complete`, `subagent-event`,
+`permission-request` and the rest with no patching of anything the app owns — and it survives a reload,
+because the record lives in `sessionStorage`. **Trim what you keep**: a full result payload carries the
+whole transcript and will blow the storage quota mid-run, so the recorder stores the dozen fields the
+assertions actually read.
+
+**A probe's `window.confirm` stub answers `false` unless a scenario says otherwise.** The default decides
+what happens when a probe clicks something it did not mean to, and every confirmation in this app guards
+something irreversible — a stop, a grant, a destroy. Defaulting to "yes" makes a harness bug into an
+action.
+
+**Assert the basis and the rendering separately.** A basis that arrives and renders nothing is a finding
+a probe should be able to state, and a single check over both cannot tell you which half broke.
+
+**Say which verdict you mean.** `add` is pass/fail, `skip` is "not reachable and here is why in a
+sentence a reader can check", and `void` marks the run **uninterpretable** — reserved for a precondition
+whose absence would void *every* assertion. Getting that boundary right is a judgement per probe: a
+missing green sibling in the stop probe makes "the LED distinguishes outcomes" untested, but it does not
+touch the finding that the ⏹ produced a terminal status, because the refused-confirmation control already
+carries that. Downgrading it to a loud skip was correct; downgrading a dead precondition would not be.
+
+**Keep a wrong prediction in the docstring.** `turn_cost_probe.py` was written expecting a `reset` basis
+from `/help` on the strength of a smoke run, and the correction — a zero read from a single-turn session
+is not evidence about the turn — is worth more than the prediction would have been if it were right.
+
+#### Traps, each paid for once
+
+- **`pgrep -g` will not find the CLI child.** The SDK's `claude` process is *not* in the backend's
+  process group, so a group query reports nothing while a turn is visibly streaming. Walk `ppid` over
+  `/proc` instead.
+- **Do not identify the CLI by excluding `aic-dc` from its command line.** The SDK launches it with an
+  inline `--mcp-config` that names our own MCP server, so `"aic-dc" not in cmdline` filters out the one
+  process being looked for. Match the basename of `argv[0]`/`argv[1]` against `claude` / `cli.js`.
+- **A skip has to be diagnosable.** The version of that filter that found nothing skipped its scenario
+  with a one-line reason and no evidence, twice. It now dumps the descendant list it rejected.
+- **Require `rpcConnected` before sending.** `send()` returns silently when the socket is not up, so a
+  probe that only waits for the panel to mount waits out its timeout on a turn it never sent.
+- **Abort a turn wait on a permission request.** Nothing in a headless probe answers one, so a dialog
+  turns a real finding into a timeout. Fail immediately, naming the tool that asked.
+- **Inspect subagent tabs before the next send.** `send()` calls `clearSubagentTabs`, so a scenario that
+  sends again has thrown away the state its assertions were about.
+- **Both halves of an absence, when the absence is a stop.** Click ⏹ with the confirmation *refused* and
+  assert nothing happened; then confirm, and assert a sibling subagent still went green. The first proves
+  the confirmed click did the work, the second proves the resulting colour is a distinction.
+
 ## Measuring Layout in a Real Browser
 
 jsdom does no layout. Every UI test in the suite therefore asserts that a CSS rule *arrives*, and none of

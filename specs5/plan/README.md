@@ -300,9 +300,20 @@ interlude that found it; this list exists so that none of them has to be redisco
    `run_in_background` — which finishes in a *later* turn than the one that ran it — leaked back through
    as a single phantom row and empty tab; see
    [*Interlude — the shell command that came back as a subagent*](delivery.md#interlude--the-shell-command-that-came-back-as-a-subagent-2026-09-08).
-   The run left three things open; two are now closed:
-   - **⏹ Stop and the amber LED path are still unverified** — the one still open, and now for a better
-     reason. The first reason was wrong and the docstring carrying it is corrected: `stop_task` is its own
+   The run left three things open; **all three are now closed**:
+   - ~~**⏹ Stop and the amber LED path are still unverified**~~ — **verified 2026-09-09**, by the only
+     route that could: the webapp's own ⏹, clicked in a real browser against a live CLI
+     ([`../5-webapp/subagent-browser.md`](../5-webapp/subagent-browser.md) § *Amber Is Measured Now, And
+     The Engine Answers Twice*, 17 checks). **The clause below turned out to understate what the two
+     paths disagree about.** It is not that `TaskStop` reported nothing and ⏹ reports something: one ⏹
+     produced *two* terminal events with two different words — a `task_updated` patch of `killed`, then a
+     `task_notification` of `stopped` — so the docstring's "or" is not exclusive either, and the LED is
+     stable across the pair only because `_TERMINAL_LED` maps both words to amber. The stopped tab went
+     amber with `stopped` in its tooltip, ⏹ left it, its feed survived, and a sibling subagent settled
+     green beside it as the positive control. The original reasoning stands unedited below, because the
+     part of it that was right — that the cyan LED was a property of the substitute and not a defect in
+     this surface — could only be *confirmed* by spending the expensive route.
+     The first reason was wrong and the docstring carrying it is corrected: `stop_task` is its own
      control subtype (`SDKControlStopTaskRequest`, a sibling of the interrupt request), and `client.py:454`
      says the CLI answers it with a `task_notification` of status `stopped` **in the message stream** — so
      it does not end the host turn, and `service.py`'s claim that it did had nothing behind it.

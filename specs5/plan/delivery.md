@@ -1755,6 +1755,18 @@ turn, verified as a *difference* rather than a running total — while its two r
 ("nothing extra" and "cost unknown") are still unobserved on screen because no ordinary turn produces
 them. The detail and the reason are under *Live verification*, not buried as a caveat.
 
+**Both were observed on 2026-09-09**, which closes this exit criterion in full — the last clause of it had
+stood open for 23 days as [`../next.md`](../next.md) § D4.
+[`scripts/turn_cost_probe.py`](../../scripts/turn_cost_probe.py) provoked them in one session: a forwarded
+`/help` returns in 4ms with `num_turns: 0` and moves the total by nothing, so a **genuine** measured zero
+is a shape that needs a slash command rather than a prompt; and a `SIGKILL` on the CLI child six seconds
+into a stream produced the `unpriced` footer this phase wrote `_fail_turn` for. Two of the three rows in
+the table below are measured now, `reset` is unreachable from the app at all, and the figures are in
+[`../5-webapp/viewers-hud.md`](../5-webapp/viewers-hud.md) § *Three Of The Four Rows Are Measured Now*.
+**This phase's own two-turns-minimum rule is what made the run interpretable** — see the note under
+*Live verification* below, and note it took a *fourth* turn to prove the difference, because the first
+cannot.
+
 The phase divides on which half of it owed a correctness pass. The **context** numbers had already had
 theirs, in the interlude: three readers of one RPC, each deriving the arithmetic independently and each
 wrong on its own terms, collapsed into `context-usage.js`. The **cost** numbers turned out to owe one
@@ -1928,13 +1940,23 @@ The cost span carried `class=""` rather than `muted` and the tooltip "What this 
 session's cost, now $1.52 in total. An estimate the engine computes, not a billing statement." — the
 `known` branch of `turn-cost.js`, on screen.
 
-**What is still unobserved is the criterion's actual pair.** Both turns were `measured` with a difference
-above zero, so the *priced* rendering is verified and the two that the criterion's third clause names —
-"nothing extra" (`measured`, difference exactly 0) and "cost unknown" (`reset`, `unpriced`) — have never
-been on screen. They hold in 60 tests. Reaching them live needs a turn that spends nothing or one the
-engine never priced, which no ordinary turn produces; an immediate Stop is the cheapest candidate. **The
-clause is met for the case that occurs and unmet for the two that are hard to cause**, which is a more
-useful way to leave it than "verified".
+~~**What is still unobserved is the criterion's actual pair.**~~ **Both were observed on 2026-09-09, 23
+days later** — see the closing note at the head of this phase. Both turns here were `measured` with a
+difference above zero, so the *priced* rendering was verified and the two that the criterion's third clause
+names — "nothing extra" (`measured`, difference exactly 0) and "cost unknown" (`reset`, `unpriced`) — had
+never been on screen. They hold in 60 tests. Reaching them live needs a turn that spends nothing or one the
+engine never priced, which no ordinary turn produces; **an immediate Stop is the cheapest candidate**, and
+that guess was wrong in both directions. A zero-cost turn is not a stopped turn at all but a *forwarded
+slash command* — `/help` reaches the CLI, returns in 4ms with `num_turns: 0`, and moves nothing. And
+"cost unknown" needed the opposite of an immediate stop: a `SIGKILL` on the CLI child six seconds *into* a
+stream, so the turn fails late, which is the case the tooltip is written for. **The clause was met for the
+case that occurs and unmet for the two that are hard to cause**, which was a more useful way to leave it
+than "verified" — and it is what let the pair be picked up as a named item rather than rediscovered.
+
+**Turn 1 versus turn 2 above is the rule the 2026-09-09 run was built around**, and it needed a *fourth*
+turn rather than a second: turns 2 and 3 were the zero-cost `/help`s, so the difference had to be proved by
+turn 4 — `0.0126215` against a session total that went `0.0623465 → 0.074968`. A zero on turn 2 is
+consistent with both a correct difference and a broken one.
 
 A method note worth keeping, because it cost a re-read: the probe that classified the second chip
 computed `known` by testing the row's HTML for `class="muted"`, and the *bits* span ("· 20 tool calls")

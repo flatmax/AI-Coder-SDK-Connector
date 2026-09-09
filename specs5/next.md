@@ -7,6 +7,20 @@ that SHA, so every claim here is about a committed state and nothing is owed to 
 closed with D2's harness, and § A2 (d)'s "never on a runner" was corrected from the remote. Everything
 else was last checked at the SHA above, and closing those re-checked nothing else.
 
+**Then § D emptied on 2026-09-09**, with D1 and D4 verified against a live engine in a real browser. **So
+the only thing left in §§ A–D is C9, whose exit criterion is an event rather than a commit** — see the
+summary under § *Start here*, which had this wrong once already.
+
+**Two things landed in this period without ever appearing in this file**, and they are recorded where their
+reasoning lives rather than added here as closed items. `32d04ce7` stopped a backgrounded shell command
+arriving as a subagent row on an unrelated turn ([`impl-history/work-log.md`](impl-history/work-log.md)
+§ *Landed since*), and `2cbb61a1` closed the `agy` engine's image gap — a `generate_image` in an ordinary
+turn wrote outside the repository and was invisible to the file tree
+([`plan-ag/delivery.md`](plan-ag/delivery.md) § *What this does not do*, where it had been listed as
+unbuilt). **Both were found by driving the app** — the source the table below still has no row for, named
+once for C10 on 2026-08-29 and responsible for every commit of the week of 2026-09-03. Neither would have
+been noticed by an audit of the tree, which is what the table's three rolling records are.
+
 **This file covers the Claude engine and the app around it. It does not cover the second engine.**
 [`plan-ag/`](plan-ag/) is a separate plan of record with its own decisions (`AG-n`), risks (`AG-R-n`)
 and [`delivery.md`](plan-ag/delivery.md), and it moved a long way between 2026-08-30 and 2026-09-03
@@ -131,7 +145,8 @@ rather than only when something cites it. Both of the other rolling records empt
 work-log's § *Specified but not yet built* closed on B4's decline, and the inbox closed on B6's finding.
 **So all three sources that feed this queue are empty, and §§ A–C hold nothing open but C9, whose exit
 criterion is an event.** What is left is § D — **of this file**, which as of 2026-09-03 is a narrower
-claim than it reads: the second engine's queue is [`plan-ag/`](plan-ag/)'s and is not empty. **Then § C reopened and closed again on 2026-08-29 with C10** — `/usage` opening onto a tab that did
+claim than it reads: the second engine's queue is [`plan-ag/`](plan-ag/)'s and is not empty.
+(**§ D emptied on 2026-09-09**; that sentence is left as the reading it was on the day.) **Then § C reopened and closed again on 2026-08-29 with C10** — `/usage` opening onto a tab that did
 not contain what the command's own reply said it did — **and that one arrived from a source none of the
 three rolling records covers: a user comparing this app against the CLI it wraps.** It is worth naming
 as a fourth source, because no audit in this file would have found it. A routed slash command tells the
@@ -174,8 +189,16 @@ C11 is a small companion to it. C9 still waits on an event.
 fixed, and the run that witnessed the 520px editor is what makes the fix a regression test rather than an
 edit. It also settled the argument in D's favour a third time: 17 of the 19 checks passed on unfixed code,
 so what the browser bought was not a pile of findings but a *measurement* of three behaviours that had
-only ever been read by eye. The remaining queue is C9 (waiting on an event), D4, and § E's declined —
-plus [`plan-ag/README.md`](plan-ag/README.md), which needs a machine that can run `agy`.
+only ever been read by eye. ~~The remaining queue is C9 (waiting on an event), D4, and § E's declined~~ —
+and **that sentence was wrong when it was written: it dropped D1**, which § D still carried open two
+sections below. The paragraph was composed from the sitting that had just closed D2 and D3, so it listed
+what that sitting could see. **A summary of a queue is not a reading of it**, and the cheap guard is to
+write the sentence from the section rather than from memory of the day.
+
+**§ D closed on 2026-09-09** — D1 and D4 together, in one sitting, for the reason both had waited: each
+needs the *whole app* live, and the launch cost is shared once two probes want it. So the remaining queue
+is **C9 (waiting on an event) and § E's declined**, plus [`plan-ag/README.md`](plan-ag/README.md), which
+needs a machine that can run `agy`.
 
 **And the residue it left closed the same week (2026-09-08, later).** D2's own last clause said B1's
 question — five HUD sections and their heads in 300px — was "now a function rather than a project", and it
@@ -946,13 +969,30 @@ numbers have met a live CLI and lost — the argument for this section is
 [`0-overview/implementation-guide.md`](0-overview/implementation-guide.md) § *Verifying UI Work Against
 a Running Engine*.
 
-**D1 — ⏹ Stop and the amber LED on a subagent tab.** `stop_task` is its own control subtype
-(`SDKControlStopTaskRequest`) answered with a `task_notification` of status `stopped` in the message
-stream. The cheap substitute was tried and **failed**: an agent's own `TaskStop` against a live
-background subagent killed it with the CLI emitting no terminal task message at all, leaving engine
-and browser both reading `status: null, terminal: false` and the LED cyan. So the two paths are not
-interchangeable and **the webapp's own ⏹ is the only thing that can verify itself.**
-[`plan/README.md`](plan/README.md) open item 9, last clause.
+**This section is empty as of 2026-09-09.** All four items closed — D2 and D3 on 2026-09-08, D1 and D4 on
+2026-09-09 — and the entries stay below with what each one found, because **the record of what a
+verification cost and what it turned up is the only durable part of it**. The section itself stays too: it
+is not a list that got finished, it is where the next unwatched claim goes. Two harnesses now sit under it
+so the next entry costs a scenario rather than a project — `scripts/_live_app_probe.py` for anything
+needing a live engine, `webapp/src/layout-harness.js` for anything needing pixels.
+
+~~**D1 — ⏹ Stop and the amber LED on a subagent tab.**~~ **Verified 2026-09-09 — leaves this queue, and
+empties this section.** `stop_task` is its own control subtype (`SDKControlStopTaskRequest`) answered with
+a `task_notification` of status `stopped` in the message stream. The cheap substitute was tried and
+**failed**: an agent's own `TaskStop` against a live background subagent killed it with the CLI emitting
+no terminal task message at all, leaving engine and browser both reading `status: null, terminal: false`
+and the LED cyan. So the two paths are not interchangeable and **the webapp's own ⏹ is the only thing that
+can verify itself.** [`plan/README.md`](plan/README.md) open item 9, last clause.
+
+**It verified itself in 17 checks** ([`scripts/subagent_stop_probe.py`](../scripts/subagent_stop_probe.py),
+findings in [`5-webapp/subagent-browser.md`](5-webapp/subagent-browser.md) § *Amber Is Measured Now, And
+The Engine Answers Twice*), and **that last sentence was the item's real content.** One ⏹ produced *two*
+terminal events with two different words — a `task_updated` patch of `killed`, then a `task_notification`
+of `stopped` — where the engine's own docstring said "or" and had been read as exclusive. So the cyan LED
+the substitute left behind was never a defect in this surface, which is a conclusion only the expensive
+route could reach. The stopped tab went amber with the outcome in its tooltip, ⏹ left it, its feed kept
+1,159 characters, and the sibling subagent settled **green** in the same strip — a distinction the LED
+draws rather than a colour it was going to show anyway.
 
 ~~**B1's own residue is D2's, not this section's.**~~ **Closed 2026-09-08 with D2's harness — leaves this
 queue.** The HUD's collapse behaviour was asserted from the DOM — a collapsed section's body is absent and
@@ -1028,11 +1068,40 @@ keeps the two halves no static read can reach (that the block reaches the model,
 our answer), and `--ab` makes that half one command with its expected outcome stated. Reasoning in
 [`impl-history/work-log.md`](impl-history/work-log.md) § *Landed since*.
 
-**D4 — The cost chip's two exceptional renderings are unobserved.** "Nothing extra" and "cost unknown"
-hold in 60 tests and no ordinary turn causes either. Phase 6's entry says so in its exit criterion;
-provoking them needs a contrived turn, and the rule that came out of that phase applies — **two turns
-minimum when checking anything per-turn**, since a session's first turn has `turn_cost_usd` equal to
-`total_cost_usd` and cannot tell a difference from a running total.
+~~**D4 — The cost chip's two exceptional renderings are unobserved.**~~ **Observed 2026-09-09 — leaves
+this queue.** "Nothing extra" and "cost unknown" hold in 60 tests and no ordinary turn causes either.
+Phase 6's entry says so in its exit criterion; provoking them needs a contrived turn, and the rule that
+came out of that phase applies — **two turns minimum when checking anything per-turn**, since a session's
+first turn has `turn_cost_usd` equal to `total_cost_usd` and cannot tell a difference from a running total.
+
+**Both were provoked in one session, 19 checks** ([`scripts/turn_cost_probe.py`](../scripts/turn_cost_probe.py),
+figures in [`5-webapp/viewers-hud.md`](5-webapp/viewers-hud.md) § *Three Of The Four Rows Are Measured
+Now*). A forwarded `/help` — 4ms, `num_turns: 0`, total unmoved — is where a *genuine* measured zero comes
+from, and it read `nothing extra` twice with the session total byte-identical either side. `SIGKILL` on the
+CLI child six seconds into a stream made the turn fail late, so the footer was ours: `unpriced`, chip `cost
+unknown`. The two-turns rule shaped the run rather than annotating it — turn A necessarily reported
+`turn == total`, and the delta was proved by a fourth turn pricing `0.0126215` against a total that went
+`0.0623465 → 0.074968`. The fourth basis, `reset`, is **unreachable from the app** (`SLASH_ROUTES` takes
+`/clear` before the CLI sees it; a resume calls `CostLedger.reset()`) and is skipped out loud rather than
+left as a silent gap.
+
+**The probe's first version predicted the wrong basis, and the correction is kept in its docstring.** It
+expected `/help` to return `total_cost_usd: 0` and trip `reset`, on the strength of a smoke run whose
+`/help` reported a zero total — but `/help` was that session's *only* turn, so the zero meant nothing had
+been spent yet. **A zero read from a single-turn session is not evidence about what that turn did**, which
+is the same shape as the two-turns rule the item already carried, arriving from the other direction.
+
+**§ D is empty. Every item in it was closed by driving the app, and all four turned up something their own
+entry had not predicted** — D2 that a source comment's justification was weaker than the ceiling it
+defends, D3 that the check it asked for was a static scan and needed no run at all, D1 that the engine
+answers a stop twice, and D4 that phase 6's guess at how to provoke both renderings ("an immediate Stop")
+was wrong in both directions. **That is the yield an unwatched claim actually has**, and none of it is the
+finding the entry was written to expect. The recipe those four paid for is
+[`0-overview/implementation-guide.md`](0-overview/implementation-guide.md) §§ *Verifying UI Work Against a
+Running Engine* and *Measuring Layout in a Real Browser*, and the launch cost is now shared support rather
+than a per-item project: `scripts/_live_app_probe.py` for a live engine,
+`webapp/src/layout-harness.js` for pixels. **The next entry in a section like this one is cheap to check,
+which is the point of having spent the four.**
 
 ---
 

@@ -183,6 +183,52 @@ reason the honest-sounding amber state was the most misleading thing on screen.
 LED lifetime tracks its tab's lifetime exactly. There is no acknowledgement gesture, no auto-fade, no
 "seen" state; the LED reflects current state until the tab leaves the strip.
 
+### Amber Is Measured Now, And The Engine Answers Twice
+
+**Verified live 2026-09-09** — [`scripts/subagent_stop_probe.py`](../../scripts/subagent_stop_probe.py),
+17 checks, against a real CLI in a real browser. One turn was asked to delegate twice; the ⏹ on the first
+subagent's tab was clicked, and every reading below came out of the DOM rather than out of a hand-built
+payload. This closes [`../next.md`](../next.md) § D1, and it had to be the webapp's own ⏹: the cheap
+substitute — an agent calling `TaskStop` on a live background subagent — killed it with the CLI emitting
+**no terminal task message at all**, leaving engine and browser reading `status: null, terminal: false`
+and the LED cyan. The two paths are not interchangeable, and that reading was not a defect in this
+surface.
+
+**The engine answers a stop twice, with two different words.** `stop_task`'s docstring said the CLI
+replies with a `task_notification` of `stopped` *or* a `task_updated` patch of `killed` "with no
+notification at all". Both arrived, in this order:
+
+```
+subagent-event updated      task=ad3e70… status='killed'  terminal=True  type=None desc=''
+subagent-event notification task=ad3e70… status='stopped' terminal=True  type=None desc=''
+```
+
+So the last one wins the tooltip, and **which word the user reads is decided by arrival order** — the
+tab settled at `stopped`. That is unobservable rather than lucky: `_TERMINAL_LED` maps `killed` and
+`stopped` to the same amber, so the intermediate patch cannot flash a different colour on its way to the
+notification. A table with only one of the two words in it would have been green-then-amber, or amber
+with a `status unknown` tooltip. **The default the table's comment is proud of is not the only thing
+earning its keep — having both synonyms is.**
+
+Note what those two events do *not* carry: `type=None` and `desc=''`. The row is the accumulation of
+every event for a task and the label fields are carried across the wholesale replace
+(`labelDescription`, `labelType` in `subagent-tabs.js`), so a terminal patch that names nothing does not
+blank the tab it settles — the tooltip still read `general-purpose — read every note: stopped`. A
+terminal event is a *status*, not a description of the thing whose status it is.
+
+**Two controls, because a stop is an absence and an absence needs both.** The ⏹ was clicked first with
+its `window.confirm` **refused**: exactly one confirmation was recorded for the one click, its text was
+`Stop read every note? It cannot be resumed.`, and the subagent was still streaming with no terminal
+event — so the confirmed click is what ended it, not the click. And the sibling subagent settled
+**green** (`completed (1 tool, 10,055 tokens)`) beside the amber one in the same strip, so amber is a
+distinction the LED draws and not a colour it was going to show regardless.
+
+The rest of the settled tab was measured in the same run: ⏹ **gone** (a Stop button on something already
+over offers to end it again), the feed still holding its 1,159 characters, the read-only note still
+present with no composer, and the parent turn completing normally afterwards
+(`is_error=False num_turns=3`) with the stopped tab **still amber at turn end** rather than re-read as
+unknown or completed by settling.
+
 ### Click and hover
 
 - Clicking a LED activates that subagent's tab — the same effect as clicking the tab itself, but the LED row is more compact and sits where the user's eyes already are. The tab strip also scrolls to reveal the target tab's button if it was offscreen, so the LED row works as a navigation primitive when many subagents have pushed the active tab beyond the visible window. Already-visible tabs do not jiggle — the scroll is a no-op when the button is on-screen.

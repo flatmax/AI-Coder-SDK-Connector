@@ -1892,6 +1892,16 @@ class ClaudeCodeService:
         patch of ``"killed"`` with no notification at all. Hence the
         ``"stopping"`` below: the terminal word arrives as an event, not as
         this return value.
+
+        Measured live 2026-09-09 (``scripts/subagent_stop_probe.py``), and the
+        ``or`` above is not exclusive: one ⏹ from the webapp against a
+        foreground ``Task`` produced **both**, in this order — a
+        ``task_updated`` patch of ``"killed"``, then a ``task_notification``
+        of ``"stopped"``. So a caller must tolerate either arriving alone
+        *and* the pair arriving together, with two different words for the one
+        outcome. Nothing here needs to pick a winner, because the browser's
+        LED table maps ``killed`` and ``stopped`` to the same amber; that
+        table is what makes the ordering unobservable rather than lucky.
         """
         restricted = self._check_localhost_only()
         if restricted is not None:
