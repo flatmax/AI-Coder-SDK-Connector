@@ -59,6 +59,30 @@ TOOL_ACTIVE = {
     },
 }
 TOOL_DONE = dict(TOOL_ACTIVE, state="DONE", duration_seconds=0.065)
+# Transcribed from the 2026-09-09 capture at agy 1.1.27, prompt shortened.
+# The conversation id is the subagent's own and is what the tab is keyed
+# on; `log_uri` names the transcript it writes, which is the only place
+# its steps appear — they do not stream into the parent conversation.
+SUBAGENT_ENTRY = {
+    "type_name": "research",
+    "role": "Notes Reader",
+    "initial_prompt": "Please read the file `notes.txt` …",
+    "conversation_id": "c21acd4d",
+    "log_uri": (
+        "file:///home/u/.gemini/antigravity-cli/brain/c21acd4d"
+        "/.system_generated/logs/transcript.jsonl"
+    ),
+    "workspace_uris": ["file:///tmp/temp/work"],
+}
+SUBAGENT_ACTIVE = {
+    "conversation_id": "b1d377c5",
+    "step_index": 2,
+    "state": "ACTIVE",
+    "step_type": "subagent",
+    "tool_name": "invoke_subagent",
+    "subagent_info": {"subagents": [SUBAGENT_ENTRY]},
+}
+SUBAGENT_DONE = dict(SUBAGENT_ACTIVE, state="DONE", duration_seconds=6.1)
 RESULT = {
     "event": "result",
     "result": {
@@ -186,6 +210,119 @@ class TestToolCards:
             t.translate(frame(dict(TOOL_DONE, state="ERROR")))[1].payload["status"]
             == "error"
         )
+
+
+class TestASubagentIsAnnounced:
+    """The delegation surface, transcribed from the 2026-09-09 capture.
+
+    ``scripts/probe_agy_subagent_frames.py``, one turn at ``agy`` 1.1.27.
+    The fixture is the real ``subagent_info`` payload with the prompt
+    shortened; every field the pump reads is verbatim, because the
+    recorded reason this surface was unbuilt here — "``agy``'s stream
+    carries no trajectory or depth field at all" — was true about
+    ``depth`` and wrong about subagents, and a fixture written from that
+    belief would have kept it true.
+    """
+
+    def test_the_announcement_carries_one_identity_in_all_three_fields(self):
+        """`streaming.js` falls back through them; setting one is a bet."""
+        t = AgyTranslator("r1")
+        events = t.translate(frame(SUBAGENT_ACTIVE))
+        assert names(events) == ["subagentEvent"]
+        payload = events[0].payload
+        assert (
+            payload["task_id"]
+            == payload["agent_id"]
+            == payload["tool_use_id"]
+            == "c21acd4d"
+        )
+
+    def test_the_id_is_the_subagents_own_conversation(self):
+        """Borrowed, not minted — it is also the key to the transcript."""
+        t = AgyTranslator("r1")
+        assert t.translate(frame(SUBAGENT_ACTIVE))[0].payload["agent_id"] == "c21acd4d"
+
+    def test_the_labels_are_the_role_and_the_type(self):
+        t = AgyTranslator("r1")
+        payload = t.translate(frame(SUBAGENT_ACTIVE))[0].payload
+        assert payload["description"] == "Notes Reader"
+        assert payload["subagent_type"] == "research"
+
+    def test_it_is_not_terminal_while_active(self):
+        t = AgyTranslator("r1")
+        payload = t.translate(frame(SUBAGENT_ACTIVE))[0].payload
+        assert payload["terminal"] is False
+        assert payload["status"] == "running"
+
+    def test_done_settles_the_tab(self):
+        """`state.streaming = !row.terminal`: without this it spins forever."""
+        t = AgyTranslator("r1")
+        t.translate(frame(SUBAGENT_ACTIVE))
+        payload = t.translate(frame(SUBAGENT_DONE))[0].payload
+        assert payload["terminal"] is True
+        assert payload["status"] == "completed"
+
+    def test_the_id_is_stable_across_the_two_frames(self):
+        """A second id would be a second row for one subagent."""
+        t = AgyTranslator("r1")
+        first = t.translate(frame(SUBAGENT_ACTIVE))[0].payload["agent_id"]
+        second = t.translate(frame(SUBAGENT_DONE))[0].payload["agent_id"]
+        assert first == second
+
+    @pytest.mark.parametrize(
+        "state,status",
+        [("ERROR", "failed"), ("CANCELED", "stopped"), ("DONE", "completed")],
+    )
+    def test_the_status_words_are_the_ones_the_led_table_knows(self, state, status):
+        """`_TERMINAL_LED` maps these three; anything else lands on amber
+        by not being understood, which is the wrong way to reach a colour."""
+        t = AgyTranslator("r1")
+        payload = t.translate(frame(dict(SUBAGENT_DONE, state=state)))[0].payload
+        assert payload["status"] == status
+
+    def test_each_subagent_in_one_step_gets_its_own_row(self):
+        """`subagents` is a list, and one step can announce several."""
+        t = AgyTranslator("r1")
+        both = dict(
+            SUBAGENT_ACTIVE,
+            subagent_info={
+                "subagents": [
+                    SUBAGENT_ENTRY,
+                    dict(SUBAGENT_ENTRY, conversation_id="second", role="Other"),
+                ]
+            },
+        )
+        events = t.translate(frame(both))
+        assert [e.payload["agent_id"] for e in events] == ["c21acd4d", "second"]
+
+    def test_a_delegation_with_no_conversation_id_still_gets_a_row(self):
+        """This pump renders what it cannot read rather than dropping it."""
+        t = AgyTranslator("r1")
+        entry = {k: v for k, v in SUBAGENT_ENTRY.items() if k != "conversation_id"}
+        events = t.translate(
+            frame(dict(SUBAGENT_ACTIVE, subagent_info={"subagents": [entry]}))
+        )
+        assert names(events) == ["subagentEvent"]
+        assert events[0].payload["agent_id"] == "agy-subagent-2-0"
+
+    def test_a_subagent_step_is_no_longer_an_unknown_step(self):
+        """It rendered as two `unknown_step` notices before 2026-09-09,
+        with the role, the prompt and the transcript all discarded."""
+        t = AgyTranslator("r1")
+        assert "subagent" in steps.KNOWN_STEP_TYPES
+        for event in t.translate(frame(SUBAGENT_ACTIVE)):
+            assert event.payload.get("subtype") != "unknown_step"
+
+    def test_the_transcript_location_is_kept_for_the_tabs_content(self):
+        """`log_uri` is reported once, in the announcement, and is the
+        only route to what the subagent actually did."""
+        t = AgyTranslator("r1")
+        t.translate(frame(SUBAGENT_ACTIVE))
+        assert t._subagents["c21acd4d"]["log_uri"].endswith("transcript.jsonl")
+
+    def test_an_empty_announcement_emits_nothing(self):
+        t = AgyTranslator("r1")
+        assert t.translate(frame(dict(SUBAGENT_ACTIVE, subagent_info={}))) == []
 
 
 class TestTheVocabularyIsNotClosed:

@@ -69,8 +69,22 @@ TERMINAL_STATES = frozenset({"DONE", "ERROR", "CANCELED"})
 #: the vocabulary was documented as three members and turned out to have
 #: at least four.
 KNOWN_STEP_TYPES = frozenset(
-    {"user_input", "agent_response", "tool", "system_message"}
+    {"user_input", "agent_response", "tool", "system_message", "subagent"}
 )
+
+#: ``state`` → the status word the browser's LED table knows.
+#:
+#: Not free prose: ``subagent-tabs.js``'s ``_TERMINAL_LED`` maps
+#: ``completed`` to green, ``failed`` to red and ``stopped``/``killed`` to
+#: amber, and anything it does not recognise falls through to amber. So a
+#: cancelled subagent is reported as ``stopped`` — which is both what it
+#: is and the word that lands on the colour meant for it, rather than
+#: arriving at the same colour by not being understood.
+SUBAGENT_STATUS = {
+    "DONE": "completed",
+    "ERROR": "failed",
+    "CANCELED": "stopped",
+}
 
 
 def _iso_utc() -> str:
@@ -137,6 +151,12 @@ class AgyTranslator:
         # pump and the whole turn belongs to one agent. That is also why
         # the `subagent_tabs` surface is unbuilt on this transport.
         self._agent_id = agent_id or None
+        # Every subagent this turn announced, by its own conversation id.
+        # Held rather than emitted and forgotten because the tab's
+        # *content* is not in this stream: `log_uri` is reported once, in
+        # the announcement, and is the only route to what the subagent
+        # actually did.
+        self._subagents: dict[str, dict[str, Any]] = {}
         self._text: dict[int, str] = {}
         self._seq: dict[int, int] = {}
         self._tools: dict[int, dict[str, Any]] = {}
@@ -206,6 +226,8 @@ class AgyTranslator:
             return self._agent_response(step, index, state)
         if step_type == "tool":
             return self._tool(step, index, state)
+        if step_type == "subagent":
+            return self._subagent(step, index, state)
         if step_type == "user_input":
             # Our own prompt, echoed. The browser already rendered it
             # optimistically when the user pressed send.
@@ -264,6 +286,100 @@ class AgyTranslator:
                 },
             )
         ]
+
+    def _subagent(self, step: dict[str, Any], index: int, state: str) -> list[Event]:
+        """A delegation, as the row and tab the strip already renders.
+
+        **Antigravity names its subagents by announcement, not by scope.**
+        The SDK transport marks every step of a nested trajectory with
+        ``depth`` and ``trajectory_id``, which is what
+        ``antigravity/steps.py``'s ``_scope`` reads. This stream has
+        neither — a fact recorded at ``agy`` 1.1.22 and still true at
+        1.1.27 — and the conclusion drawn from it, that a subagent is
+        therefore invisible here, was wrong. A ``subagent`` step carries
+        ``subagent_info.subagents[]``, each entry naming a
+        ``conversation_id`` of its own, its ``role``, its ``type_name``
+        and a ``log_uri`` pointing at the transcript it writes. Measured
+        2026-09-09 by ``scripts/probe_agy_subagent_frames.py``.
+
+        That is enough for AG-13's five-point contract, which asks for an
+        *identity* rather than for the SDK's mechanism: the same id on the
+        event and on the blocks, a label, and a terminal flag. So no new
+        event name and no webapp change — ``subagent-tabs.js`` joins on
+        identifiers alone.
+
+        The id is the subagent's own ``conversation_id`` rather than a
+        minted one, which is the opposite of the consultation bridge's
+        choice (``antigravity/bridge.py._new_agent_id``) and for the
+        reason that decision states: it mints because an in-process MCP
+        handler *cannot learn* an id. Here the engine supplies one, it is
+        stable across the ACTIVE and DONE frames, and it is also the key
+        to the transcript on disk — so borrowing it costs nothing and buys
+        the join that content will need.
+
+        A list, not an entry: one step can announce several subagents, and
+        each gets its own row. The composed fallback id keeps a delegation
+        visible if a release ever omits the conversation id — this pump
+        renders what it cannot read rather than dropping it.
+        """
+        self._absorb_usage(step)
+        info = step.get("subagent_info")
+        info = info if isinstance(info, dict) else {}
+        entries = info.get("subagents")
+        entries = entries if isinstance(entries, list) else []
+        terminal = state in TERMINAL_STATES
+
+        events: list[Event] = []
+        for position, entry in enumerate(entries):
+            if not isinstance(entry, dict):
+                continue
+            agent_id = (
+                str(entry.get("conversation_id") or "")
+                or f"agy-subagent-{index}-{position}"
+            )
+            known = self._subagents.get(agent_id)
+            if known is None:
+                self.stats.tool_calls += 1
+                known = {
+                    "agent_id": agent_id,
+                    # Kept for the tab's content, which is not in this
+                    # stream: the subagent's steps go to its own
+                    # transcript, and this is the only place its location
+                    # is reported.
+                    "log_uri": str(entry.get("log_uri") or ""),
+                    "role": str(entry.get("role") or ""),
+                    "type_name": str(entry.get("type_name") or ""),
+                    "initial_prompt": str(entry.get("initial_prompt") or ""),
+                }
+                self._subagents[agent_id] = known
+            events.append(
+                Event(
+                    "subagentEvent",
+                    {
+                        # All three, because `streaming.js` falls back
+                        # through them in this order and a payload that
+                        # sets only one relies on which fallback ran.
+                        "task_id": agent_id,
+                        "agent_id": agent_id,
+                        "tool_use_id": agent_id,
+                        # Labels only, per the contract. `role` is what
+                        # the model called this subagent — "Notes Reader"
+                        # — which is the description a Claude `Task`
+                        # carries; `type_name` is its kind.
+                        "description": known["role"],
+                        "subagent_type": known["type_name"],
+                        "task_type": str(step.get("tool_name") or "subagent"),
+                        "status": SUBAGENT_STATUS.get(state, "running")
+                        if terminal
+                        else "running",
+                        # Without this the tab streams for the rest of the
+                        # session: the browser sets
+                        # `state.streaming = !row.terminal`.
+                        "terminal": terminal,
+                    },
+                )
+            )
+        return events
 
     def _tool(self, step: dict[str, Any], index: int, state: str) -> list[Event]:
         self._absorb_usage(step)

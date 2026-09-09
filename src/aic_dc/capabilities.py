@@ -268,14 +268,36 @@ SURFACES: tuple[Surface, ...] = (
         "where a 503 was retried through without the caller seeing it.",
     ),
     Surface(
-        key="subagent_tabs",
-        title="Subagent rows and their own tabs",
+        key="subagent_rows",
+        title="Subagent rows and their own tabs, live",
         claude=SUPPORTED,
         antigravity=UNBUILT,
-        note="Every Step carries trajectory_id, parent_trajectory_id and "
-        "depth, and usage is per-trajectory, so this is buildable. The "
-        "pump already attributes a nested trajectory to an agent_id; "
-        "what is missing is a chat that renders more than one.",
+        agy=SUPPORTED,
+        note="Split from subagent_tabs on 2026-09-09, because one key was "
+        "answering two questions and the transports disagree about them "
+        "separately. This one is the live strip, which is fed by the pump "
+        "and gates no RPC. agy announces a delegation as a `subagent` step "
+        "carrying subagent_info.subagents[], each naming a conversation_id "
+        "of its own, so AG-13's contract is met by announcement rather "
+        "than by the SDK's per-step scope — measured at 1.1.27 by "
+        "scripts/probe_agy_subagent_frames.py. The SDK transport carries "
+        "trajectory_id and depth, which antigravity/steps.py already maps "
+        "onto agent_id, and no pump there emits the announcement yet.",
+    ),
+    Surface(
+        key="subagent_tabs",
+        title="Subagent transcripts and ⏹, the RPC surface",
+        claude=SUPPORTED,
+        antigravity=UNBUILT,
+        note="What the router gates on this key is three methods — "
+        "get_subagent_transcript, list_subagent_transcripts and stop_task "
+        "— so it is the RPC half rather than the rendering. Kept as one "
+        "key while all three are unbuilt on Antigravity; the moment one of "
+        "them is honest and another is not, this splits again rather than "
+        "shipping a ⏹ that cannot stop anything. On agy the transcripts "
+        "are reachable — a subagent writes its own transcript.jsonl under "
+        "BRAIN_DIR/<conversation_id> — and whether one subagent can be "
+        "stopped is not yet measured, which is what holds this row.",
     ),
     Surface(
         key="agent_questions",

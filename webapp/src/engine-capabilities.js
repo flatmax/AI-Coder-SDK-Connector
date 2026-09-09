@@ -62,6 +62,11 @@ export const SURFACE = Object.freeze({
   TRANSCRIPT_HISTORY: 'transcript_history',
   SESSION_FORK: 'session_fork',
   RATE_LIMIT_EVENTS: 'rate_limit_events',
+  // Two keys, split on 2026-09-09: SUBAGENT_ROWS is the live strip, fed by
+  // the pump and gating no RPC, and SUBAGENT_TABS is the three transcript
+  // and ⏹ methods the router refuses. The transports answer them
+  // differently, so one key had to be wrong about one of them.
+  SUBAGENT_ROWS: 'subagent_rows',
   SUBAGENT_TABS: 'subagent_tabs',
   AGENT_QUESTIONS: 'agent_questions',
   FILE_CHECKPOINTING: 'file_checkpointing',

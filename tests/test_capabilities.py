@@ -320,8 +320,29 @@ class TestTheHelpers:
         assert set(unbuilt_surfaces(ANTIGRAVITY)) == {
             "agent_questions",
             "mcp_server_inventory",
+            "subagent_rows",
             "subagent_tabs",
         }
+
+    def test_the_two_transports_have_different_to_do_lists(self):
+        """Which is why ``subagent_tabs`` was split on 2026-09-09.
+
+        One key answered two questions — does the strip get a row, and do
+        the transcript RPCs work — and ``agy`` answers them differently:
+        it announces a delegation with an identity of its own, while the
+        SDK transport carries the scope and no pump emits the
+        announcement. A single key would have had to be wrong about one
+        of them, and the direction it would have been wrong in is the
+        expensive one: SUPPORTED enables ``stop_task``, which nothing on
+        this transport has been shown to be able to do.
+        """
+        sdk = set(unbuilt_surfaces(ANTIGRAVITY))
+        agy = set(unbuilt_surfaces(capabilities.AGY))
+        assert "subagent_rows" in sdk
+        assert "subagent_rows" not in agy
+        # Still owed on both, and for the same reason: the ⏹ that rides
+        # on this key has not been measured against either transport.
+        assert "subagent_tabs" in sdk and "subagent_tabs" in agy
 
     def test_claude_has_nothing_unbuilt(self):
         """It is the shipped engine; a to-do here would be a regression."""

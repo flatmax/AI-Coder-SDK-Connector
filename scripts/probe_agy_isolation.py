@@ -228,11 +228,13 @@ async def run() -> int:
     install_config_dir = Path.home() / ".config" / "aic-dc"
     state = install.status(install_config_dir)
     log(f"installed gate: {state['state']} ({state.get('path')})")
-    installed_here = False
-    if state["state"] != "current":
+    # Restore what was there, never "remove what this probe added" — see
+    # the same block in `probe_agy_write.py`. A *stale* gate installed
+    # over and then uninstalled leaves the user with none at all.
+    restore = state["state"]
+    if restore != "current":
         log("installing the gate for the duration of this probe")
         install.install(install_config_dir)
-        installed_here = True
 
     async def broadcast(_event: Any) -> None:
         return None
@@ -297,8 +299,10 @@ async def run() -> int:
         await session.close()
         await stranger.close()
         await server.stop()
-        if installed_here:
+        if restore == "absent":
             install.uninstall()
+        elif restore != "current":
+            log(f"NOTE: the gate was {restore} before this run and is now current")
 
     code = check(server, stranger, our_window, stranger_status)
     shutil.rmtree(ours, ignore_errors=True)
