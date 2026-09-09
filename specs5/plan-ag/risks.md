@@ -743,11 +743,22 @@ set; what it did not inherit was the gate — so gating the spawn bought a dialo
   **How wide this window is, is measured on one side and argued on the other.** The consultant's
   case for ranking it *above* nested delegation is that it fires on every spawn, where nesting
   needs the model to choose it — and that a subagent exists to act immediately, so its first call
-  should lose the race routinely. The frequency half is right. The second half is contradicted by
+  should lose the race routinely. **Both tiers of the consultant made this argument independently**
+  and both put residue 2 first. The frequency half is right. The second half is contradicted by
   the run in [`delivery.md`](delivery.md#the-subagent-that-was-never-gated-2026-09-09): the gate
   decided the subagent's `view_file`, which *is* its first call, so on that run the claim won. One
   run is not a distribution, and the honest reading is that the window is real and unquantified
   rather than that it is narrow.
+
+  Two distinctions the consultant's argument elides and this entry should not. **A window that
+  opens on every spawn is not a bypass on every spawn** — the bypass needs the child's first call to
+  land inside it, which is the unmeasured quantity. And the figures offered for how often that
+  happens were invented rather than measured, on both tiers. What the argument does establish, and
+  what stands, is the *shape* of the worst case: a user approves a benign-sounding delegation, and
+  the child's first call inside the window is the one that matters. **The measurement this needs is
+  a distribution, not another opinion** — the interval between a subagent's first tool call reaching
+  the hook and the claim landing on disk, over many spawns, which the existing probe is most of the
+  way to being able to report.
 - **Nested delegation is a blind spot at full width.** A subagent's own frames never reach this host —
   its work appears only in its transcript on disk — so a subagent that spawns a *further* subagent
   announces the grandchild to nobody, and the grandchild runs exactly as the child did before this
@@ -757,20 +768,92 @@ set; what it did not inherit was the gate — so gating the spawn bought a dialo
   candidate — refusing what cannot be gated, rather than shipping a gate that is not one. It takes a
   capability away from the agent, so it is an amendment to AG-5 rather than a fix.
 
-  **A second candidate arrived on 2026-09-09 and would cost no capability: route by process
-  lineage.** The hook is a subprocess of the `agy` process making the call, so it can read its own
-  ancestry and ask whether this host's `agy` root pid is among its ancestors. That answer is
-  available *at the instant the hook runs* — no registry write to win a race against, no file
-  flushed by someone else — and it closes this residue and the spawn-to-announce race with one
-  mechanism, because a grandchild is a descendant whether or not anyone announced it.
-  [AG-R-12](#ag-r-12)'s property appears to survive it: a session the user starts from their own
-  terminal is not a descendant of ours. **It is a hypothesis, not a finding**, and three things have
-  to be measured before it can displace the deny: whether the hook process's ancestry actually
-  reaches the `agy` that invoked it on 1.1.27, whether a subagent runs in that process or another
-  one, and what pid reuse does to a claim after a host dies. Named by the consultant
-  (`second_opinion`, 2026-09-09) when asked to argue against the deny; the deny stays the recorded
-  candidate until the measurement says otherwise, because a gate designed from a code read is the
-  mistake this row already records once.
+  **The real candidate is neither the deny nor the two userspace schemes that were tried first, and
+  finding that took three rounds with the consultant on 2026-09-09.** All of them attack the same
+  premise — that identity is routed by a `conversationId` somebody has to write down in advance —
+  and the first two attack it with a signal the gated process controls.
+
+  Two dead ends, recorded because the way they die is the argument for what replaced them:
+
+  - **An inherited environment marker** (launch `agy` with a secret in its environment; children,
+    grandchildren and the hook process inherit it; the hook asks *"was I born inside this host's
+    tree?"*). Its corollary is the good idea that survives into the answer: the claim becomes
+    **dynamic**, because the first call carrying the marker *is* the announcement, so there is no
+    footrace to lose. But the marker is mutable data belonging to the process it identifies, and
+    [AG-R-11](#ag-r-11) already measured this agent reaching for `run_command` when a write was
+    refused. It is worse than that adversarial case: `env -i`, build runners, `sudo` and
+    `subprocess(env={})` scrub environments as ordinary practice, so it fails open on benign
+    tooling too. A pid-ancestry walk is the same idea one step better and still loses to a
+    double-fork.
+  - **A private config root** (`--config-dir` / `XDG_CONFIG_HOME`), so the hook exists only for our
+    sessions and can then **fail closed**. This one is self-contradictory, which is the part worth
+    keeping: refusing an unknown conversation refuses *exactly the two cases this row is about* —
+    the grandchild and the early call — so it converts an unsupervised action into a denial of
+    service against our own delegation. And the override has to travel by environment (which
+    reduces it to the first dead end) or by argv (which a shell-spawned process does not inherit).
+
+  **One of this row's own premises was wrong and the consultant caught it.** The argument for
+  keeping the global hook was that an `agy` started indirectly through `run_command` is "at least
+  visible" to it. It is not: that instance gets a fresh conversation id, `registry.lookup` misses,
+  and the hook passes it through. Today's design already supervises indirect instances not at all,
+  so that was never a coverage advantage to protect.
+
+  **The candidate to measure is a kernel-enforced group rather than a userspace marker.** Launch
+  `agy` inside a cgroup of our own — `systemd-run --user --scope --unit=aic-dc-<session>` — and have
+  the hook read `/proc/self/cgroup`. cgroup v2 binds every descendant irrevocably: an unprivileged
+  process cannot move itself out, and `fork`, `env -i`, a subshell and a double-fork all stay inside
+  it. That gives the identity answer at the instant the hook runs, with no registry write to race,
+  which closes **both** residues and lets the claim be adopted dynamically on first contact. The
+  isolation property ([AG-R-12](#ag-r-12)) survives on a stronger footing than it has now, since the
+  user's own session sits in their terminal's scope and simply does not match. Verified available on
+  this machine 2026-09-09: `systemd-run --user --scope` succeeds, and this shell reports
+  `…/app.slice/ptyxis-spawn-<uuid>.scope` — a terminal spawn scope, which is exactly the shape a
+  user's own session would present. `bwrap` is present too, which is the second synthesis: shadow
+  the config directory through a mount namespace so the private-root scheme needs no environment
+  variable and no flag.
+
+  **The containment claim is measured rather than quoted, and it was free to measure** — a scope,
+  four descendants, no `agy` involved. Each printed its own `/proc/self/cgroup`:
+
+  | descendant | in the scope? |
+  |---|---|
+  | direct child | yes |
+  | subshell | yes |
+  | `env -i` (environment fully stripped) | **yes** |
+  | `setsid` double-fork | **yes** |
+
+  The last two are the point: they are precisely the escapes that kill the inherited-marker design
+  and its pid-ancestry variant, and the kernel one survives both. That is the whole argument for
+  preferring it, and it cost one command — which is the argument for measuring the cheap half of a
+  design before writing the probe for the expensive half.
+
+  **Measured on 2026-09-09 and it holds.** `scripts/probe_agy_cgroup_identity.py` ran two real turns
+  and answered all four questions:
+
+      scope unit: aic-dc-probe-e937141e
+      hook invocations inside the scope:  4
+        matched our unit: 4  ['aic-dc-install-probe', 'invoke_subagent',
+                              'list_dir', 'send_message']
+      hook invocations outside the scope: 2  → ptyxis-spawn-…, not ours
+      a subagent's calls carried our unit too: ['list_dir', 'send_message']
+
+  `agy` runs normally inside a scope; the hook subprocess — which `agy` spawns, not us — inherits
+  it; **a subagent's own calls carry it**, which is residue 1's case covered with nothing announced
+  and nothing claimed; and a turn taken outside the scope reported the terminal's own
+  `ptyxis-spawn-…` cgroup, so [AG-R-12](#ag-r-12)'s discriminator discriminates. The control is not
+  decoration: a matcher that answered yes to everything would have passed every other check.
+
+  So **the deny is no longer the recommendation**. It stays recorded as the fallback for one reason
+  only, which the probe reports rather than hides: this is a Linux-and-systemd mechanism and the
+  packaging is not. Where `systemd-run --user --scope` is unavailable the choice is the capability
+  reduction or an unclosed residue, and that is a per-platform answer rather than a design one.
+
+  **One incidental finding, from the probe's own setup.** It reported the installed gate as `stale`
+  before the run, on a machine where it was working: `install.status` compares command *strings*,
+  and the same interpreter spelled `.venv/bin/python3` in the file and `.venv/bin/python` by
+  `sys.executable` is two strings for one program. A stale reading makes `AgySession` refuse to
+  start, so an install that works can present as a broken one after nothing more than a different
+  entry point resolving the interpreter by its other name.
 - **A stale claim now costs more.** `registry.claim` records a `pid` and `registry.lookup` has never
   read it, so a killed session's entries are indistinguishable from live ones and the hook denies on
   them — it refuses whatever it cannot reach. Before this fix that orphaned one entry per session;
@@ -865,12 +948,35 @@ stays *unpinned* by default, and that asymmetry with the consultant is deliberat
 the one the user drives all day and whose cost they feel, so their own tier choice stands; a
 consultation is bought by the answer it gives and has a vendor requirement the master does not.
 
+**The pin is verified live, and the tier bought something measurable.** The argv was captured from
+the running process on 2026-09-09 — `agy … --model gemini-3.8-flash-high` — which is the check the
+missing self-report (below) would otherwise have made impossible. The same AG-R-14 question was then
+put to both tiers *verbatim*, so the difference is the tier and not the prompt: `-low` produced the
+process-lineage idea and the ranking counter; `-high` produced those plus the inherited-token
+refinement that dissolves the race rather than narrowing it, plus the isolated-config-directory
+option that would let the gate fail closed, plus the reason tailing a transcript cannot bootstrap at
+all (the host would have to discover the grandchild's *own* directory from the child's log while the
+grandchild is already running). Neither tier's ranking argument survived contact with the
+measurement, in the same way, which is its own evidence about what a second opinion is for. One
+comparison is not a trend; it is the first entry in the ledger [AG-13](decisions.md#ag-13) has never
+had.
+
 **What is still open:**
 
 - **Report the model with the answer.** The consultation still does not name the model that produced
   it, so a citation in this directory remains an assumption rather than a record. Worth doing
   anyway: a pin is an argument on a command line, and the thing that proves it took effect is on the
   `init` frame.
+- **Gemini's own filters refuse this feature's best use case.** A follow-up round on
+  [AG-R-14](#ag-r-14), phrased in the ordinary vocabulary of an attack on our own gate — "escape the
+  gate", a literal `env -u MARKER agy …` command, "adversarial, prompt-injected" — came back
+  *"blocked by Gemini's filters"* rather than answered. The identical question, reframed as a
+  supervision-design review with the command strings described rather than written, was answered in
+  full and produced the best round of the three. So the tool is refusable exactly where it is most
+  valuable, which is adversarial review of this app's own permission boundary, and the workaround is
+  a phrasing convention rather than a setting. Worth stating in the consultant's own prompt
+  guidance; a user who hits this sees a blocked consultation and no reason to suspect the wording.
+
 - **A pin can go stale.** `gemini-3.8-flash-high` is a name read from `agy models` at 1.1.27 on one
   account. On a plan without that model, or after a rename, the consultation fails rather than
   silently downgrading — which is the right direction, and is the reason this is a note rather than
