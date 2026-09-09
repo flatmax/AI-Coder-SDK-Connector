@@ -44,10 +44,12 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import shutil
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
+from aic_dc.agy import scope
 from aic_dc.agy.gate_server import AgyGateServer
 from aic_dc.agy.steps import AgyTranslator, subagent_entries, unwrap
 from aic_dc.claude_code.messages import Event
@@ -194,7 +196,10 @@ class AgySession:
             # conversation was created, which is the same id the mirror
             # filed the transcript under.
             argv += ["--conversation", self._resume]
-        return argv
+        # AG-R-14, and it goes last so that everything above describes the
+        # `agy` invocation itself rather than the thing launching it.
+        # Unchanged where the platform has no scope to offer.
+        return scope.wrap(argv, getattr(self._gate, "scope_unit", None))
 
     async def start(self) -> str:
         """Spawn, read ``init``, and claim the conversation. Returns its id.
@@ -207,6 +212,20 @@ class AgySession:
             return self._conversation_id or ""
 
         await self._gate.start()
+        # Asked before spawning, not inferred from the spawn failing. Under
+        # a systemd scope the process that `exec` resolves is
+        # `systemd-run`, which exists — so a missing `agy` no longer raises
+        # `FileNotFoundError` and would surface as the opaque "exited
+        # before sending its init frame", which is the diagnostic this
+        # named error was written to replace. The `except` below stays, for
+        # the unscoped path and for a `systemd-run` that goes missing
+        # between the availability probe and here.
+        if shutil.which(self._executable) is None:
+            raise AgyNotInstalledError(
+                f"{self._executable!r} is not on PATH, so the agy transport "
+                "cannot start. Install the Antigravity CLI or choose another "
+                "engine."
+            )
         try:
             self._proc = await asyncio.create_subprocess_exec(
                 *self._argv(),

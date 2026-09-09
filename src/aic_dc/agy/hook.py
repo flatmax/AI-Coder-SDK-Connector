@@ -57,7 +57,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from aic_dc.agy import registry
+from aic_dc.agy import registry, scope
 
 logger = logging.getLogger(__name__)
 
@@ -118,6 +118,20 @@ def decide(
 
     conversation_id = payload.get("conversationId")
     entry = registry.lookup(conversation_id, config_dir=config_dir)
+    if entry is None:
+        # AG-R-14. Nobody registered this conversation — which is the
+        # ordinary case for a stranger's session, and *also* what a
+        # subagent, a grandchild, and a child whose announcement has not
+        # arrived yet all look like. The two are told apart by asking the
+        # kernel rather than the registry: a call from inside a scope this
+        # host created is ours no matter who never wrote its id down.
+        #
+        # Second, not first, because it is the fallback path: a machine
+        # without systemd has no scopes and every call takes the branch
+        # above, exactly as it did before this existed.
+        entry = registry.scope_owner(
+            scope.current_cgroup(), config_dir=config_dir
+        )
     if entry is None:
         # Not ours. The overwhelmingly common case, because this hook is
         # global: the user's own `agy` sessions land here and must leave

@@ -707,8 +707,18 @@ managed file needs the merge or it needs a file of its own.
 
 ## AG-R-14 — A subagent's tool calls do not reach the gate
 
-**Severity: critical. Likelihood: MEASURED — it happened, on 2026-09-09, and the main case is
-fixed. Three residues are open.**
+**Severity: critical. Likelihood: MEASURED — it happened on 2026-09-09, the main case was fixed the
+same day, and the two residues that mattered were closed on 2026-09-10 by changing what identity
+*is*.** On a systemd platform the gate no longer depends on anyone registering a conversation before
+it speaks: `agy` runs in a cgroup of ours and the hook asks the kernel. Where that is unavailable the
+original mechanism and its residues stand, which is a per-platform gap rather than a design one.
+
+> **Outcome, 2026-09-10: the registry was switched off and the gate still held.**
+> `probe_agy_subagent_gate.py`, re-run with `AgyGateServer.claim` replaced by a no-op for **both**
+> the parent and the subagent, still put all eight tool calls to the dialog — the subagent's seven
+> included — and the deny still left the target file byte-identical. Conversation claims were inert
+> and cgroup identity carried the whole load. `run_command` and `find_by_name` appear in that list,
+> which is [AG-R-11](#ag-r-11) looking for another way out and being gated on each attempt.
 
 > **Outcome: the gate was bypassed entirely.** `scripts/probe_agy_subagent_gate.py` denied every tool
 > call except the delegation itself and watched the subagent's edit land anyway. The gate was asked

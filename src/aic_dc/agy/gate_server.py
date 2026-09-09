@@ -60,7 +60,7 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
-from aic_dc.agy import registry
+from aic_dc.agy import registry, scope
 from aic_dc.antigravity.permissions import (
     AntigravityPermissionGate,
     denormalise_args,
@@ -185,6 +185,15 @@ class AgyGateServer:
         # its subagents' while they run. See `claim`.
         self._claimed: set[str] = set()
         self._refusal: str | None = None
+        #: The systemd scope `agy` will be launched into, or None where the
+        #: platform has none. Named at construction rather than at `start`
+        #: so `AgySession` can read it while assembling argv, and held here
+        #: rather than on the session because the registry entry it backs
+        #: maps the unit to *this server's socket* — the same pairing
+        #: `claim` publishes, for the calls a claim cannot cover in time.
+        self._scope_unit: str | None = (
+            scope.unit_name() if scope.available() else None
+        )
 
     @property
     def asks(self) -> bool:
@@ -199,6 +208,18 @@ class AgyGateServer:
     @property
     def socket_path(self) -> Path:
         return self._socket_path
+
+    @property
+    def scope_unit(self) -> str | None:
+        """The systemd scope to launch ``agy`` into, or ``None``.
+
+        Read by :class:`~aic_dc.agy.session.AgySession` when it assembles
+        argv. ``None`` is an ordinary answer, not a failure: it is every
+        platform without a systemd user manager, and it means the session
+        runs exactly as it did before AG-R-14 — routed by conversation
+        claims, with that row's residues intact.
+        """
+        return self._scope_unit
 
     def refuse_all(self, reason: str) -> None:
         """Refuse every subsequent call without asking. This is ⏹.
@@ -239,6 +260,17 @@ class AgyGateServer:
         self._server = await asyncio.start_unix_server(
             self._handle, path=str(self._socket_path)
         )
+        # AG-R-14. Published *before* `agy` is launched, which is what makes
+        # it a fix rather than a narrower race: a conversation claim can be
+        # late because the conversation exists before we are told its id,
+        # and a scope claim cannot, because the scope does not exist until
+        # the session creates it. Everything the kernel later puts inside —
+        # a subagent, a grandchild, a shell command's own child — is
+        # covered by an entry that was already on disk.
+        if self._scope_unit:
+            registry.claim_scope(
+                self._scope_unit, self._socket_path, config_dir=self._config_dir
+            )
 
     def claim(self, conversation_id: str) -> None:
         """Take ownership of a conversation, so the hook stops passing it through.
@@ -294,6 +326,12 @@ class AgyGateServer:
         for conversation_id in sorted(self._claimed):
             registry.release(conversation_id, config_dir=self._config_dir)
         self._claimed.clear()
+        # And the scope, for the same reason and with more force: it is
+        # matched on a unit name rather than on an id `agy` generated, so a
+        # unit left behind would adopt any later process systemd happened
+        # to place in a scope of that name.
+        if self._scope_unit:
+            registry.release_scope(self._scope_unit, config_dir=self._config_dir)
         server, self._server = self._server, None
         if server is not None:
             server.close()

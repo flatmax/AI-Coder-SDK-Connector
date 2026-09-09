@@ -149,6 +149,102 @@ def lookup(
     return entry
 
 
+#: Filename prefix for a *scope* entry, which maps a systemd unit to the
+#: socket of the host that created it. Distinct from a conversation entry so
+#: that :func:`owns_anything` and :func:`lookup` cannot confuse the two — one
+#: is keyed by an id `agy` chose, the other by a unit we chose.
+SCOPE_PREFIX = "scope-"
+
+
+def _scope_path(unit: str, config_dir: Path | str | None = None) -> Path:
+    safe = Path(str(unit)).name
+    return registry_dir(config_dir) / f"{SCOPE_PREFIX}{safe}.json"
+
+
+def claim_scope(
+    unit: str,
+    socket_path: str | Path,
+    *,
+    config_dir: Path | str | None = None,
+    pid: int | None = None,
+) -> Path:
+    """Record that conversations inside ``unit`` belong to this host.
+
+    **Written before ``agy`` is launched**, which is the whole point
+    ([AG-R-14](../../../specs5/plan-ag/risks.md#ag-r-14)). A conversation
+    claim races the child that it describes, because the child exists before
+    anyone can name it; a scope claim describes a *container* that does not
+    exist yet either, so there is nothing to be late for. Every process the
+    kernel later puts in that group — a subagent, a grandchild, a shell
+    command's own subprocess — is covered by an entry that was already on
+    disk before any of them could run.
+    """
+    path = _scope_path(unit, config_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "unit": str(unit),
+        "socket": str(socket_path),
+        "pid": int(pid if pid is not None else os.getpid()),
+    }
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(payload), encoding="utf-8")
+    tmp.replace(path)
+    return path
+
+
+def release_scope(unit: str, *, config_dir: Path | str | None = None) -> None:
+    """Give up a scope. Safe to call twice, and on a unit never claimed."""
+    try:
+        _scope_path(unit, config_dir).unlink(missing_ok=True)
+    except OSError:  # noqa: BLE001 - teardown must not raise
+        logger.exception("Could not release the agy scope entry")
+
+
+def scope_owner(
+    cgroup: str, *, config_dir: Path | str | None = None
+) -> dict[str, Any] | None:
+    """The host owning the scope ``cgroup`` names, or ``None``.
+
+    Called by the hook with its **own** cgroup, which the kernel guarantees
+    it inherited from whatever launched it. This is the question a claim
+    cannot answer in time: a subagent's first call, and a grandchild's every
+    call, arrive with a conversation id nobody has registered — but they
+    arrive from inside a group that was registered before the session
+    started.
+
+    **Matched against the units this host registered**, never against the
+    name's shape. A prefix test would let any process in a scope somebody
+    else happened to call ``aic-dc-…`` route into our dialog; a directory
+    of entries we wrote cannot be imitated by naming a unit.
+
+    ``None`` for every cgroup that matches nothing, which is the answer for
+    the user's own sessions — they sit in their terminal's scope — and keeps
+    [AG-R-12](../../../specs5/plan-ag/risks.md#ag-r-12) true by the same
+    passthrough that has always kept it true.
+    """
+    if not isinstance(cgroup, str) or not cgroup:
+        return None
+    directory = registry_dir(config_dir)
+    try:
+        entries = sorted(directory.glob(f"{SCOPE_PREFIX}*.json"))
+    except OSError:
+        return None
+    for path in entries:
+        try:
+            entry = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(entry, dict) or not entry.get("socket"):
+            continue
+        unit = str(entry.get("unit") or "")
+        # `.scope` rather than a bare substring: systemd renders the unit in
+        # the path as `<unit>.scope`, and matching the bare name would also
+        # match a longer unit that merely starts with ours.
+        if unit and f"{unit}.scope" in cgroup:
+            return entry
+    return None
+
+
 def owns_anything(config_dir: Path | str | None = None) -> bool:
     """Whether this host claims **any** conversation right now.
 
