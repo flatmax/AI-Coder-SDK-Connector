@@ -4298,10 +4298,26 @@ existing at all.
 
 ### What this does not do
 
-- **The engine has the same gap.** A user asking the `agy` engine — rather than the consultant — for
-  an image gets a file in `brain/` that the file tree cannot see. The collector lives in the
-  consultant because that is where the criterion was; the same reasoning applies one level up, and it
-  is unbuilt rather than decided against.
+- ~~**The engine has the same gap.**~~ **Closed 2026-09-08, `2cbb61a1`.** A user asking the `agy`
+  engine — rather than the consultant — for an image got a file in `brain/` that the file tree could
+  not see: produced correctly, then invisible to the tree, the viewer and the user. The collector had
+  lived in the consultant because that is where the criterion was, and "the same reasoning applies one
+  level up" is what the fix is. `BRAIN_DIR` and the locator moved into `steps.py` where both callers
+  reach them; the translator collects after a successful call and reports the landed path in
+  `files_modified`, so the tree reloads. The service supplies the repo root and the conversation id,
+  because neither appears in the turn's own frames.
+
+  **The locator grew two options rather than one, and the reason is the difference between the
+  callers.** A consultation is one process holding one conversation for one call, so *newest file in
+  the directory* is safe there and stays behind `allow_newest`. An engine conversation is long-lived
+  and resumable, so its directory accumulates every turn's images and a reused `ImageName` would
+  collect an **earlier** picture and report it as this turn's — `min_mtime` bounds the search to the
+  turn. A locator is only as safe as the lifetime of the thing it searches.
+
+  It also dropped the `OutputPath` alias from `generate_image` in `tools.py`. It is a result field on
+  the SDK transport and never an argument, so it matched no real call and its only effect was claiming
+  the permission dialog could show a PATH it cannot — the same falsified-argument finding as above,
+  one place it had been left behind.
 - **Nothing renders the collected image.** It lands in the repository, so the file tree and the
   viewer find it by the ordinary path, but no consultation tab shows a thumbnail.
 - **The `.jpg` is not converted.** What the harness produced is what lands, which is the honest thing
