@@ -4392,3 +4392,131 @@ when a claim fails. The twelfth reads the source of `stream_frames` and asserts 
 `_gate_subagents` appears before `yield frame`. That is the residue's size pinned as a test: the race
 window is a frame read, and a refactor that moved the claim into the translator or after the yield
 would widen it to the subagent's whole life without failing anything else.
+
+---
+
+## Identity by cgroup, not by claim (2026-09-10)
+
+Two of the three residues above are closed, and not by claiming faster. [AG-18](decisions.md#ag-18)
+holds the decision and [AG-R-14](risks.md#ag-r-14) the risk; this is what was built and what it was
+measured against.
+
+### The two residues were one premise
+
+The spawn-to-announce race and the nested-delegation blind spot read as separate bugs and are the
+same one. [AG-14](decisions.md#ag-14)'s gate decides ownership by looking up a **conversation id**
+somebody wrote down in advance, and both residues are cases where nobody could: `agy` starts a child
+before the frame naming it arrives, and a subagent's own frames never reach this host at all, so a
+grandchild is announced to nobody. Every fix aimed at the claim is a fix aimed at how *fast* it lands,
+and one of the two cases has no claim to be late with.
+
+So the premise went instead. **A container can be registered before it contains anything.** `agy` is
+launched inside a systemd user scope, and the hook asks the kernel which group it is in.
+
+### What landed
+
+`src/aic_dc/agy/scope.py` is the new module and it is four functions: `available()`, `unit_name()`,
+`wrap()` and `current_cgroup()`. Around it:
+
+- `AgyGateServer` names its unit **at construction** (`scope.unit_name() if scope.available()`) and
+  publishes `registry.claim_scope(unit, socket)` inside `start()`, *before* `AgySession` spawns
+  anything. That ordering is the fix rather than an implementation detail: a conversation claim can be
+  late because the conversation exists before we are told its id, and a scope claim cannot, because
+  the scope does not exist until we create it.
+- `registry` gains `claim_scope`, `release_scope` and `scope_owner`, under a `scope-` filename prefix
+  so `lookup` and `owns_anything` cannot confuse a unit we chose with an id `agy` chose.
+- `hook.decide` consults `registry.scope_owner(scope.current_cgroup())` **only when the conversation
+  lookup misses**. Second, not first, because it is the fallback: a machine with no systemd never
+  leaves the old branch, which is what makes this additive rather than a rewrite of a shipped gate.
+- `AgySession._argv` ends with `scope.wrap(argv, self._gate.scope_unit)`, and returns argv untouched
+  where the unit is `None`.
+
+**`available()` runs a scope rather than testing for the binary.** `systemd-run` exists in containers
+and on machines with no running user manager, where it is present and fails — and a capability
+asserted rather than exercised is how this directory has been wrong before. It is `lru_cache`d,
+because it is a property of the machine and it costs a subprocess in the path of starting a session.
+
+**Matching is against the units this host registered, never against the name's shape.** A prefix test
+on `aic-dc-` would let anything in a scope a stranger happened to name that way route into our dialog.
+`scope_owner` walks the entries we wrote, and matches `f"{unit}.scope" in cgroup` rather than the bare
+name, so a longer unit that merely starts with ours does not match either. [AG-R-12](risks.md#ag-r-12)
+survives on a stronger footing than it had: the user's own session sits in their terminal's spawn
+scope and simply is not in the directory.
+
+### The measurement, and then the falsification
+
+`scripts/probe_agy_cgroup_identity.py` ran two real turns on 2026-09-09 and answered the four
+questions the design needed — `agy` runs normally inside a scope, the hook subprocess (which `agy`
+spawns, not us) inherits it, **a subagent's own calls carry it**, and a turn taken outside the scope
+reported the terminal's `ptyxis-spawn-…` cgroup instead. The last row is the control: a matcher that
+answered yes to everything would have passed the other three.
+
+That establishes the mechanism works. It does not establish it is **load-bearing**, because the
+registry was still running underneath it and a claim that happened to land in time would produce the
+same log. So `probe_agy_subagent_gate.py` was re-run with `AgyGateServer.claim` replaced by a no-op
+for *both* the parent and the subagent. All eight tool calls still reached the dialog — the subagent's
+seven included — and the deny still left the target file byte-identical. Conversation claims were
+inert and cgroup identity carried the whole load.
+
+`run_command` and `find_by_name` are in that list, which is [AG-R-11](risks.md#ag-r-11) looking for
+another way out of a refused write and being gated on each attempt.
+
+### The defect the change caused, found before it shipped
+
+Under a scope, the program `exec` resolves is `systemd-run`, which exists. So a missing `agy` stopped
+raising `FileNotFoundError` and would have surfaced as *"exited before sending its init frame"* — the
+opaque diagnostic that `AgyNotInstalledError` was written to replace. `start()` now checks
+`shutil.which(self._executable)` before spawning. The `except FileNotFoundError` stays, for the
+unscoped path and for a `systemd-run` that goes missing between the availability probe and the spawn.
+
+This is the shape of thing a wrapper does: it moves the identity of the process being launched, and
+every error keyed off that identity moves with it.
+
+### What this does not do
+
+**It is Linux-and-systemd, and the packaging is not.** Where `available()` says no, everything
+degrades to the conversation-id routing that shipped before, with both residues intact — so on the
+macOS and Windows artefacts phase 7 publishes, AG-R-14 is unfixed. That is stated in `scope.py`'s own
+module docstring rather than left to be discovered, and the choice for those platforms — the
+capability-reducing deny, or an unclosed residue — is open. See [AG-18](decisions.md#ag-18)
+§ *What it costs on the platforms that cannot*.
+
+**The third residue is untouched and now has a second reason to matter.** `registry.claim_scope`
+records a `pid` that nothing reads, exactly as `claim` has since AG-14, so a killed host leaves an
+entry the hook will route to and then deny on. For a conversation entry that orphans an id `agy`
+generated and will never generate again; for a *scope* entry it orphans a **unit name**, and a name is
+something systemd could hand to a later process. The window is small and the fix is the one already
+named: read the pid that is already being written.
+
+### The incidental finding, which was a working gate reporting itself broken
+
+The probe's own setup reported the installed gate as `stale` on a machine where it was live.
+`install.status` compared command **strings**, and one venv ships `python`, `python3` and
+`python3.13` in one directory pointing at one program — so an entry written by a process started as
+`.venv/bin/python3` did not match a status call from `.venv/bin/python`. `AgySession` refuses to start
+on a stale reading, so the whole transport was one entry point away from presenting as broken for a
+reason that is not a fault.
+
+Fixed the same day, and **the interesting part is the fix that was rejected**. Resolving both paths
+and comparing the targets forgives the spelling — and forgives far too much, because every venv's
+`python` resolves to the *system* interpreter, so two different checkouts would compare equal and
+`status` would report `current` for an install belonging to someone else. That is the exact condition
+`stale` was written to report. So the parent directories are compared first, through `realpath` so a
+checkout reached by a symlink is still itself, and only then the interpreters. String equality still
+answers first and touches no filesystem, because it is the answer almost every time.
+
+Four tests, and the second is the one that keeps the first honest: the other spelling is `current`, a
+second checkout is still `stale`, a different `config_dir` with the same interpreter is still `stale`
+— only the interpreter is forgiven, never the arguments — and a deleted interpreter is `stale` rather
+than an `OSError` raised at a Settings caller.
+
+### The tests
+
+Seventeen, offline, in `tests/test_agy_scope.py`, and the ones that matter are the negatives. A scope
+we registered is ours; a terminal's own scope is not; **a unit named like ours but never registered is
+not**, which is the imitation attack; a longer unit sharing our prefix is not; a released scope stops
+being ours; a scope entry is not a conversation. Then the hook's four: an unclaimed conversation
+inside our scope is gated (the residues' case), a stranger in their own scope is still passed through
+(AG-R-12), a claimed conversation still wins, and **no scope means no change at all** — the tripwire
+that says this is additive to the shipped gate rather than a replacement of it. Plus publish-before-
+spawn, release-on-stop, and argv wrapped and unwrapped.

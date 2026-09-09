@@ -309,6 +309,16 @@ exists on this engine.
 | `start_subagent` / `invoke_subagent` | **still asks** |
 | a write whose path cannot be read | still asks |
 
+> **Corrected 2026-09-09 by [AG-R-14](risks.md#ag-r-14), and completed 2026-09-10 by
+> [AG-18](#ag-18).** The spawners are in the *still asks* column because a subagent gets the whole
+> tool set, so approving a delegation is approving everything it may then do. That was the right
+> place to put them and it was doing none of the work claimed for it: the subagent's own calls
+> reached no dialog at all, so a row that reads as "this one is dangerous enough to always confirm"
+> was in fact **the only** confirmation on that whole branch of execution. Measured, not inferred —
+> `probe_agy_subagent_gate.py` denied everything but the delegation and watched the subagent's edit
+> land. The dialog on the spawn is now what this row always meant it to be, because the calls under
+> it are gated too.
+
 What this decision was protecting was never "edits are dangerous". It was the *execution* path:
 [AG-R-11](risks.md#ag-r-11) measured the agent, refused an `edit_file`, reaching for `sed -i`, then
 inline `python3`, then `list_dir` — three routes to one write, every one through the shell. A posture
@@ -700,6 +710,13 @@ That last row is what unblocked the decision. Workspace-local `hooks.json` does 
 own unrelated `agy` sessions. `workspacePaths` is **empty** in every captured payload and cannot scope
 it. `conversationId` can: AIC⚡DC learns its conversation id from the `init` frame before any tool call
 arrives, so the hook can allow-and-return immediately for any conversation the host does not own.
+
+> **Amended 2026-09-10 by [AG-18](#ag-18): `conversationId` is no longer the primary scope.** It is
+> correct for every conversation somebody announces, and [AG-R-14](risks.md#ag-r-14) is the two cases
+> where nobody does — a subagent whose first call outruns its announcement, and a grandchild that is
+> never announced at all. On a systemd platform the hook now asks the kernel which cgroup it is in and
+> consults the conversation registry only when that answers nothing; elsewhere this row still
+> describes the whole mechanism, residues included.
 
 ### It is a selectable engine, labelled by which account pays **(user, 2026-09-03)**
 
@@ -1179,3 +1196,99 @@ And the tripwire that keeps it true: a test asserting that **every** Antigravity
 consults the allowlist, so a future surface cannot be added beside them and inherit the old default.
 That is the failure this entry was written about — a mount condition that answered `which("agy")` and
 nothing else, correct on the day it was written and wrong the day the product met a workplace.
+
+---
+
+## AG-18 — The gate's identity is a cgroup, not a conversation id
+
+**Decided 2026-09-10, and it amends [AG-14](#ag-14) rather than reversing it.** The `agy` gate keeps
+its shape — a global `PreToolUse` hook, a Unix socket per session, the shared `PermissionBroker`
+behind it, and a passthrough for everything that is not ours. What changes is the question the hook
+asks to decide *ours*: **on a systemd platform it asks the kernel which cgroup it is in, and only
+falls back to the conversation registry when that answers nothing.**
+
+### What forced it
+
+AG-14 chose `conversationId` because it was the one field in the hook payload that could scope a
+global hook to our own sessions — `workspacePaths` is empty in every captured payload, and
+workspace-local `hooks.json` does not load headlessly. That reasoning was correct and remains correct;
+it was also **complete only for conversations somebody tells us about**.
+
+[AG-R-14](risks.md#ag-r-14) is the two cases where nobody can. `agy` starts a subagent *before* the
+frame announcing it arrives, so the child's first call can beat the claim onto disk. And a subagent's
+own frames never reach this host, so a subagent that spawns a further subagent announces the
+grandchild to nobody at all. The second has no claim to be late with, which is the tell: this is not a
+latency problem with a tighter fix available, it is the premise that **identity is something written
+down in advance**.
+
+### Why the kernel, and not a marker of our own
+
+Two userspace schemes were designed and rejected before this one, and the way they die is the argument
+for what replaced them. Both are recorded at length in [AG-R-14](risks.md#ag-r-14); in short:
+
+| Candidate | Why not |
+|---|---|
+| An inherited environment marker | It is mutable data belonging to the process it identifies. [AG-R-11](risks.md#ag-r-11) already measured this agent reaching for `run_command` when a write was refused — and it is worse than the adversarial case, because `env -i`, build runners and `subprocess(env={})` scrub environments as ordinary practice, so it fails open on benign tooling |
+| Walking the process ancestry | The same idea one step better, and still defeated by a standard double-fork |
+| A private config root, so the hook exists only for our sessions and can fail closed | Self-contradictory: refusing an unknown conversation refuses *exactly the two cases this is about*, converting an unsupervised action into a denial of service against our own delegation. And the override has to travel by environment (the first row) or by argv (which a shell-spawned process does not inherit) |
+
+cgroup v2 has neither weakness, because **membership is enforced by the kernel rather than carried by
+the process**: an unprivileged process cannot move itself out, and every descendant is bound. Measured
+before anything was built, because it was nearly free to measure — one scope, four descendants, each
+printing its own `/proc/self/cgroup`:
+
+| descendant | in the scope? |
+|---|---|
+| direct child | yes |
+| subshell | yes |
+| `env -i` (environment fully stripped) | **yes** |
+| `setsid` double-fork | **yes** |
+
+The last two are precisely the escapes that kill the marker design and its ancestry variant.
+
+### The three properties this turns on
+
+- **The registration precedes the thing it describes.** `AgyGateServer.start` publishes the unit → socket
+  entry before `AgySession` spawns anything, so there is no race to lose: a conversation exists before
+  we are told its id, and a scope does not exist until we make it. Everything the kernel later places
+  inside — a subagent, a grandchild, a shell command's own subprocess — is covered by an entry that was
+  already on disk.
+- **Recognition is by registration, never by name.** A prefix test on `aic-dc-` would let any process
+  in a scope somebody else named that way route into our dialog, which is a worse hole than the one
+  being closed. `registry.scope_owner` matches against the entries this host wrote, and against
+  `<unit>.scope` rather than the bare unit, so a longer unit sharing our prefix does not match.
+  [AG-R-12](risks.md#ag-r-12)'s isolation property therefore holds by a stronger mechanism than it did:
+  the user's own session sits in their terminal's spawn scope and is not in the directory.
+- **It is consulted second.** The conversation lookup runs first and the cgroup question is the
+  fallback, so a platform with no scopes never leaves the path that shipped in AG-14. That ordering is
+  what makes this additive to a working gate rather than a rewrite of one, and there is a test named
+  for it.
+
+### What it costs on the platforms that cannot
+
+`systemd-run --user --scope` is Linux with a running user manager. Phase 7 publishes macOS and Windows
+artefacts, and on those `scope.available()` is `False`, everything degrades to conversation-id routing,
+and **AG-R-14's two residues stand**. That is a per-platform gap rather than a design one, and this
+entry does not pretend otherwise — it is stated in `scope.py`'s module docstring, where someone
+porting will read it.
+
+**What to do about those platforms is deliberately left open**, because both answers cost something a
+decision should not spend silently. Denying a spawn that arrives from an already-claimed subagent
+conversation closes the nesting case by refusing what cannot be gated — an amendment to
+[AG-5](#ag-5), taking a capability away from the agent. Accepting the residue keeps the capability and
+ships a gate that is weaker on two of three published targets than on the one it was measured on.
+Neither should be chosen by whoever next touches this file without saying so.
+
+### Exit criterion
+
+**Met 2026-09-10, and by falsification rather than by a green log.** `scripts/probe_agy_cgroup_identity.py`
+had already shown the mechanism working on two real turns — the hook subprocess inheriting the scope, a
+subagent's calls carrying it, and a turn outside the scope reporting the terminal's own cgroup, which is
+the control. That is not enough on its own: the registry was still running underneath, so a claim that
+landed in time would print the same result.
+
+So the criterion is `probe_agy_subagent_gate.py` **with `AgyGateServer.claim` stubbed to a no-op on both
+the parent and the subagent**: all eight tool calls still reached the dialog, the subagent's seven
+included, and the deny still left the target file byte-identical. Conversation claims were inert and
+cgroup identity carried the load alone. A mechanism that is only ever measured with its predecessor
+running is a mechanism whose contribution has not been measured.

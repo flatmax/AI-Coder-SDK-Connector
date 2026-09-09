@@ -112,6 +112,71 @@ class TestDetection:
         assert "not valid JSON" in report["detail"]
 
 
+class TestOneInterpreterWithTwoNames:
+    """A venv's ``python`` and ``python3`` are one program, and ``status``
+    used to call them two installs.
+
+    Found 2026-09-10 by ``probe_agy_cgroup_identity.py``'s setup, which
+    reported the gate ``stale`` on a machine where it was working: the
+    entry had been written by a process started as ``.venv/bin/python3``
+    and the probe asked as ``.venv/bin/python``. A ``stale`` reading makes
+    ``AgySession`` refuse to start, so an install that works presents as a
+    broken one — and the cause is nothing but which name resolved the
+    interpreter. See ``specs5/plan-ag/risks.md`` AG-R-14.
+
+    The second test is the one that keeps the first honest. Forgiving the
+    spelling by resolving both paths would resolve *every* venv's python to
+    the system interpreter and call two checkouts the same install, which
+    is precisely what ``stale`` exists to report.
+    """
+
+    def _venv(self, root, name="venv"):
+        """A ``bin`` directory with ``python`` and ``python3`` in it.
+
+        Shaped like the real thing: ``python3`` is a symlink to ``python``,
+        which is itself a symlink to the interpreter running these tests.
+        """
+        binaries = root / name / "bin"
+        binaries.mkdir(parents=True)
+        (binaries / "python").symlink_to(sys.executable)
+        (binaries / "python3").symlink_to(binaries / "python")
+        return binaries
+
+    def test_the_other_spelling_of_one_interpreter_is_current(
+        self, hooks, cfg, tmp_path
+    ):
+        binaries = self._venv(tmp_path)
+        _write_entry(hooks, install.hook_command(cfg, str(binaries / "python3")))
+        report = install.status(cfg, path=hooks, python=str(binaries / "python"))
+        assert report["state"] == "current"
+
+    def test_a_second_checkout_is_still_stale(self, hooks, cfg, tmp_path):
+        ours = self._venv(tmp_path, "ours")
+        theirs = self._venv(tmp_path, "theirs")
+        _write_entry(hooks, install.hook_command(cfg, str(theirs / "python")))
+        report = install.status(cfg, path=hooks, python=str(ours / "python"))
+        assert report["state"] == "stale"
+
+    def test_only_the_interpreter_is_forgiven_not_the_arguments(
+        self, hooks, cfg, tmp_path
+    ):
+        binaries = self._venv(tmp_path)
+        _write_entry(
+            hooks,
+            install.hook_command(tmp_path / "another-config", str(binaries / "python3")),
+        )
+        report = install.status(cfg, path=hooks, python=str(binaries / "python"))
+        assert report["state"] == "stale"
+
+    def test_an_interpreter_that_is_gone_is_stale_rather_than_an_error(
+        self, hooks, cfg, tmp_path
+    ):
+        binaries = self._venv(tmp_path)
+        _write_entry(hooks, install.hook_command(cfg, str(binaries / "python9")))
+        report = install.status(cfg, path=hooks, python=str(binaries / "python"))
+        assert report["state"] == "stale"
+
+
 class TestItRespectsSomebodyElsesFile:
     def test_installing_preserves_other_hooks(self, hooks, cfg):
         mine = {"my-linter": {"PostToolUse": [{"matcher": "*", "hooks": []}]}}

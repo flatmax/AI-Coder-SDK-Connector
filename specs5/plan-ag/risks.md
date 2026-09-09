@@ -739,9 +739,21 @@ asks* column with the reason "a subagent inherits the tool set". The subagent do
 set; what it did not inherit was the gate — so gating the spawn bought a dialog on the word
 "delegate" and no review of anything done under it.
 
-### The three residues, none of them mitigated
+### The three residues — two closed on systemd, one open everywhere
 
-- **The spawn-to-announce race.** `agy` starts the child before the frame announcing it arrives, so a
+**Read the two closures as conditional.** [AG-18](decisions.md#ag-18) removes the premise both of the
+first two residues rest on, and it removes it *where `systemd-run --user --scope` works*. Where it does
+not, `scope.available()` answers `False`, the gate falls back to the conversation-id routing described
+below, and these bullets describe the live behaviour rather than the history. They are kept in the
+present tense for that reason. Residue 3 is unmitigated on every platform.
+
+- **The spawn-to-announce race. Closed on systemd (2026-09-10).** The scope entry is published before
+  `agy` is spawned, so a child's first call arrives inside a group that was registered before the
+  child could exist. The measurement below stands as the record of what was open, and the paragraph
+  after it — that the window was never quantified — is now moot rather than answered: nothing is
+  waiting on a claim.
+
+  `agy` starts the child before the frame announcing it arrives, so a
   tool call made in that window reaches the hook before the claim is on disk. This side cannot close
   it as built: `invoke_subagent`'s arguments carry only `Prompt`, `Role`, `TypeName`, `Model` and
   `Workspace` — **no conversation id**, because the child does not exist when the dialog for the spawn
@@ -769,7 +781,14 @@ set; what it did not inherit was the gate — so gating the spawn bought a dialo
   a distribution, not another opinion** — the interval between a subagent's first tool call reaching
   the hook and the claim landing on disk, over many spawns, which the existing probe is most of the
   way to being able to report.
-- **Nested delegation is a blind spot at full width.** A subagent's own frames never reach this host —
+- **Nested delegation is a blind spot at full width. Closed on systemd (2026-09-10).** The kernel puts
+  a grandchild in the same group as its parent whether or not anyone announced it, so the hook
+  recognises it with nothing written down. This is the residue that could not be closed by claiming
+  faster, and it is why the whole premise went instead — see [AG-18](decisions.md#ag-18). The
+  deny-the-nested-spawn candidate below is **no longer the recommendation on this platform**, and
+  stays recorded as the standing option for the platforms that have no scope.
+
+  A subagent's own frames never reach this host —
   its work appears only in its transcript on disk — so a subagent that spawns a *further* subagent
   announces the grandchild to nobody, and the grandchild runs exactly as the child did before this
   fix. Watching the child's `transcript.jsonl` is the obvious answer and is not a sound one: the file
@@ -858,12 +877,31 @@ set; what it did not inherit was the gate — so gating the spawn bought a dialo
   packaging is not. Where `systemd-run --user --scope` is unavailable the choice is the capability
   reduction or an unclosed residue, and that is a per-platform answer rather than a design one.
 
+  **Built 2026-09-10** — `src/aic_dc/agy/scope.py`, `registry.claim_scope` / `scope_owner`, a
+  fallback branch in `hook.decide`, and 17 tests. The probe above measured that the mechanism
+  *works*; what it could not measure is whether it is **load-bearing**, because the conversation
+  registry was still running underneath and a claim that landed in time prints the same result. So
+  `probe_agy_subagent_gate.py` was re-run with `AgyGateServer.claim` stubbed to a no-op on both the
+  parent and the subagent: all eight calls still reached the dialog and the deny still held. That is
+  the outcome quoted at the top of this entry, and it is the reason these two residues are marked
+  closed rather than mitigated. See [AG-18](decisions.md#ag-18).
+
   **One incidental finding, from the probe's own setup.** It reported the installed gate as `stale`
   before the run, on a machine where it was working: `install.status` compares command *strings*,
   and the same interpreter spelled `.venv/bin/python3` in the file and `.venv/bin/python` by
   `sys.executable` is two strings for one program. A stale reading makes `AgySession` refuse to
   start, so an install that works can present as a broken one after nothing more than a different
   entry point resolving the interpreter by its other name.
+
+  **Fixed 2026-09-10.** String equality still answers first, and one difference is now forgiven:
+  same directory, same file, different name. **Resolving both paths would have been the wrong fix and
+  the tests say so** — every venv's `python` resolves to the *system* interpreter, so a bare
+  `samefile` would call two different checkouts the same install, which is the case `stale` exists to
+  report. So the parent directories are compared first (through `realpath`, so a checkout reached by
+  a symlink is still itself) and only then the interpreters themselves. Four tests: the other
+  spelling reads `current`, a second checkout is still `stale`, a different `config_dir` with the
+  same interpreter is still `stale` — only the interpreter is forgiven, never the arguments — and an
+  interpreter that has been deleted is `stale` rather than an exception thrown at a Settings caller.
 - **A stale claim now costs more.** `registry.claim` records a `pid` and `registry.lookup` has never
   read it, so a killed session's entries are indistinguishable from live ones and the hook denies on
   them — it refuses whatever it cannot reach. Before this fix that orphaned one entry per session;
@@ -874,6 +912,19 @@ set; what it did not inherit was the gate — so gating the spawn bought a dialo
   entry stops being an annoyance and becomes a block: the poll finds a claim, the socket behind it
   answers nothing, and the hook denies. Whatever order the three are taken in, this one lands before
   the hold does. Named by the consultant on 2026-09-09.
+
+  **Its original argument expired on 2026-09-10 and it got a better one.** The tentative hold was
+  never built, because [AG-18](decisions.md#ag-18) closed the race a different way — so this is no
+  longer a prerequisite of anything, and it is *more* exposed rather than less. `registry.claim_scope`
+  writes a `pid` that `scope_owner` does not read, exactly as `claim` writes one that `lookup` does
+  not. The difference is what gets orphaned. A stale conversation entry holds an id `agy` generated
+  and will never generate again, so a dead host's leftovers are inert until someone resumes that
+  conversation. A stale **scope** entry holds a *unit name* — and a unit name is something systemd
+  can hand to a later process, so an entry left behind by a crash would route a stranger's scope of
+  that name into a socket that answers nothing, and the hook would deny it. `release_scope` runs at
+  `stop()` and covers the ordinary path; a crash is the case with nothing behind it. **The fix is
+  unchanged and now overdue: read the pid that is already on disk**, and treat an entry whose process
+  is gone as absent rather than as ours.
 
 **Two of the three were named by the consultant** (`second_opinion`, 2026-09-09) rather than by the
 author of the fix, which is the first time this feature has been used on this repository's own work

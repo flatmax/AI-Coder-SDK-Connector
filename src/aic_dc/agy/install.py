@@ -240,6 +240,17 @@ def status(
       interpreter. Usually another checkout, or a virtualenv that has
       moved. Still safe for the user thanks to the ``||`` fallback, but our
       own sessions would not be gated by *this* build.
+
+      **Different, not differently spelled** (2026-09-10). This compared
+      command strings, so one venv's ``bin/python3`` and ``bin/python`` —
+      one program, two names, and which one appears depends only on how
+      the process that wrote the entry was started — read as two installs.
+      A ``stale`` reading makes :class:`~aic_dc.agy.session.AgySession`
+      refuse to start, so a working gate presented as a broken one after
+      nothing more than a different entry point resolving the interpreter
+      by its other name. Found by ``probe_agy_cgroup_identity.py``'s setup
+      on a machine where the gate was live; see
+      [AG-R-14](../../../specs5/plan-ag/risks.md#ag-r-14).
     - ``unreadable`` — the file exists and will not parse, so nothing can
       be said and nothing will be written.
     """
@@ -256,7 +267,7 @@ def status(
 
     want = hook_command(config_dir, python)
     found = _installed_command(entry)
-    state = "current" if found == want else "stale"
+    state = "current" if _same_command(found, want) else "stale"
     return {
         "state": state,
         "path": str(target),
@@ -265,6 +276,71 @@ def status(
         "expected": want,
         "agy_present": shutil.which("agy") is not None,
     }
+
+
+#: The fixed middles of the two forms :func:`hook_command` emits. Used to
+#: cut an installed command into "the interpreter" and "everything else"
+#: without guessing at word boundaries — the interpreter is a path and the
+#: rest is ours, so splitting on what we wrote is exact where splitting on
+#: whitespace is not.
+_INVOCATIONS = (" -m aic_dc.agy.hook ", " --agy-hook ")
+
+
+def _split_interpreter(command: str) -> tuple[str, str] | None:
+    for marker in _INVOCATIONS:
+        head, sep, tail = command.partition(marker)
+        if sep and head:
+            return head, marker + tail
+    return None
+
+
+def _same_interpreter(installed: str, expected: str) -> bool:
+    """Whether two paths name the same interpreter, spelled differently.
+
+    A virtualenv ships ``python``, ``python3`` and ``python3.13`` in one
+    ``bin`` directory, all pointing at one program, and which name a caller
+    gets depends on how it was started: :func:`hook_command` writes
+    ``sys.executable``, and a script launched as ``.venv/bin/python3``
+    records a different string from one launched as ``.venv/bin/python``.
+    Comparing the strings makes those two different installs.
+
+    **Resolving both to their real targets is not the fix**, and this is
+    why the parent directories are compared first: every venv's ``python``
+    ultimately resolves to the *system* interpreter, so a bare
+    :func:`os.path.samefile` would call two different checkouts the same
+    install — which is the exact case ``stale`` exists to report. Same
+    directory, same file, different spelling is the only difference this
+    forgives. Parents are compared through :func:`os.path.realpath` so that
+    a checkout reached by a symlink is still itself.
+    """
+    if installed == expected:
+        return True
+    try:
+        if os.path.realpath(Path(installed).parent) != os.path.realpath(
+            Path(expected).parent
+        ):
+            return False
+        return os.path.samefile(installed, expected)
+    except OSError:
+        # A missing interpreter is the `stale` this function is asked
+        # about, not an error to raise at a status caller.
+        return False
+
+
+def _same_command(found: str, want: str) -> bool:
+    """Whether an installed hook command is the one we would write.
+
+    String equality first, because it is the answer almost every time and
+    it is the only one that needs no filesystem. The fallback exists for
+    one difference and forgives no other: the arguments must match exactly,
+    and only the interpreter may be spelled another way.
+    """
+    if found == want:
+        return True
+    left, right = _split_interpreter(found), _split_interpreter(want)
+    if left is None or right is None or left[1] != right[1]:
+        return False
+    return _same_interpreter(left[0], right[0])
 
 
 def _installed_command(entry: dict[str, Any]) -> str:

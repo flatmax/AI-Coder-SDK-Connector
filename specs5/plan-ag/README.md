@@ -1,5 +1,28 @@
 # Second Engine — Google Antigravity alongside Claude Code
 
+**Status (2026-09-10):** **the gate stopped asking who claimed a conversation and started asking the
+kernel** ([AG-18](decisions.md#ag-18)). Yesterday's fix closed the main case of
+[AG-R-14](risks.md#ag-r-14) by claiming a subagent's conversation as its announcement arrived, and left
+three residues — two of which were the same premise wearing two faces: *identity is something somebody
+writes down in advance*. A child's first call can beat the claim onto disk, and a **grandchild is never
+announced at all**, so it has no claim to be late with. `agy` now runs inside a systemd user scope and
+the hook reads `/proc/self/cgroup`; cgroup v2 binds every descendant irrevocably, so `env -i`, a
+subshell and a `setsid` double-fork all stay inside, and the scope entry is published *before the
+process exists* — there is nothing left to be late for. **The criterion was falsification, not a green
+log:** `probe_agy_subagent_gate.py` re-run with `AgyGateServer.claim` stubbed to a no-op on both the
+parent and the subagent still put all eight tool calls to the dialog and the deny still left the target
+byte-identical, so conversation claims were inert and cgroup identity carried the load alone. Matching
+is against the units this host registered, never the name's shape, so [AG-R-12](risks.md#ag-r-12)'s
+isolation holds on a stronger footing than before. **Two things are open and both are stated rather
+than hidden:** this is Linux-and-systemd, so on the macOS and Windows artefacts phase 7 publishes
+everything degrades to conversation-id routing with both residues intact — and the third residue, a
+stale claim nothing reaps, now orphans a *unit name* as well as a conversation id. **The probe's own
+setup found one more, and it is fixed:** `install.status` compared command strings, so one venv's
+`python3` and `python` read as two installs and a live gate reported itself `stale` — which makes
+`AgySession` refuse to start. Only the interpreter's spelling is forgiven now, and not by resolving
+both paths, which would have called two different checkouts the same install. 4,701 tests green. See
+[`delivery.md` § Identity by cgroup](delivery.md#identity-by-cgroup-not-by-claim-2026-09-10).
+
 **Status (2026-09-09):** **a subagent's tool calls were never reaching the permission gate, and now
 they are** ([AG-R-14](risks.md#ag-r-14)). The hook routes by conversation id and passes through
 whatever nobody has claimed — the property that keeps a stranger's `agy` session out of our dialog —
@@ -450,5 +473,6 @@ Each phase is independently shippable and leaves the tree working. Phase 0 is th
    package moves.
 3. [`risks.md`](risks.md) — the register, with mitigations and the tripwires that say a risk has
    fired.
-4. [`delivery.md`](delivery.md) — one entry per phase, written when its exit criterion is met.
-   Currently empty.
+4. [`delivery.md`](delivery.md) — one entry per phase, written when its exit criterion is met, plus
+   an entry for each piece of work that was not phase-shaped. Newest last, so the tail is the
+   current picture.
