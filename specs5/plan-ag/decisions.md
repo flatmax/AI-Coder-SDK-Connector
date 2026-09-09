@@ -807,6 +807,31 @@ which is worse than not attaching it at all.
 way a `Task` subagent's does. It appears as its own row and its own tab. If the SDK ever passes a
 tool-use id to in-process handlers, this becomes a two-line change and the nesting comes back.
 
+### The accepted cost, met by a user (2026-09-09)
+
+Reported from the running app: the consultation row **trails the bottom of the chat** as the
+conversation grows, rather than staying with the `second_opinion` card that started it. That is this
+cost, seen — and it is worth separating the two halves of it, because they are not equally blocked.
+
+**The blocker still holds.** Re-measured at `claude-agent-sdk` 0.2.137: the `tools/call` path builds
+`CallToolRequestParams(name=…, arguments=…)` and drops everything else from the request, so an
+in-process handler still receives only its own arguments and a consultation still cannot learn the id
+of the card that invoked it. The 2026-09-01 measurement is current, and the two-line change is not
+available yet.
+
+**But the complaint is about *placement*, and placement is not attribution.** The row sorts to the
+bottom because its `tool_use_id` matches no card in the turn — the same mechanism recorded in
+`32d04ce7` for a backgrounded shell command. This decision rejected correlating a consultation with
+the most recent `mcp__aic-dc-antigravity__*` card, and the reason given is *attribution*: the failure
+mode is attaching output to the wrong card. **Ordering by that correlation is a weaker claim than
+attributing by it.** An ordering that guesses wrong puts a row in the wrong place; an attribution that
+guesses wrong says a different agent produced the work. Those are not the same risk, and this entry
+did not distinguish them because the question it was answering was which card the row *belongs* to.
+
+Not decided here. What is recorded is that the option exists, that it is cheaper than it looked, and
+that reopening it means choosing a rule for *where a row with no matching card sorts* — which is a
+chat-panel question about every such row, not a consultation one.
+
 ### The contract, read off the webapp on 2026-09-01
 
 Written down because "no webapp change" is only true if the server gets these exactly right, and

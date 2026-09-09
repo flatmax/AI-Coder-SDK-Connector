@@ -32,6 +32,7 @@ from aic_dc.agy import install
 from aic_dc.agy.service import AgyService
 from aic_dc.antigravity.service import AntigravityService
 from aic_dc.capabilities import ANTIGRAVITY
+from aic_dc.config import ConfigManager
 from aic_dc.engine_router import build_router
 
 
@@ -616,3 +617,49 @@ class TestTheWriteGuidance:
 
         framed = agy_tools.WRITE_GUIDANCE + "do the thing"
         assert strip_framing(framed) == "do the thing"
+
+
+class TestModelPersistence:
+    """AG-R-15's other half: a picker that forgot what you told it.
+
+    `set_model` assigned an instance attribute and nothing else, so a model
+    chosen in Settings came back as the account's default at the next
+    server start — a control that appears to work, for one session.
+    """
+
+    def test_a_chosen_model_survives_a_restart(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("AIC_DC_CONFIG_HOME", str(tmp_path / "cfg"))
+        config = ConfigManager()
+        service = AgyService(config=config)
+        monkeypatch.setattr(
+            type(service),
+            "_list_models",
+            lambda _self: _completed([{"value": "gemini-3.8-flash-high"}]),
+        )
+        result = asyncio.run(service.set_model("gemini-3.8-flash-high"))
+        assert result["persisted"] is True
+        assert AgyService(config=ConfigManager())._model == "gemini-3.8-flash-high"
+
+    def test_a_failed_write_keeps_the_session_choice(self, tmp_path, monkeypatch):
+        """The selection is what the user asked for; persistence is a bonus
+        that must not cost it."""
+        monkeypatch.setenv("AIC_DC_CONFIG_HOME", str(tmp_path / "cfg"))
+        config = ConfigManager()
+        service = AgyService(config=config)
+        monkeypatch.setattr(
+            type(service),
+            "_list_models",
+            lambda _self: _completed([{"value": "gemini-3.8-flash-high"}]),
+        )
+        monkeypatch.setattr(
+            type(config),
+            "set_engine_option",
+            lambda *_a, **_k: (_ for _ in ()).throw(OSError("read-only")),
+        )
+        result = asyncio.run(service.set_model("gemini-3.8-flash-high"))
+        assert result["model"] == "gemini-3.8-flash-high"
+        assert result["persisted"] is False
+
+
+async def _completed(value):
+    return value

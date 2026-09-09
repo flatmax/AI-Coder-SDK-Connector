@@ -390,6 +390,19 @@ export class SettingsTab extends RpcMixin(LitElement) {
     /** True while a `set_model` call is in flight. */
     _modelPending: { type: Boolean, state: true },
     /**
+     * `Settings.get_consultant_model()`'s answer, or null before the first
+     * read. `{model, models, inherit_value}`.
+     *
+     * Separate from `_models` above rather than sharing it, because they are
+     * different lists answering different questions: that one is the master
+     * engine's menu from whichever engine is running, this one is `agy`'s and
+     * is readable while no engine is connected at all — which is the point,
+     * since a consultation runs from inside a *Claude* turn.
+     */
+    _consultant: { type: Object, state: true },
+    /** True while a `set_consultant_model` call is in flight. */
+    _consultantPending: { type: Boolean, state: true },
+    /**
      * `list_engines()`'s answer, or null before the first read.
      *
      * `{active, available, mountable}`. `available` and `mountable` are
@@ -1053,6 +1066,7 @@ export class SettingsTab extends RpcMixin(LitElement) {
     });
     this._loadInfo();
     this._loadModel();
+    this._loadConsultantModel();
     this._loadEngines();
     this._loadAgyGate();
     this._loadPermissionRules();
@@ -1069,6 +1083,10 @@ export class SettingsTab extends RpcMixin(LitElement) {
    */
   onTabVisible() {
     this._loadModel();
+    // Same reason as the files below: app.json can move without this tab,
+    // and a picker showing a value the file stopped holding writes the
+    // stale one back on the next change.
+    this._loadConsultantModel();
     // The files can move without this tab: the textarea in another
     // window, `/permissions` in this one, an editor outside the app. A
     // switch showing a value the file stopped holding is worse than the
@@ -1451,6 +1469,63 @@ export class SettingsTab extends RpcMixin(LitElement) {
       return;
     }
     this._probeHostAuthority();
+  }
+
+  /**
+   * Read the consultation model and the menu `agy` offers (AG-R-15).
+   *
+   * Independent of `_loadModel` and deliberately not folded into it: this
+   * answer does not need an engine to be connected, and a consultation is
+   * something a *Claude* session does, so gating it on the Antigravity
+   * engine's handshake would hide the control exactly when it is relevant.
+   *
+   * Failures leave the panel absent rather than empty. There is no "last
+   * known good" to preserve here and an empty picker under a heading reads
+   * as "your account has no models", which is the confusion the server-side
+   * empty-list rule exists to avoid.
+   */
+  async _loadConsultantModel() {
+    if (!this.rpcConnected) return;
+    try {
+      const res = await this.rpcExtract('Settings.get_consultant_model');
+      if (!res || typeof res !== 'object' || res.error) {
+        console.warn('[settings] get_consultant_model failed', res?.error);
+        return;
+      }
+      this._consultant = {
+        model: typeof res.model === 'string' ? res.model : '',
+        inheritValue: res.inherit_value || 'auto',
+        models: Array.isArray(res.models) ? res.models : [],
+      };
+    } catch (err) {
+      console.warn('[settings] get_consultant_model failed', err);
+    }
+  }
+
+  /**
+   * Ask for a consultation model. The select is a request; `_consultant` is
+   * the answer, so it is written from the reply and never from the event.
+   */
+  async _onConsultantSelect(event) {
+    const value = event?.target?.value;
+    if (!value || !this._consultant) return;
+    this._consultantPending = true;
+    try {
+      const res = await this.rpcExtract('Settings.set_consultant_model', value);
+      if (!res || typeof res !== 'object' || res.error) {
+        console.warn('[settings] set_consultant_model failed', res?.error);
+        // Put the control back to what the server still holds, or the
+        // select would show a choice that was refused.
+        this.requestUpdate();
+        return;
+      }
+      this._consultant = { ...this._consultant, model: res.model || '' };
+    } catch (err) {
+      console.warn('[settings] set_consultant_model failed', err);
+      this.requestUpdate();
+    } finally {
+      this._consultantPending = false;
+    }
   }
 
   /**
@@ -2261,6 +2336,7 @@ export class SettingsTab extends RpcMixin(LitElement) {
       ${this._renderPermissionRulesPanel()}
 
       ${this._renderModelPanel()}
+      ${this._renderConsultantPanel()}
 
       ${this._renderPreferenceCards()}
 
@@ -2680,6 +2756,80 @@ export class SettingsTab extends RpcMixin(LitElement) {
         already running finishes on the model it started with. Which model
         actually answered is reported per turn, by model, in the usage HUD.
       </p>
+    `;
+  }
+
+  /**
+   * The consultation model, and which of the choices are a second vendor.
+   *
+   * **The flag is the reason this is a control rather than a config key.**
+   * `agy`'s menu carries `claude-*` and `gpt-oss-*` beside the Gemini ids,
+   * and AG-13's premise is that a second opinion is a second *vendor* — so
+   * picking Claude here makes the feature quietly worthless while everything
+   * still appears to work. The option stays selectable, because a deliberate
+   * cross-vendor comparison is a legitimate thing to want; it just cannot be
+   * chosen without being told.
+   *
+   * The server marks them (`second_vendor`) rather than this file matching on
+   * a name, per AG-R-4: no webapp branch keys off a vendor or engine string.
+   */
+  _renderConsultantPanel() {
+    if (!this._consultant || this._consultant.models.length === 0) return '';
+    const { model, models, inheritValue } = this._consultant;
+    const current = model || inheritValue;
+    const chosen = models.find((m) => m.value === current);
+    const readOnly = this._isHost === false;
+    const disabled = !this.rpcConnected || readOnly || this._consultantPending;
+    return html`
+      <div class="model-panel" role="group" aria-label="Second opinion model">
+        <div class="model-head">
+          <span class="model-title">🔍 Second opinion</span>
+          <select
+            class="model-select"
+            .value=${current}
+            ?disabled=${disabled}
+            autocomplete="off"
+            aria-label="Second opinion model"
+            title=${readOnly
+              ? 'Only the host can change the consultation model'
+              : 'The model that answers second_opinion'}
+            @change=${(e) => this._onConsultantSelect(e)}
+          >
+            ${models.map(
+              (option) => html`<option
+                value=${option.value}
+                ?selected=${option.value === current}
+              >
+                ${option.second_vendor ? '⚠ ' : ''}${option.displayName
+                  || option.value}
+              </option>`,
+            )}
+            <option
+              value=${inheritValue}
+              ?selected=${current === inheritValue}
+            >
+              Whatever agy is set to
+            </option>
+          </select>
+          ${this._consultantPending
+            ? html`<span class="model-pending" aria-hidden="true">…</span>`
+            : ''}
+        </div>
+        <p class="model-note">
+          ${chosen?.second_vendor
+            ? html`<strong>⚠ This is not a second vendor.</strong> A second
+                opinion is worth something because it comes from a different
+                model family; this one asks the same family twice. `
+            : ''}
+          ${current === inheritValue
+            ? html`Follows the model you picked in <code>agy</code>'s own
+                settings, which may not be Google's — the menu offers Claude
+                and GPT-OSS too. `
+            : ''}
+          Applies to your <strong>next</strong> second opinion. Stored in
+          <code>app.json</code> as <code>engines.consultant_model</code>.
+        </p>
+      </div>
     `;
   }
 

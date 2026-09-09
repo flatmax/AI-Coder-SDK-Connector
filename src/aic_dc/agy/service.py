@@ -107,7 +107,11 @@ class AgyService(AntigravityService):
         #
         # None means "agy's own default", which is the only value this
         # side can be sure it accepts.
-        self._model = model
+        #
+        # An explicit argument wins; otherwise a model the user chose in a
+        # previous session is read back from `engines.agy_model`, which is
+        # the half `set_model` was missing until 2026-09-09.
+        self._model = model or getattr(self._config, "agy_model", None)
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -210,6 +214,15 @@ class AgyService(AntigravityService):
         Takes effect on the next session, matching the SDK transport:
         restarting mid-conversation would drop the context the user is
         talking to.
+
+        **Persisted since 2026-09-09.** This assigned ``self._model`` and
+        nothing else, so a model chosen in the picker was silently
+        forgotten at the next server start and the account's own default
+        came back — a control that looks like it worked, for one session.
+        It now writes ``engines.agy_model`` to ``app.json`` as well, and a
+        write failure costs the persistence rather than the selection: the
+        session the user is configuring still gets the model they asked
+        for, and the log says it will not survive a restart.
         """
         restricted = self._check_localhost_only()
         if restricted is not None:
@@ -229,7 +242,17 @@ class AgyService(AntigravityService):
                 "models": known,
             }
         self._model = model
-        return {"model": self._model}
+        persisted = True
+        try:
+            self._config.set_engine_option("agy_model", model)
+        except Exception:  # noqa: BLE001 - a config write must not lose a selection
+            logger.warning(
+                "Chose %s for this session, but could not write it to "
+                "app.json; it will not survive a restart.",
+                model,
+            )
+            persisted = False
+        return {"model": self._model, "persisted": persisted}
 
     async def connect_engine(self, resume: str | None = None) -> dict[str, Any]:
         """Start ``agy``. **Localhost only.**

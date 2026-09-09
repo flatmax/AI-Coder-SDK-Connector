@@ -4322,3 +4322,73 @@ existing at all.
   viewer find it by the ordinary path, but no consultation tab shows a thumbnail.
 - **The `.jpg` is not converted.** What the harness produced is what lands, which is the honest thing
   to store and means a caller asking for a specific format does not get one.
+
+---
+
+## The subagent that was never gated (2026-09-09)
+
+Found while building subagent tabs, and it stopped that work: the tabs are cosmetic and this is not.
+[AG-R-14](risks.md#ag-r-14) carries the risk; this is what happened.
+
+### How it was found, which was not by looking for it
+
+`AgySession.cancel()` stops a turn by starving it — `gate.refuse_all`, because there is no halt frame
+on this transport — so settling whether ⏹ could stop *one* subagent meant reading how the gate scopes
+a call. It scopes by conversation id, and passes through every conversation nobody has claimed. A
+subagent has a conversation of its own. The question "can we stop one subagent" turned into "have we
+ever been gating one", and the answer was no.
+
+**Measured rather than argued**, because a security claim reasoned from a code read is a hypothesis.
+`scripts/probe_agy_subagent_gate.py` allows the delegation and denies everything else, so the
+assertion is a file rather than a log line: gate consulted → the write is refused → the bytes are
+unchanged; gate bypassed → the write runs. The first run:
+
+    conversations the gate was asked about: ['5c1a3e72-… (parent)']
+    tools the gate decided:                 ['invoke_subagent']
+    target.txt after the turn:              'SUBAGENT_WAS_HERE'
+
+The user approved *the spawn*, and the subagent then edited a file with no review of any kind.
+
+### The fix, and the false start that is the more useful half
+
+`AgyGateServer` holds a **set** of claims rather than one id, and `AgySession._gate_subagents` claims
+each announced subagent's conversation as the frame arrives — before it is yielded and before the
+translator runs, which is the earliest instant this process controls. `stop()` releases all of them,
+including a subagent still running at teardown, because a registry entry is a file that outlives the
+process and a claim left behind would intercept a later session of the user's own.
+
+**The first cut read `state` the obvious way and failed live, identically to the unfixed code.**
+Claim on `ACTIVE`, release on `DONE` — except that `DONE` on a `subagent` step means **the launch
+finished**, not the subagent. Measured at `duration_seconds: 0.10` on a delegation whose work then ran
+six seconds longer, over frames in which the parent polled it through a `manage_subagents` call. And
+the run that exposed it never emitted `ACTIVE` at all, so the release fired on a claim that had never
+been made. This is [§ Phase 9's](#phase-9--always-allow-on-antigravity-2026-09-05) lesson and D1's
+arriving together: **a state word means what the engine does with it, not what it says.** Now it
+claims on any announcement and releases only at session close — holding a claim costs one registry
+file, dropping one early costs the review.
+
+    conversations the gate was asked about: ['240bcbd2-… (subagent)', '4009ccc4-… (parent)']
+    tools the gate decided: ['invoke_subagent', 'view_file', 'replace_file_content', 'send_message']
+    target.txt after the turn: 'ORIGINAL_TEXT'
+
+The consultant is covered by the same change without knowing about it, because it drives
+`stream_frames` too (AG-16).
+
+### What this does not do
+
+The three residues are in [AG-R-14](risks.md#ag-r-14) rather than repeated here: the spawn-to-announce
+race, nested delegation announcing a grandchild to nobody, and a stale claim now orphaning one entry
+per subagent rather than one per session. Two of the three were named by **the consultant**, asked for
+an adversarial review of this fix on the day it landed — the first time `second_opinion` has been
+pointed at this repository's own work, and the argument for [AG-13](decisions.md#ag-13) arriving from
+a direction that decision did not anticipate.
+
+### The tests, and the one that is about a refactor rather than a behaviour
+
+Twelve, offline: the gate server holding several claims at once, releasing one and keeping the rest,
+`stop` releasing all, a blank id claiming nothing; the session claiming on announcement, claiming
+rather than releasing on `DONE`, claiming every subagent in one step, and logging rather than dying
+when a claim fails. The twelfth reads the source of `stream_frames` and asserts that
+`_gate_subagents` appears before `yield frame`. That is the residue's size pinned as a test: the race
+window is a frame read, and a refactor that moved the claim into the translator or after the yield
+would widen it to the subagent's whole life without failing anything else.

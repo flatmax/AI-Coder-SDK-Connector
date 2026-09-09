@@ -702,3 +702,176 @@ conditions but the *file category* — a future maintainer moving `app.json` bac
 or a second policy key landing in a file with the same problem, is the recurrence. Note what this
 implies for any policy added later: **the file it lives in is part of the decision**, and a policy in a
 managed file needs the merge or it needs a file of its own.
+
+---
+
+## AG-R-14 — A subagent's tool calls do not reach the gate
+
+**Severity: critical. Likelihood: MEASURED — it happened, on 2026-09-09, and the main case is
+fixed. Three residues are open.**
+
+> **Outcome: the gate was bypassed entirely.** `scripts/probe_agy_subagent_gate.py` denied every tool
+> call except the delegation itself and watched the subagent's edit land anyway. The gate was asked
+> about one conversation and one tool — `invoke_subagent` — and about nothing the subagent then did.
+> Fixed the same day by claiming the subagent's conversation; the probe now reports the deny holding
+> with the target file byte-identical. See [`delivery.md` § The subagent that was never
+> gated](delivery.md#the-subagent-that-was-never-gated-2026-09-09).
+
+The mechanism is [AG-14](decisions.md#ag-14)'s own, working exactly as designed for a case nobody had
+enumerated. `agy` runs under `--dangerously-skip-permissions`, so this host's gate is the only thing
+between the model and the tree, and the hook routes to it by **conversation id**: a conversation
+nobody has claimed is passed through ungated. That passthrough is load-bearing — it is what keeps a
+second `agy` session of the user's own out of our dialog ([AG-R-12](#ag-r-12),
+`probe_agy_isolation.py`). A subagent is given a conversation of its own, and nothing claimed it.
+
+**[AG-5](decisions.md#ag-5)'s table is what this contradicts.** It puts the spawners in the *still
+asks* column with the reason "a subagent inherits the tool set". The subagent does inherit the tool
+set; what it did not inherit was the gate — so gating the spawn bought a dialog on the word
+"delegate" and no review of anything done under it.
+
+### The three residues, none of them mitigated
+
+- **The spawn-to-announce race.** `agy` starts the child before the frame announcing it arrives, so a
+  tool call made in that window reaches the hook before the claim is on disk. This side cannot close
+  it as built: `invoke_subagent`'s arguments carry only `Prompt`, `Role`, `TypeName`, `Model` and
+  `Workspace` — **no conversation id**, because the child does not exist when the dialog for the spawn
+  is answered. A *tentative hold* is the candidate that needs no vendor change: on approving a spawn,
+  mark a short pending window, and have the hook briefly poll for a claim on an unclaimed
+  conversation rather than passing it straight through, falling open on timeout so AG-R-12's property
+  survives.
+
+  **How wide this window is, is measured on one side and argued on the other.** The consultant's
+  case for ranking it *above* nested delegation is that it fires on every spawn, where nesting
+  needs the model to choose it — and that a subagent exists to act immediately, so its first call
+  should lose the race routinely. The frequency half is right. The second half is contradicted by
+  the run in [`delivery.md`](delivery.md#the-subagent-that-was-never-gated-2026-09-09): the gate
+  decided the subagent's `view_file`, which *is* its first call, so on that run the claim won. One
+  run is not a distribution, and the honest reading is that the window is real and unquantified
+  rather than that it is narrow.
+- **Nested delegation is a blind spot at full width.** A subagent's own frames never reach this host —
+  its work appears only in its transcript on disk — so a subagent that spawns a *further* subagent
+  announces the grandchild to nobody, and the grandchild runs exactly as the child did before this
+  fix. Watching the child's `transcript.jsonl` is the obvious answer and is not a sound one: the file
+  is flushed by a process we do not control, so the grandchild's first calls land before the line
+  does. **Denying a spawn that arrives from an already-claimed subagent conversation** is the
+  candidate — refusing what cannot be gated, rather than shipping a gate that is not one. It takes a
+  capability away from the agent, so it is an amendment to AG-5 rather than a fix.
+
+  **A second candidate arrived on 2026-09-09 and would cost no capability: route by process
+  lineage.** The hook is a subprocess of the `agy` process making the call, so it can read its own
+  ancestry and ask whether this host's `agy` root pid is among its ancestors. That answer is
+  available *at the instant the hook runs* — no registry write to win a race against, no file
+  flushed by someone else — and it closes this residue and the spawn-to-announce race with one
+  mechanism, because a grandchild is a descendant whether or not anyone announced it.
+  [AG-R-12](#ag-r-12)'s property appears to survive it: a session the user starts from their own
+  terminal is not a descendant of ours. **It is a hypothesis, not a finding**, and three things have
+  to be measured before it can displace the deny: whether the hook process's ancestry actually
+  reaches the `agy` that invoked it on 1.1.27, whether a subagent runs in that process or another
+  one, and what pid reuse does to a claim after a host dies. Named by the consultant
+  (`second_opinion`, 2026-09-09) when asked to argue against the deny; the deny stays the recorded
+  candidate until the measurement says otherwise, because a gate designed from a code read is the
+  mistake this row already records once.
+- **A stale claim now costs more.** `registry.claim` records a `pid` and `registry.lookup` has never
+  read it, so a killed session's entries are indistinguishable from live ones and the hook denies on
+  them — it refuses whatever it cannot reach. Before this fix that orphaned one entry per session;
+  now it orphans one per subagent as well. The recorded `pid` is the unused handle.
+
+  **It is a prerequisite of the race fix rather than merely the cheap one.** A tentative hold makes
+  the hook *poll* an unclaimed conversation instead of passing it through, so a dead host's leftover
+  entry stops being an annoyance and becomes a block: the poll finds a claim, the socket behind it
+  answers nothing, and the hook denies. Whatever order the three are taken in, this one lands before
+  the hold does. Named by the consultant on 2026-09-09.
+
+**Two of the three were named by the consultant** (`second_opinion`, 2026-09-09) rather than by the
+author of the fix, which is the first time this feature has been used on this repository's own work
+and is worth recording as evidence for [AG-13](decisions.md#ag-13).
+
+## AG-R-15 — The second opinion may not be a second model
+
+**Severity: moderate. Likelihood: LIVE — not fired, and nothing prevents it.**
+
+[AG-13](decisions.md#ag-13)'s premise is a sentence in the README: *"Two independent agents
+disagreeing about a diff is information. One agent asked twice is not."* On the `agy` transport
+nothing enforces that premise, and nothing records whether it held.
+
+`AgyConsultant` takes `model=None` deliberately (`src/aic_dc/agy/consultant.py`), so a consultation
+runs on whatever the account holder selected in `agy`'s own settings — inheriting a decision rather
+than an accident, which is the right default for a plan the user pays for. **What was not
+considered is what that menu contains.** `agy models` on 1.1.27 offers fifteen entries, and three
+of them are not Google's:
+
+    claude-sonnet-4-6          Claude Sonnet 4.6 (Thinking)
+    claude-opus-4-6-thinking   Claude Opus 4.6 (Thinking)
+    gpt-oss-120b-medium        GPT-OSS 120B (Medium)
+
+So a user who sets `agy`'s model to `claude-opus-4-6-thinking` turns `second_opinion` into Claude
+reviewing Claude's own work, with the tool description still promising *"Google's Gemini, running as
+an independent agent"* and *"a separate Google account"*. The feature does not degrade visibly: it
+returns fluent, plausible review either way. This is the failure AG-13 exists to prevent, reachable
+through a settings file this app does not own and does not read.
+
+**Measured on this machine, 2026-09-09**, prompted by the question *"can you tell which model you
+are calling?"* — which the code could not answer. `~/.gemini/antigravity-cli/settings.json` holds
+`"model": "Gemini 3.8 Flash (Low)"`, so the consultations cited in [AG-R-14](#ag-r-14) were
+genuinely cross-family and that evidence stands. It stands **by luck of a setting**, not by design,
+and the run that produced two of three residues plus the process-lineage candidate was the *Low*
+effort tier — which is the more interesting half of the measurement.
+
+**Mitigated the same day, by pinning — which is the opposite of what this entry first recommended.**
+`AgyConsultant.DEFAULT_MODEL` is `gemini-3.8-flash-high` as of 2026-09-09, at the user's decision.
+The first draft of this entry argued *"do not pin a model to fix this — the defect is silence, not
+inheritance"*, and that was wrong in a way worth keeping: it treated the vendor question and the
+depth question as separate, when on this surface **effort is baked into the model name**, so the one
+choice settles both. Pinning makes AG-13's premise true by construction rather than by a settings
+file this app does not own, and it takes the consultation off the account's *Low* tier — the README
+already argued the second half about the SDK transport (*"the point of a second opinion is a capable
+independent one"*) and this entry did not notice it applied here too.
+
+The parameter is kept, and `None` still means "agy's own default", so the inherited behaviour is one
+argument away rather than deleted. Two tests: the pin is a `gemini-` name (asserting the *vendor*,
+since the pin will be raised as models are released and should not be raised out of Google's range),
+and `model=None` still reaches the account's own choice.
+
+**And then made a control, the same day**, at the user's suggestion — *"perhaps there should be a
+way to change that in settings?"* — which is the right instinct for a value that is a preference
+with a *warning* attached rather than a constant. `engines.consultant_model` in `app.json`, a
+`ConfigManager` accessor, `Settings.get_consultant_model` / `set_consultant_model` validated against
+`agy models`, and a picker in the Settings tab beside the master engine's.
+
+Four things about its shape are decisions rather than details:
+
+- **The vendor flag is on the server.** Each entry carries `second_vendor`, computed from a
+  `gemini-` prefix in `settings.py`, so no webapp branch keys off a vendor string
+  ([AG-R-4](#ag-r-4)). A prefix rather than an allowlist because the list moves — `gemini-3.8-*` did
+  not exist when this feature was built, and a stale allowlist would flag a *new Gemini model* as a
+  foreign vendor, which is how a warning gets trained out of a user.
+- **Marked, not removed.** A Claude entry stays selectable and says what it costs, in the list (`⚠`)
+  and again in prose once chosen. Refusing it would be this app overruling a user who may want
+  exactly that comparison; hiding it would be pretending the menu is smaller than it is.
+- **It is live, not app-restart.** `app.json` is in `settings.py`'s reloadable set and
+  `AgyConsultant` resolves the model *per consultation*, so a save reaches the next second opinion.
+  Capturing it at construction would have silently made this the grid's third disposition, which is
+  the one users have to be told about.
+- **`"auto"` is a value, not `null`.** `_changed_fields` treats absent and explicitly-null as the
+  same, deliberately, so "let agy choose" needed a word of its own — and `consultant_transport`
+  already had that vocabulary.
+
+**A second defect fell out of building it**, in the master engine's equivalent: `AgyService.set_model`
+assigned `self._model` and never wrote anything, so a model chosen in the picker was forgotten at the
+next server start and the account's default came back. A control that works for one session and then
+quietly stops is worse than one that was never offered, because nobody re-checks it. It now writes
+`engines.agy_model`, and a write failure costs the persistence rather than the selection. The engine
+stays *unpinned* by default, and that asymmetry with the consultant is deliberate: a master engine is
+the one the user drives all day and whose cost they feel, so their own tier choice stands; a
+consultation is bought by the answer it gives and has a vendor requirement the master does not.
+
+**What is still open:**
+
+- **Report the model with the answer.** The consultation still does not name the model that produced
+  it, so a citation in this directory remains an assumption rather than a record. Worth doing
+  anyway: a pin is an argument on a command line, and the thing that proves it took effect is on the
+  `init` frame.
+- **A pin can go stale.** `gemini-3.8-flash-high` is a name read from `agy models` at 1.1.27 on one
+  account. On a plan without that model, or after a rename, the consultation fails rather than
+  silently downgrading — which is the right direction, and is the reason this is a note rather than
+  a fallback.

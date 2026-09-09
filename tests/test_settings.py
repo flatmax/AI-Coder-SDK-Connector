@@ -27,11 +27,13 @@ model in force is the engine's to report, live.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
 
 import pytest
 
+from aic_dc.agy import consultant as consultant_mod
 from aic_dc.config import CONFIG_TYPES, ConfigManager
 from aic_dc.settings import Settings
 
@@ -727,3 +729,108 @@ class TestStandingPermissionRules:
         svc = Settings(config)
         svc._collab = _StubCollab(is_localhost=False)
         assert "error" not in svc.get_permission_rules()
+
+
+# ---------------------------------------------------------------------------
+# AG-R-15 — the consultant's model, and the vendor it comes from
+# ---------------------------------------------------------------------------
+
+
+def _fake_models(*values):
+    """Stand in for `agy models` without a subprocess."""
+
+    async def _loader(_self):
+        return [{"value": v, "displayName": v} for v in values]
+
+    return _loader
+
+
+class TestConsultantModel:
+    """The picker AG-R-15 asked for, and the flag that is its whole point."""
+
+    @pytest.fixture(autouse=True)
+    def _models(self, monkeypatch):
+        monkeypatch.setattr(
+            "aic_dc.agy.service.AgyService._list_models",
+            _fake_models(
+                "gemini-3.8-flash-high",
+                "gemini-3.8-flash-low",
+                "claude-opus-4-6-thinking",
+                "gpt-oss-120b-medium",
+            ),
+        )
+
+    def test_it_reports_the_pin_by_default(self, settings):
+        result = asyncio.run(settings.get_consultant_model())
+        assert result["model"] == consultant_mod.DEFAULT_MODEL
+
+    def test_non_google_entries_are_flagged(self, settings):
+        """The risk is shown where the choice is made, not only in risks.md."""
+        result = asyncio.run(settings.get_consultant_model())
+        flagged = {e["value"]: e["second_vendor"] for e in result["models"]}
+        assert flagged["gemini-3.8-flash-high"] is False
+        assert flagged["gemini-3.8-flash-low"] is False
+        assert flagged["claude-opus-4-6-thinking"] is True
+        assert flagged["gpt-oss-120b-medium"] is True
+
+    def test_a_choice_survives_a_restart(self, settings, config):
+        """The defect this whole change exists to fix, asserted on a *new*
+        ConfigManager rather than on the one that wrote the file."""
+        asyncio.run(settings.set_consultant_model("gemini-3.8-flash-low"))
+        assert ConfigManager().consultant_model == "gemini-3.8-flash-low"
+
+    def test_auto_means_the_accounts_own_choice(self, settings):
+        asyncio.run(settings.set_consultant_model("auto"))
+        assert ConfigManager().consultant_model is None
+
+    def test_an_unknown_name_is_refused_here_rather_than_by_agy(self, settings):
+        result = asyncio.run(settings.set_consultant_model("gemini-9-imaginary"))
+        assert result["error"] == "unknown_model"
+        assert ConfigManager().consultant_model == consultant_mod.DEFAULT_MODEL
+
+    def test_it_does_not_validate_against_an_empty_list(self, settings, monkeypatch):
+        """An empty list means the subprocess failed, not that the account has
+        no models. Refusing every name on that basis breaks the picker
+        whenever `agy` is briefly unavailable."""
+        monkeypatch.setattr(
+            "aic_dc.agy.service.AgyService._list_models", _fake_models()
+        )
+        result = asyncio.run(settings.set_consultant_model("gemini-3.8-flash-low"))
+        assert "error" not in result
+
+    def test_writing_is_localhost_only(self, config):
+        svc = Settings(config)
+        svc._collab = _StubCollab(is_localhost=False)
+        _assert_restricted(asyncio.run(svc.set_consultant_model("gemini-3.8-flash-low")))
+
+    def test_reading_is_not(self, config):
+        """Matches every other read on this service."""
+        svc = Settings(config)
+        svc._collab = _StubCollab(is_localhost=False)
+        assert "models" in asyncio.run(svc.get_consultant_model())
+
+    def test_the_list_is_read_once(self, settings, monkeypatch):
+        """`agy models` is a ~1s subprocess and the answer is a property of
+        the account, not of the render."""
+        calls = []
+
+        async def _counted(_self):
+            calls.append(1)
+            return [{"value": "gemini-3.8-flash-high", "displayName": "High"}]
+
+        monkeypatch.setattr("aic_dc.agy.service.AgyService._list_models", _counted)
+        asyncio.run(settings.get_consultant_model())
+        asyncio.run(settings.get_consultant_model())
+        assert len(calls) == 1
+
+    def test_an_empty_answer_is_not_cached(self, settings, monkeypatch):
+        """Empty means the subprocess failed. Caching it would make one bad
+        moment permanent for the life of the process."""
+        answers = [[], [{"value": "gemini-3.8-flash-high", "displayName": "High"}]]
+
+        async def _flaky(_self):
+            return answers.pop(0)
+
+        monkeypatch.setattr("aic_dc.agy.service.AgyService._list_models", _flaky)
+        assert asyncio.run(settings.get_consultant_model())["models"] == []
+        assert asyncio.run(settings.get_consultant_model())["models"] != []

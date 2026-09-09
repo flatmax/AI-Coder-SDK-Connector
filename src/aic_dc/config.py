@@ -928,6 +928,126 @@ class ConfigManager:
             return "auto"
         return str(chosen)
 
+    #: What ``engines.consultant_model`` / ``engines.agy_model`` mean when
+    #: they hold this word: *do not pass ``--model``*, so ``agy`` uses the
+    #: model the account holder selected in its own settings.
+    #:
+    #: Spelled rather than left to ``null`` because :func:`_changed_fields`
+    #: in ``settings.py`` treats absent and explicitly-null as the same
+    #: value — deliberately, so a save that only changes how "unset" is
+    #: written does not offer a restart. A meaning that needs to survive
+    #: that has to be a value, and ``"auto"`` is the vocabulary
+    #: :meth:`consultant_transport` already uses for "you choose".
+    INHERIT_ACCOUNT_MODEL = "auto"
+
+    @property
+    def consultant_model(self) -> str | None:
+        """Which model answers ``second_opinion`` on the ``agy`` transport.
+
+        ``None`` means "pass no ``--model`` and let the account's own
+        setting decide"; a string is a model id handed to ``agy``.
+
+        **The default is pinned, and it is pinned for a reason that is not
+        performance** ([AG-R-15](../../specs5/plan-ag/risks.md#ag-r-15)).
+        ``agy models`` offers Claude and GPT-OSS entries beside the Gemini
+        ones, so inheriting the account's choice inherits the possibility
+        that a *second* opinion is the same vendor asked twice — which is
+        the one thing [AG-13](../../specs5/plan-ag/decisions.md#ag-13)
+        exists to prevent, arriving through a settings file this app does
+        not own. Effort is baked into the model name on this surface, so
+        the pin also settles the depth question the README raises about the
+        SDK transport: the point of a second opinion is a *capable* one.
+
+        This is not validated against ``agy models`` here, because that is
+        a subprocess and this is a property. :meth:`Settings.set_consultant_model`
+        validates before writing, and an unknown name reaching ``agy``
+        fails loudly at session start rather than silently downgrading.
+        """
+        from aic_dc.agy.consultant import DEFAULT_MODEL
+
+        section = self.app_config.get("engines", {})
+        if not isinstance(section, dict):
+            section = {}
+        chosen = section.get("consultant_model")
+        if chosen is None:
+            return DEFAULT_MODEL
+        if chosen == self.INHERIT_ACCOUNT_MODEL:
+            return None
+        if not isinstance(chosen, str) or not chosen.strip():
+            logger.warning(
+                "app.json engines.consultant_model is %r, which is not a "
+                "model id or %r. Using %s.",
+                chosen,
+                self.INHERIT_ACCOUNT_MODEL,
+                DEFAULT_MODEL,
+            )
+            return DEFAULT_MODEL
+        return chosen
+
+    @property
+    def agy_model(self) -> str | None:
+        """Which model the ``agy`` *engine* runs as master.
+
+        Unpinned by default — ``None``, the account holder's own choice —
+        and that asymmetry with :meth:`consultant_model` is the point.
+        A master engine is the one the user drives all day and whose cost
+        and latency they feel directly, so inheriting the tier they chose
+        in ``agy`` is respecting a decision. A consultation is a
+        cross-check bought by the answer it gives, and it has a vendor
+        requirement the master does not.
+
+        Persisted so a choice survives a restart, which
+        :meth:`AgyService.set_model` did not do until 2026-09-09: it
+        assigned an instance attribute, so every selection was silently
+        forgotten the next time the server started.
+        """
+        section = self.app_config.get("engines", {})
+        if not isinstance(section, dict):
+            section = {}
+        chosen = section.get("agy_model")
+        if chosen is None or chosen == self.INHERIT_ACCOUNT_MODEL:
+            return None
+        if not isinstance(chosen, str) or not chosen.strip():
+            logger.warning(
+                "app.json engines.agy_model is %r, which is not a model id "
+                "or %r. Letting agy choose.",
+                chosen,
+                self.INHERIT_ACCOUNT_MODEL,
+            )
+            return None
+        return chosen
+
+    def set_engine_option(self, key: str, value: Any) -> None:
+        """Write one key under ``app.json``'s ``engines`` section.
+
+        A read-modify-write of the file rather than of :attr:`app_config`,
+        because that cache may be stale against an edit the user made in
+        the Settings editor, and writing from it would silently revert
+        them. Whole-file rename for the same reason
+        :func:`aic_dc.agy.registry.claim` uses one: a reader can arrive at
+        any instant and a half-written config parses as no config.
+
+        The in-memory cache is invalidated rather than patched, so the next
+        read goes through the same accessors and defaults as a fresh start.
+        """
+        path = self.config_dir / "app.json"
+        try:
+            current = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(current, dict):
+                current = {}
+        except (OSError, ValueError):
+            current = {}
+        section = current.get("engines")
+        if not isinstance(section, dict):
+            section = {}
+        section[key] = value
+        current["engines"] = section
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(current, indent=2) + "\n", encoding="utf-8")
+        tmp.replace(path)
+        self._app_config = None
+
     @property
     def history_config(self) -> dict[str, Any]:
         """Transcript-history section with defaults filled in.

@@ -1,5 +1,21 @@
 # Second Engine — Google Antigravity alongside Claude Code
 
+**Status (2026-09-09):** **a subagent's tool calls were never reaching the permission gate, and now
+they are** ([AG-R-14](risks.md#ag-r-14)). The hook routes by conversation id and passes through
+whatever nobody has claimed — the property that keeps a stranger's `agy` session out of our dialog —
+and a subagent runs in a conversation of its own, so a delegation was a route around the dialog: the
+user approved the *spawn*, and every call made under it ran unreviewed.
+`scripts/probe_agy_subagent_gate.py` denied everything but the delegation and watched the subagent's
+edit land anyway; after the fix the same run has the gate deciding the subagent's `view_file`,
+`replace_file_content` and `send_message`, the deny holding, and the target file byte-identical. This
+contradicts [AG-5](decisions.md#ag-5)'s stated reason for gating the spawners — the subagent inherits
+the tool set, and did not inherit the gate. **Three residues are open and none is mitigated**: the
+spawn-to-announce race, nested delegation announcing a grandchild to nobody, and a stale claim now
+orphaning one registry entry per subagent. Found while building `subagent_rows`, which is the other
+half of the day: `agy` announces a delegation with a `conversation_id` of its own, so the live strip
+is fed on this transport and `subagent_tabs` split into two keys. See
+[`delivery.md` § The subagent that was never gated](delivery.md#the-subagent-that-was-never-gated-2026-09-09).
+
 **Status (2026-09-08):** **phase 10 is met, and with it every phase in this directory is closed.**
 `scripts/probe_agy_consultant.py` ran two real turns on the account holder's subscription: a second
 opinion that was allowed **nothing at all** — not one tool, on an agent running with 57 of them

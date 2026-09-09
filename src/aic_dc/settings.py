@@ -116,6 +116,16 @@ _RELOADABLE_TYPES = frozenset({"app"})
 #: The config type whose fields :data:`LIVE_CONTROLS` describes.
 _ENGINE_TYPE = "engine"
 
+#: What a Google model id starts with on ``agy``'s surface, used to mark
+#: the entries that would make AG-13's premise false (AG-R-15).
+#:
+#: A prefix rather than an allowlist of names, because the list moves with
+#: every release — ``gemini-3.8-*`` did not exist when this feature was
+#: built — and a stale allowlist would mark a new Gemini model as a
+#: foreign vendor, which is the failure that trains a user to ignore the
+#: warning.
+_GOOGLE_MODEL_PREFIX = "gemini-"
+
 
 # ---------------------------------------------------------------------------
 # Per-field save disposition
@@ -234,6 +244,12 @@ class Settings:
         # treated as localhost. Matches the pattern on Repo and
         # ClaudeCodeService.
         self._collab: Any = None
+        #: `agy models`, read once for the consultant picker. None until
+        #: asked. Held here rather than on the throwaway `AgyService` this
+        #: reads through, or the picker would spend ~1s of subprocess on
+        #: every render to re-learn a property of the account — which is
+        #: the cost that loader's own cache exists to avoid.
+        self._consultant_models: list[dict[str, Any]] | None = None
 
     # ------------------------------------------------------------------
     # Localhost-only guard
@@ -493,6 +509,117 @@ class Settings:
         # without a hard-coded engine name of its own — AG-R-4.
         report["needed_by"] = capabilities.AGY
         return report
+
+    # ------------------------------------------------------------------
+    # AG-R-15's consultant model
+    # ------------------------------------------------------------------
+    # On `Settings` for `get_agy_gate`'s reason, and it applies with the
+    # same force: this is a standing preference that outlives the session,
+    # it must be readable while the engine it configures is not running,
+    # and putting two Antigravity-only methods on the engine surface would
+    # break the router invariants named above.
+
+    async def get_consultant_model(self) -> dict[str, Any]:
+        """The consultation model, and the ones this account offers.
+
+        Shaped like :meth:`AgyService.get_model` — ``{model, models}`` with
+        ``{value, displayName}`` entries — so the browser renders both
+        pickers through one code path (AG-R-4).
+
+        **Each entry carries ``second_vendor``**, and that field is the
+        reason this method exists rather than a config key on its own.
+        ``agy models`` offers ``claude-*`` and ``gpt-oss-*`` beside the
+        Gemini ids, and AG-13's premise is that a second opinion is a
+        second *vendor* — "two independent agents disagreeing about a diff
+        is information; one agent asked twice is not". Choosing Claude here
+        makes that premise false while everything still looks like it
+        works, so the risk is reported at the point of choosing rather than
+        left in the register. It is marked, not removed: a deliberate
+        cross-vendor comparison is a legitimate thing to want, and this
+        app is not the place to refuse it.
+        """
+        models = await self._agy_models()
+        return {
+            "model": self._config.consultant_model,
+            "inherit_value": self._config.INHERIT_ACCOUNT_MODEL,
+            "models": models,
+        }
+
+    async def set_consultant_model(self, model: str | None = None) -> dict[str, Any]:
+        """Choose the consultation model. **Localhost only.**
+
+        Validated against ``agy models`` for :meth:`AgyService.set_model`'s
+        reason: an unknown name does not fail here, it fails when the next
+        consultation starts, as ``agy`` exiting before its init frame.
+        Validation is skipped when the list is empty, because an empty list
+        means the subprocess failed rather than that the account has no
+        models, and refusing every name on that basis would make the
+        picker unusable whenever ``agy`` is briefly unavailable.
+
+        Takes effect on the **next consultation**, not the next restart:
+        ``app.json`` is reloadable and ``AgyConsultant`` resolves the model
+        per call.
+        """
+        restricted = self._check_localhost_only()
+        if restricted is not None:
+            return restricted
+        if model is None:
+            return {"model": self._config.consultant_model}
+        known = await self._agy_models()
+        allowed = {entry["value"] for entry in known} | {
+            self._config.INHERIT_ACCOUNT_MODEL
+        }
+        if known and model not in allowed:
+            return {
+                "error": "unknown_model",
+                "message": (
+                    f"{model!r} is not a model this Antigravity account "
+                    f"offers. `agy` rejects an unknown name by exiting "
+                    f"before the consultation starts, so it is refused "
+                    f"here instead."
+                ),
+                "models": known,
+            }
+        try:
+            self._config.set_engine_option("consultant_model", model)
+        except OSError as exc:
+            return {"error": "write_failed", "message": str(exc)}
+        return {"model": self._config.consultant_model, "applies": "next_consultation"}
+
+    async def _agy_models(self) -> list[dict[str, Any]]:
+        """``agy models``, each entry tagged with whether it is a second vendor.
+
+        Reads through :class:`~aic_dc.agy.service.AgyService`'s own loader
+        rather than shelling out again, so the cache and the parsing stay
+        in one place and this surface cannot drift from the engine's
+        picker. An empty list on any failure, which every caller already
+        treats as "unknown" rather than "none".
+        """
+        if self._consultant_models is not None:
+            return self._consultant_models
+        try:
+            from aic_dc.agy.service import AgyService
+
+            loader = AgyService(config=self._config)
+            entries = await loader._list_models()
+        except Exception:  # noqa: BLE001 - a picker must not break Settings
+            logger.warning("Could not read the agy model list for the consultant")
+            return []
+        if not entries:
+            # Not cached: an empty list is a failed subprocess rather than
+            # an answer, and caching it would make one bad moment
+            # permanent for the life of the process.
+            return []
+        self._consultant_models = [
+            {
+                **entry,
+                "second_vendor": not str(entry.get("value", "")).startswith(
+                    _GOOGLE_MODEL_PREFIX
+                ),
+            }
+            for entry in entries
+        ]
+        return self._consultant_models
 
     # ------------------------------------------------------------------
     # AG-15's standing permission rules — review and revoke

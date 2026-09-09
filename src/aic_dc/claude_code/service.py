@@ -900,6 +900,11 @@ class ClaudeCodeService:
                 # running it as master, and two switches for one question
                 # are two things that can disagree.
                 enabled=getattr(self._config, "enabled_engines", None),
+                # AG-R-15. Passed as the manager rather than as a resolved
+                # name so the model is read per consultation: app.json is
+                # reloadable, so the Settings control takes effect on the
+                # next second opinion instead of on the next restart.
+                config=self._config,
             )
             if consultant is None:
                 self.consultant_bridge = None

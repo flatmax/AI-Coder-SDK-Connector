@@ -35,6 +35,7 @@ import textwrap
 
 import pytest
 
+from aic_dc.agy import consultant as consultant_mod
 from aic_dc.agy import registry
 from aic_dc.agy.consultant import (
     CONTROL_TOOLS,
@@ -227,6 +228,24 @@ class TestItWillNotRunUngated:
         consultant = AgyConsultant(tmp_path)
         assert consultant.available is False
         assert "not on PATH" in consultant._unavailable_reason()
+
+    def test_the_pinned_model_is_googles(self, tmp_path):
+        """AG-R-15: a second opinion has to be a second *vendor*.
+
+        `agy models` offers `claude-sonnet-4-6` and
+        `claude-opus-4-6-thinking` beside the Gemini entries, so an
+        unpinned consultant can inherit an account setting that makes
+        AG-13's premise false without anything looking broken. This
+        asserts the vendor rather than the exact name: the pin may be
+        raised as models are released, and it may not be raised out of
+        Google's range.
+        """
+        assert AgyConsultant(tmp_path)._model == consultant_mod.DEFAULT_MODEL
+        assert consultant_mod.DEFAULT_MODEL.startswith("gemini-")
+
+    def test_none_still_means_the_accounts_own_default(self, tmp_path):
+        """The escape hatch the pin's docstring promises actually exists."""
+        assert AgyConsultant(tmp_path, model=None)._model is None
 
 
 # ----------------------------------------------------------------------
@@ -569,3 +588,38 @@ class TestWhoPays:
         report = AgyConsultant(tmp_path).credentials.report()
         assert json.dumps(report)
         assert report["mode"] == "agy-oauth"
+
+
+class TestModelResolution:
+    """AG-R-15: the Settings control is live because this reads per call."""
+
+    class _Config:
+        def __init__(self, model):
+            self.consultant_model = model
+
+    def test_config_wins_over_the_construction_default(self, tmp_path):
+        consultant = AgyConsultant(
+            tmp_path, config=self._Config("gemini-3.8-flash-low")
+        )
+        assert consultant._resolve_model() == "gemini-3.8-flash-low"
+
+    def test_it_is_re_read_rather_than_captured(self, tmp_path):
+        """app.json is reloadable, so a save reaches the *next* consultation
+        without a restart. Capturing at construction would silently make the
+        control an app-restart one."""
+        config = self._Config("gemini-3.8-flash-low")
+        consultant = AgyConsultant(tmp_path, config=config)
+        config.consultant_model = "gemini-3.1-pro-high"
+        assert consultant._resolve_model() == "gemini-3.1-pro-high"
+
+    def test_no_config_keeps_the_pin(self, tmp_path):
+        assert AgyConsultant(tmp_path)._resolve_model() == consultant_mod.DEFAULT_MODEL
+
+    def test_a_broken_config_falls_back_rather_than_losing_the_answer(self, tmp_path):
+        class _Angry:
+            @property
+            def consultant_model(self):
+                raise RuntimeError("no config today")
+
+        consultant = AgyConsultant(tmp_path, config=_Angry())
+        assert consultant._resolve_model() == consultant_mod.DEFAULT_MODEL

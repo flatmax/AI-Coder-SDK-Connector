@@ -148,6 +148,35 @@ DEFAULT_TIMEOUT_SECONDS = 180.0
 #: than a figure with evidence behind it.
 DEFAULT_IMAGE_TIMEOUT_SECONDS = 300.0
 
+#: The model a consultation runs on, pinned.
+#:
+#: **This was `None` until 2026-09-09**, meaning "whatever the account
+#: holder chose in ``agy``'s own settings" — inheriting a decision rather
+#: than an accident, which read as the right default until someone asked
+#: *which model is this actually calling?* and the code could not answer.
+#: Two things came out of that ([AG-R-15](../../../specs5/plan-ag/risks.md#ag-r-15)):
+#:
+#: - ``agy models`` at 1.1.27 offers ``claude-sonnet-4-6``,
+#:   ``claude-opus-4-6-thinking`` and ``gpt-oss-120b-medium`` alongside the
+#:   Gemini entries. Inheriting the account's choice therefore inherits the
+#:   possibility that a *second opinion* is Claude reviewing Claude — which
+#:   is the one thing [AG-13](../../../specs5/plan-ag/decisions.md#ag-13)
+#:   exists to prevent, arriving silently through a settings file this app
+#:   does not own. A pinned Google model closes that by construction.
+#: - The account was on *Low* effort. The point of a second opinion is a
+#:   **capable** independent one — the README says exactly this about the
+#:   SDK transport's pin — and effort is baked into the name on this
+#:   surface, so choosing the model is choosing the tier.
+#:
+#: The SDK consultant's pin exists for a different reason (a free-tier
+#: latency ladder) and its value is lower for that reason. This one is
+#: about identity and depth, on a subscription that can run it.
+#:
+#: ``None`` still means "agy's own default" and remains the escape hatch:
+#: the parameter is not removed, so a caller or a future config key can
+#: hand back the inherited behaviour without touching this module.
+DEFAULT_MODEL = "gemini-3.8-flash-high"
+
 #: Tool names allowed under every consultation policy.
 #:
 #: ``finish`` is how the model says it is done. It is control rather than
@@ -212,13 +241,13 @@ class AgyConsultant:
         same directory the engine's gate uses, because the hook reads the
         registry from one place.
     model:
-        Left unset by default, which is the opposite of the SDK
-        consultant's pinned model and is deliberate. That pin exists
-        because the SDK's default moves between 0.1.x releases *and*
-        because the newest models were unusable on a free key. Here the
-        default is the one the account holder chose in ``agy``'s own
-        settings, on a plan that can run it — so inheriting it is
-        inheriting a decision rather than an accident.
+        :data:`DEFAULT_MODEL`, pinned since 2026-09-09. This read "left
+        unset, so it inherits the account holder's own choice, which is
+        inheriting a decision rather than an accident" — and the accident
+        it did not consider is that ``agy``'s model menu includes Claude
+        and GPT-OSS entries, so the inherited decision could quietly make
+        a *second* opinion a first one (AG-R-15). ``None`` still means
+        "agy's own default" for a caller that wants it back.
     """
 
     def __init__(
@@ -226,7 +255,8 @@ class AgyConsultant:
         repo_root: Path | str,
         *,
         config_dir: Path | str | None = None,
-        model: str | None = None,
+        model: str | None = DEFAULT_MODEL,
+        config: Any = None,
         executable: str = "agy",
         timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
         image_timeout_seconds: float = DEFAULT_IMAGE_TIMEOUT_SECONDS,
@@ -236,6 +266,7 @@ class AgyConsultant:
             config_dir or Path.home() / ".config" / "aic-dc"
         )
         self._model = model
+        self._config = config
         self._executable = executable
         self._timeout = timeout_seconds
         self._image_timeout = image_timeout_seconds
@@ -244,6 +275,29 @@ class AgyConsultant:
         self._session: AgySession | None = None
         self._cancelled = False
         self._counter = 0
+
+    def _resolve_model(self) -> str | None:
+        """The model for the consultation about to run.
+
+        **Read per consultation rather than at construction**, which is
+        what makes the Settings control live. ``app.json`` is in
+        ``settings.py``'s reloadable set, so a save followed by
+        ``reload_app_config`` drops the cache and the next second opinion
+        uses the new model — no restart, and no separate "applies on
+        restart" disposition to explain in the UI.
+
+        A construction-time ``model=`` still wins when no config was
+        supplied, which is what every test and every direct caller does.
+        """
+        if self._config is None:
+            return self._model
+        try:
+            return self._config.consultant_model
+        except Exception:  # noqa: BLE001 - a bad config must not lose the answer
+            logger.warning(
+                "Could not read engines.consultant_model; using %s", self._model
+            )
+            return self._model
 
     # ------------------------------------------------------------------
     # What the bridge asks before it offers the tools
@@ -522,7 +576,7 @@ class AgyConsultant:
         session = AgySession(
             self._repo_root,
             gate=gate,
-            model=self._model,
+            model=self._resolve_model(),
             executable=self._executable,
         )
         self._session = session
@@ -628,6 +682,7 @@ def choose_consultant(
     config_dir: Path | str | None = None,
     transport: str = "auto",
     enabled: Iterable[str] | None = None,
+    config: Any = None,
 ) -> tuple[Any, str]:
     """The consultant to mount, and one sentence saying why.
 
@@ -673,7 +728,7 @@ def choose_consultant(
             "credential (AG-17)."
         )
 
-    agy_consultant = AgyConsultant(repo_root, config_dir=config_dir)
+    agy_consultant = AgyConsultant(repo_root, config_dir=config_dir, config=config)
     sdk_consultant = Consultant(repo_root)
     if capabilities.AGY not in permitted:
         # Reported as unusable for the same reason a missing binary is,

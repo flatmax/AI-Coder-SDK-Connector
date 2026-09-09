@@ -48,6 +48,14 @@ const _MODEL_DEFAULTS = {
     available: ['claude', 'antigravity'],
     mountable: ['claude'],
   }),
+  // AG-R-15's picker is read on every mount for the same reason, and an
+  // empty list renders no panel — so a test that does not care about the
+  // consultant is not given one.
+  'Settings.get_consultant_model': () => ({
+    model: 'gemini-3.8-flash-high',
+    inherit_value: 'auto',
+    models: [],
+  }),
 };
 
 function publishFakeRpc(methods) {
@@ -2462,5 +2470,103 @@ describe('aic-settings-tab engine policy', () => {
     select.dispatchEvent(new Event('change'));
     await settle(el);
     expect(backend.reloads).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// AG-R-15 — the consultation model, and the vendor warning
+// ---------------------------------------------------------------------------
+
+const CONSULTANT_MODELS = [
+  { value: 'gemini-3.8-flash-high', displayName: 'Gemini 3.8 Flash (High)', second_vendor: false },
+  { value: 'gemini-3.8-flash-low', displayName: 'Gemini 3.8 Flash (Low)', second_vendor: false },
+  { value: 'claude-opus-4-6-thinking', displayName: 'Claude Opus 4.6 (Thinking)', second_vendor: true },
+];
+
+describe('aic-settings-tab second opinion model', () => {
+  function consultantRpc(model, extra = {}) {
+    publishFakeRpc({
+      'Settings.get_consultant_model': () => ({
+        model,
+        inherit_value: 'auto',
+        models: CONSULTANT_MODELS,
+      }),
+      ...extra,
+    });
+  }
+
+  function panel(el) {
+    return [...el.shadowRoot.querySelectorAll('.model-panel')].find(
+      (p) => p.getAttribute('aria-label') === 'Second opinion model',
+    );
+  }
+
+  it('renders the choices agy offers', async () => {
+    consultantRpc('gemini-3.8-flash-high');
+    const el = mountTab();
+    await settle(el);
+    const options = [...panel(el).querySelectorAll('option')].map((o) => o.value);
+    expect(options).toContain('gemini-3.8-flash-low');
+    expect(options).toContain('auto');
+  });
+
+  it('marks a non-Google model in the list', async () => {
+    consultantRpc('gemini-3.8-flash-high');
+    const el = mountTab();
+    await settle(el);
+    const claude = [...panel(el).querySelectorAll('option')].find(
+      (o) => o.value === 'claude-opus-4-6-thinking',
+    );
+    expect(claude.textContent).toContain('⚠');
+  });
+
+  it('warns in prose when the chosen model is the same vendor', async () => {
+    // AG-13's premise made false. The option is selectable; it is not silent.
+    consultantRpc('claude-opus-4-6-thinking');
+    const el = mountTab();
+    await settle(el);
+    expect(panel(el).textContent).toContain('not a second vendor');
+  });
+
+  it('does not warn for a Google model', async () => {
+    consultantRpc('gemini-3.8-flash-high');
+    const el = mountTab();
+    await settle(el);
+    expect(panel(el).textContent).not.toContain('not a second vendor');
+  });
+
+  it('takes the answer from the reply rather than from the select', async () => {
+    // The select is a request. A refused change must not leave the control
+    // showing a value the server never accepted.
+    const calls = [];
+    consultantRpc('gemini-3.8-flash-high', {
+      'Settings.set_consultant_model': (value) => {
+        calls.push(value);
+        return { error: 'unknown_model' };
+      },
+    });
+    const el = mountTab();
+    await settle(el);
+    const select = panel(el).querySelector('select');
+    select.value = 'claude-opus-4-6-thinking';
+    select.dispatchEvent(new Event('change'));
+    await settle(el);
+    expect(calls).toEqual(['claude-opus-4-6-thinking']);
+    expect(el._consultant.model).toBe('gemini-3.8-flash-high');
+  });
+
+  it('renders nothing when agy offers no list', async () => {
+    // An empty list means the subprocess failed, not that the account has no
+    // models — an empty picker under a heading would say the opposite.
+    consultantRpc('gemini-3.8-flash-high', {
+      'Settings.get_consultant_model': () => ({
+        model: 'gemini-3.8-flash-high',
+        inherit_value: 'auto',
+        models: [],
+      }),
+    });
+    const el = mountTab();
+    await settle(el);
+    expect(panel(el)).toBeUndefined();
   });
 });

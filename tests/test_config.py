@@ -976,3 +976,58 @@ def test_merge_leaves_its_inputs_alone():
     _merge_json(user, {}, bundled)
     assert user == {"engines": {"enabled": ["claude"]}}
     assert bundled == {"engines": {"master": "claude"}}
+
+
+# ---------------------------------------------------------------------------
+# AG-R-15 — the consultant's model, and the engine's persisted one
+# ---------------------------------------------------------------------------
+
+
+class TestEngineModels:
+    def test_the_consultant_is_pinned_by_default(self, isolated_config_dir):
+        """AG-R-15: unpinned inherits an account setting that can make a
+        second opinion the same vendor asked twice."""
+        from aic_dc.agy.consultant import DEFAULT_MODEL
+
+        assert ConfigManager().consultant_model == DEFAULT_MODEL
+
+    def test_auto_hands_the_choice_back_to_the_account(self, isolated_config_dir):
+        cfg = ConfigManager()
+        cfg.set_engine_option("consultant_model", "auto")
+        assert ConfigManager().consultant_model is None
+
+    def test_a_nonsense_value_costs_a_preference_not_the_app(
+        self, isolated_config_dir, caplog
+    ):
+        from aic_dc.agy.consultant import DEFAULT_MODEL
+
+        cfg = ConfigManager()
+        cfg.set_engine_option("consultant_model", 17)
+        assert ConfigManager().consultant_model == DEFAULT_MODEL
+
+    def test_the_engine_is_not_pinned(self, isolated_config_dir):
+        """Deliberately asymmetric with the consultant: a master engine is
+        the one the user drives all day, so their own tier choice stands."""
+        assert ConfigManager().agy_model is None
+
+    def test_writing_one_key_leaves_the_others_alone(self, isolated_config_dir):
+        """`set_engine_option` is a read-modify-write of a file the Settings
+        editor also writes, so a blind overwrite would drop a user's edits."""
+        cfg = ConfigManager()
+        cfg.set_engine_option("master", "claude")
+        cfg.set_engine_option("consultant_model", "gemini-3.8-flash-low")
+        written = json.loads((isolated_config_dir / "app.json").read_text())
+        assert written["engines"]["master"] == "claude"
+        assert written["engines"]["consultant_model"] == "gemini-3.8-flash-low"
+
+    def test_it_does_not_write_from_a_stale_cache(self, isolated_config_dir):
+        """The manager's app_config may be older than an edit the user just
+        saved in the Settings tab; writing from it would revert them."""
+        cfg = ConfigManager()
+        _ = cfg.app_config  # prime the cache
+        path = isolated_config_dir / "app.json"
+        on_disk = json.loads(path.read_text()) if path.exists() else {}
+        on_disk["typed_by_the_user"] = "keep me"
+        path.write_text(json.dumps(on_disk))
+        cfg.set_engine_option("consultant_model", "gemini-3.8-flash-low")
+        assert json.loads(path.read_text())["typed_by_the_user"] == "keep me"
