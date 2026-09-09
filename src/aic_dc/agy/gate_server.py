@@ -181,7 +181,9 @@ class AgyGateServer:
         self._policy = policy
         self._config_dir = config_dir
         self._server: Any = None
-        self._claimed: str | None = None
+        # A set, not one id: this host owns its session's conversation and
+        # its subagents' while they run. See `claim`.
+        self._claimed: set[str] = set()
         self._refusal: str | None = None
 
     @property
@@ -245,11 +247,36 @@ class AgyGateServer:
         window there is: the id is unknown before ``init``, and a tool call
         cannot precede the first prompt. Claiming late would wave the first
         tool call through as somebody else's session.
+
+        **More than one, since 2026-09-09.** A session owns its own
+        conversation and, while they run, its subagents' — each of which
+        ``agy`` gives a conversation id of its own. One claim per host was
+        not a simplification but a hole: the hook passes through every
+        conversation nobody has claimed, so a subagent's every tool call
+        went ungated past a dialog the user had approved only the *spawn*
+        through. Measured by ``scripts/probe_agy_subagent_gate.py``.
         """
+        if not conversation_id:
+            return
         registry.claim(
             conversation_id, self._socket_path, config_dir=self._config_dir
         )
-        self._claimed = conversation_id
+        self._claimed.add(conversation_id)
+
+    def release(self, conversation_id: str) -> None:
+        """Give up one conversation, leaving the rest claimed.
+
+        For a subagent that has finished. Releasing matters as much as
+        claiming: a registry entry is a file that outlives the process, so
+        a claim left behind would make this host intercept a *later*
+        session of the user's own that happened to resume that
+        conversation — the isolation property ``probe_agy_isolation.py``
+        exists to hold.
+        """
+        if conversation_id not in self._claimed:
+            return
+        registry.release(conversation_id, config_dir=self._config_dir)
+        self._claimed.discard(conversation_id)
 
     async def stop(self) -> None:
         """Release the conversation, then close. Never raises.
@@ -261,9 +288,12 @@ class AgyGateServer:
         unowned, which is what they are once this host has let go.
         """
         self._refusal = None
-        if self._claimed:
-            registry.release(self._claimed, config_dir=self._config_dir)
-            self._claimed = None
+        # Every claim, not just the session's own: a subagent still
+        # running at teardown has one too, and leaving it behind is the
+        # interception-after-the-fact this class's `release` warns about.
+        for conversation_id in sorted(self._claimed):
+            registry.release(conversation_id, config_dir=self._config_dir)
+        self._claimed.clear()
         server, self._server = self._server, None
         if server is not None:
             server.close()

@@ -91,6 +91,28 @@ def _iso_utc() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def subagent_entries(step: Any) -> list[dict[str, Any]]:
+    """The subagents one ``subagent`` step announces, in order.
+
+    Module level and shared, because **two callers need this and they need
+    it for different reasons**: the pump turns each entry into a row, and
+    :class:`~aic_dc.agy.session.AgySession` claims each entry's
+    conversation so the subagent's tool calls reach the permission gate.
+    A second copy of this parse is how one of them would quietly stop
+    seeing a subagent the other could see — and the one that stops seeing
+    is a containment hole rather than a missing tab.
+    """
+    if not isinstance(step, dict):
+        return []
+    info = step.get("subagent_info")
+    if not isinstance(info, dict):
+        return []
+    entries = info.get("subagents")
+    if not isinstance(entries, list):
+        return []
+    return [entry for entry in entries if isinstance(entry, dict)]
+
+
 def unwrap(frame: Any, event: str) -> dict[str, Any] | None:
     """The payload nested under its own event name, or ``None``.
 
@@ -323,16 +345,10 @@ class AgyTranslator:
         renders what it cannot read rather than dropping it.
         """
         self._absorb_usage(step)
-        info = step.get("subagent_info")
-        info = info if isinstance(info, dict) else {}
-        entries = info.get("subagents")
-        entries = entries if isinstance(entries, list) else []
         terminal = state in TERMINAL_STATES
 
         events: list[Event] = []
-        for position, entry in enumerate(entries):
-            if not isinstance(entry, dict):
-                continue
+        for position, entry in enumerate(subagent_entries(step)):
             agent_id = (
                 str(entry.get("conversation_id") or "")
                 or f"agy-subagent-{index}-{position}"

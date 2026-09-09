@@ -262,6 +262,58 @@ class TestOwnershipLifecycle:
         # And the hook is back to treating it as somebody else's.
         assert hook.decide(payload(), config_dir=config_dir) == hook.ALLOW
 
+    def test_a_second_conversation_can_be_claimed_at_once(self, wired):
+        """A session owns its own conversation *and* its subagents'.
+
+        One claim per host was a containment hole, not a simplification:
+        a subagent gets a conversation id of its own, the hook passes
+        through everything unclaimed, and so every call a subagent made
+        went ungated past a dialog that had approved only the spawn.
+        """
+        _recorder, _gate, server, config_dir = wired
+        server.claim(OURS)
+        server.claim("child-1")
+        assert registry.lookup(OURS, config_dir=config_dir) is not None
+        assert registry.lookup("child-1", config_dir=config_dir) is not None
+
+    def test_releasing_a_subagent_leaves_the_session_claimed(self, wired):
+        """A subagent settling must not un-gate the turn that spawned it."""
+        _recorder, _gate, server, config_dir = wired
+        server.claim(OURS)
+        server.claim("child-1")
+        server.release("child-1")
+        assert registry.lookup("child-1", config_dir=config_dir) is None
+        assert registry.lookup(OURS, config_dir=config_dir) is not None
+
+    def test_stop_releases_every_claim(self, wired):
+        """Including a subagent still running at teardown.
+
+        A registry entry is a file that outlives the process, so a claim
+        left behind makes this host intercept a *later* session of the
+        user's own that resumes that conversation.
+        """
+        _recorder, _gate, server, config_dir = wired
+
+        async def go():
+            await server.start()
+            server.claim(OURS)
+            server.claim("child-1")
+            await server.stop()
+
+        asyncio.run(go())
+        assert registry.lookup(OURS, config_dir=config_dir) is None
+        assert registry.lookup("child-1", config_dir=config_dir) is None
+
+    def test_releasing_something_never_claimed_is_quiet(self, wired):
+        _recorder, _gate, server, _cfg = wired
+        server.release("never-claimed")
+
+    def test_a_blank_conversation_is_not_claimed(self, wired):
+        """A claim on "" would be an entry no hook payload can match."""
+        _recorder, _gate, server, config_dir = wired
+        server.claim("")
+        assert registry.lookup("", config_dir=config_dir) is None
+
     def test_a_stale_socket_file_does_not_stop_a_restart(self, wired):
         """A killed process leaves the file behind; bind would fail on it."""
         _recorder, _gate, server, _cfg = wired

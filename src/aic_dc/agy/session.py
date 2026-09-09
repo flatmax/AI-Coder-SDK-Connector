@@ -49,7 +49,7 @@ from pathlib import Path
 from typing import Any
 
 from aic_dc.agy.gate_server import AgyGateServer
-from aic_dc.agy.steps import AgyTranslator, unwrap
+from aic_dc.agy.steps import AgyTranslator, subagent_entries, unwrap
 from aic_dc.claude_code.messages import Event
 
 logger = logging.getLogger(__name__)
@@ -361,11 +361,80 @@ class AgySession:
                 if frame is None:
                     logger.warning("agy's stream ended mid-turn")
                     break
+                # Before the yield, and before the translator: this is the
+                # earliest instant this process can act on the frame, and
+                # what it buys is the gate closing over the subagent
+                # sooner. See `_gate_subagents`.
+                self._gate_subagents(frame)
                 yield frame
                 if frame.get("event") == "result":
                     break
         finally:
             self._turn_active = False
+
+    def _gate_subagents(self, frame: dict[str, Any]) -> None:
+        """Claim a subagent's conversation, so its tool calls reach the gate.
+
+        **The hole this closes.** ``agy`` runs under
+        ``--dangerously-skip-permissions``, so this host's gate is the only
+        thing between the model and the tree — and the hook routes to it by
+        *conversation id*, passing through everything unclaimed, which is
+        what keeps a second session of the user's own out of our dialog
+        (``probe_agy_isolation.py``). A subagent is given a conversation of
+        its own. So until this existed, a delegation was a route around the
+        permission dialog: ``invoke_subagent`` raised a dialog, the user
+        approved *the spawn*, and every call the subagent then made — reads,
+        commands and writes into the repository — was passed through
+        unreviewed. Measured on 2026-09-09 by
+        ``scripts/probe_agy_subagent_gate.py``, which denied everything but
+        the delegation and watched the subagent's edit land anyway.
+
+        AG-5's table puts the spawners in the *still asks* column because "a
+        subagent inherits the tool set". It does inherit it; what it did not
+        inherit was the gate.
+
+        **Claimed on any announcement, and never released here.** The first
+        cut read ``state`` the obvious way — claim on ``ACTIVE``, release on
+        ``DONE`` — and the live re-run failed exactly as the unfixed code
+        had. ``DONE`` on a ``subagent`` step means **the launch finished**,
+        not the subagent: measured at ``duration_seconds: 0.10`` on a
+        delegation whose work then ran for six more seconds, over frames
+        the parent spent waiting on it. Some runs announce ``ACTIVE`` and
+        ``DONE``, some only ``DONE``, so a release keyed on that word
+        un-gates a subagent that is still working — and on the run that
+        never says ``ACTIVE``, releases a claim that was never made.
+
+        The subagent therefore stays claimed for the life of the session
+        and is released by :meth:`AgyGateServer.stop`. Holding a claim
+        costs one registry file; dropping one early costs the review.
+
+        **The residue, stated rather than papered over:** ``agy`` spawns
+        the child before it announces it, so a tool call made in that
+        window reaches the hook before the claim is on disk and passes
+        through. This side cannot close it — ``invoke_subagent``'s own
+        arguments carry no conversation id, because the child does not
+        exist when the dialog for the spawn is answered — and the honest
+        mitigations are upstream: a parent id on the hook payload, or a
+        way to spawn pre-claimed.
+        """
+        step = unwrap(frame, "step_update")
+        if step is None or str(step.get("step_type") or "") != "subagent":
+            return
+        for entry in subagent_entries(step):
+            child = str(entry.get("conversation_id") or "")
+            if not child or child == self._conversation_id:
+                continue
+            try:
+                self._gate.claim(child)
+            except Exception:  # noqa: BLE001 - a turn must not die on this
+                # Logged loudly: a claim that failed is a subagent running
+                # ungated, which is the condition this method exists to
+                # prevent and must not be silent.
+                logger.exception(
+                    "Could not claim the subagent conversation %s; its tool "
+                    "calls will not reach the permission gate",
+                    child,
+                )
 
     async def stream_turn(
         self, prompt: str, *, translator: AgyTranslator
