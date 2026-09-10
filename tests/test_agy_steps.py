@@ -26,6 +26,8 @@ Offline. No ``agy``, no network, no subprocess.
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from aic_dc.agy import steps
@@ -57,6 +59,30 @@ TOOL_ACTIVE = {
     },
 }
 TOOL_DONE = dict(TOOL_ACTIVE, state="DONE", duration_seconds=0.065)
+# Transcribed from the 2026-09-09 capture at agy 1.1.27, prompt shortened.
+# The conversation id is the subagent's own and is what the tab is keyed
+# on; `log_uri` names the transcript it writes, which is the only place
+# its steps appear — they do not stream into the parent conversation.
+SUBAGENT_ENTRY = {
+    "type_name": "research",
+    "role": "Notes Reader",
+    "initial_prompt": "Please read the file `notes.txt` …",
+    "conversation_id": "c21acd4d",
+    "log_uri": (
+        "file:///home/u/.gemini/antigravity-cli/brain/c21acd4d"
+        "/.system_generated/logs/transcript.jsonl"
+    ),
+    "workspace_uris": ["file:///tmp/temp/work"],
+}
+SUBAGENT_ACTIVE = {
+    "conversation_id": "b1d377c5",
+    "step_index": 2,
+    "state": "ACTIVE",
+    "step_type": "subagent",
+    "tool_name": "invoke_subagent",
+    "subagent_info": {"subagents": [SUBAGENT_ENTRY]},
+}
+SUBAGENT_DONE = dict(SUBAGENT_ACTIVE, state="DONE", duration_seconds=6.1)
 RESULT = {
     "event": "result",
     "result": {
@@ -184,6 +210,119 @@ class TestToolCards:
             t.translate(frame(dict(TOOL_DONE, state="ERROR")))[1].payload["status"]
             == "error"
         )
+
+
+class TestASubagentIsAnnounced:
+    """The delegation surface, transcribed from the 2026-09-09 capture.
+
+    ``scripts/probe_agy_subagent_frames.py``, one turn at ``agy`` 1.1.27.
+    The fixture is the real ``subagent_info`` payload with the prompt
+    shortened; every field the pump reads is verbatim, because the
+    recorded reason this surface was unbuilt here — "``agy``'s stream
+    carries no trajectory or depth field at all" — was true about
+    ``depth`` and wrong about subagents, and a fixture written from that
+    belief would have kept it true.
+    """
+
+    def test_the_announcement_carries_one_identity_in_all_three_fields(self):
+        """`streaming.js` falls back through them; setting one is a bet."""
+        t = AgyTranslator("r1")
+        events = t.translate(frame(SUBAGENT_ACTIVE))
+        assert names(events) == ["subagentEvent"]
+        payload = events[0].payload
+        assert (
+            payload["task_id"]
+            == payload["agent_id"]
+            == payload["tool_use_id"]
+            == "c21acd4d"
+        )
+
+    def test_the_id_is_the_subagents_own_conversation(self):
+        """Borrowed, not minted — it is also the key to the transcript."""
+        t = AgyTranslator("r1")
+        assert t.translate(frame(SUBAGENT_ACTIVE))[0].payload["agent_id"] == "c21acd4d"
+
+    def test_the_labels_are_the_role_and_the_type(self):
+        t = AgyTranslator("r1")
+        payload = t.translate(frame(SUBAGENT_ACTIVE))[0].payload
+        assert payload["description"] == "Notes Reader"
+        assert payload["subagent_type"] == "research"
+
+    def test_it_is_not_terminal_while_active(self):
+        t = AgyTranslator("r1")
+        payload = t.translate(frame(SUBAGENT_ACTIVE))[0].payload
+        assert payload["terminal"] is False
+        assert payload["status"] == "running"
+
+    def test_done_settles_the_tab(self):
+        """`state.streaming = !row.terminal`: without this it spins forever."""
+        t = AgyTranslator("r1")
+        t.translate(frame(SUBAGENT_ACTIVE))
+        payload = t.translate(frame(SUBAGENT_DONE))[0].payload
+        assert payload["terminal"] is True
+        assert payload["status"] == "completed"
+
+    def test_the_id_is_stable_across_the_two_frames(self):
+        """A second id would be a second row for one subagent."""
+        t = AgyTranslator("r1")
+        first = t.translate(frame(SUBAGENT_ACTIVE))[0].payload["agent_id"]
+        second = t.translate(frame(SUBAGENT_DONE))[0].payload["agent_id"]
+        assert first == second
+
+    @pytest.mark.parametrize(
+        "state,status",
+        [("ERROR", "failed"), ("CANCELED", "stopped"), ("DONE", "completed")],
+    )
+    def test_the_status_words_are_the_ones_the_led_table_knows(self, state, status):
+        """`_TERMINAL_LED` maps these three; anything else lands on amber
+        by not being understood, which is the wrong way to reach a colour."""
+        t = AgyTranslator("r1")
+        payload = t.translate(frame(dict(SUBAGENT_DONE, state=state)))[0].payload
+        assert payload["status"] == status
+
+    def test_each_subagent_in_one_step_gets_its_own_row(self):
+        """`subagents` is a list, and one step can announce several."""
+        t = AgyTranslator("r1")
+        both = dict(
+            SUBAGENT_ACTIVE,
+            subagent_info={
+                "subagents": [
+                    SUBAGENT_ENTRY,
+                    dict(SUBAGENT_ENTRY, conversation_id="second", role="Other"),
+                ]
+            },
+        )
+        events = t.translate(frame(both))
+        assert [e.payload["agent_id"] for e in events] == ["c21acd4d", "second"]
+
+    def test_a_delegation_with_no_conversation_id_still_gets_a_row(self):
+        """This pump renders what it cannot read rather than dropping it."""
+        t = AgyTranslator("r1")
+        entry = {k: v for k, v in SUBAGENT_ENTRY.items() if k != "conversation_id"}
+        events = t.translate(
+            frame(dict(SUBAGENT_ACTIVE, subagent_info={"subagents": [entry]}))
+        )
+        assert names(events) == ["subagentEvent"]
+        assert events[0].payload["agent_id"] == "agy-subagent-2-0"
+
+    def test_a_subagent_step_is_no_longer_an_unknown_step(self):
+        """It rendered as two `unknown_step` notices before 2026-09-09,
+        with the role, the prompt and the transcript all discarded."""
+        t = AgyTranslator("r1")
+        assert "subagent" in steps.KNOWN_STEP_TYPES
+        for event in t.translate(frame(SUBAGENT_ACTIVE)):
+            assert event.payload.get("subtype") != "unknown_step"
+
+    def test_the_transcript_location_is_kept_for_the_tabs_content(self):
+        """`log_uri` is reported once, in the announcement, and is the
+        only route to what the subagent actually did."""
+        t = AgyTranslator("r1")
+        t.translate(frame(SUBAGENT_ACTIVE))
+        assert t._subagents["c21acd4d"]["log_uri"].endswith("transcript.jsonl")
+
+    def test_an_empty_announcement_emits_nothing(self):
+        t = AgyTranslator("r1")
+        assert t.translate(frame(dict(SUBAGENT_ACTIVE, subagent_info={}))) == []
 
 
 class TestTheVocabularyIsNotClosed:
@@ -420,3 +559,324 @@ class TestADivertedWriteIsReported:
             },
         }))
         assert not [e for e in events if e.name == "systemEvent"]
+
+
+CONVERSATION = "7ebd27bf-f356-4c88-9294-79f566bc0983"
+
+
+def image_step(image_name="ai_test_pattern", state="DONE", **params):
+    """A ``generate_image`` step shaped like the real one.
+
+    The parameters are transcribed from the call recorded in `agy`'s own
+    conversation store on 2026-09-08 — `AspectRatio`, `ImageName`,
+    `Prompt`, and no path of any spelling, because the tool declares none.
+    """
+    return frame({
+        "conversation_id": CONVERSATION,
+        "step_index": 4,
+        "state": state,
+        "step_type": "tool",
+        "tool_name": "generate_image",
+        "tool_info": {
+            "name": "generate_image",
+            "parameters": {
+                "AspectRatio": "4:3",
+                "ImageName": image_name,
+                "Prompt": "a test pattern",
+                **params,
+            },
+        },
+    })
+
+
+class TestAGeneratedImageIsCollected:
+    """The engine's half of what phase 10 built for the consultant.
+
+    `generate_image` takes `ImageName` and no path — the schema sets
+    `additionalProperties: false`, so one cannot be added — and `agy`
+    writes into `brain/<conversation_id>/`, outside the repository. The
+    consultant has copied that file in since 2026-09-08; the engine did
+    not, so an image generated in an ordinary turn was produced correctly
+    and then invisible to the file tree, the viewer, and the user.
+
+    Measured against the first real occurrence: a 1200×896 JPEG that the
+    user watched succeed and could not find.
+    """
+
+    def _translator(self, tmp_path, monkeypatch, *, repo=None, brain=None):
+        monkeypatch.setattr(steps, "BRAIN_DIR", brain or (tmp_path / "brain"))
+        repo = repo if repo is not None else tmp_path / "repo"
+        repo.mkdir(parents=True, exist_ok=True)
+        return AgyTranslator("r1", repo_root=repo, conversation_id=CONVERSATION)
+
+    def _generated(self, tmp_path, name="ai_test_pattern_1788856211696.jpg"):
+        directory = tmp_path / "brain" / CONVERSATION
+        directory.mkdir(parents=True, exist_ok=True)
+        source = directory / name
+        source.write_bytes(b"\xff\xd8\xff\xe0 a jpeg")
+        return source
+
+    def _result(self, events):
+        return next(e for e in events if e.name == "toolResult")
+
+    def test_the_image_lands_in_the_repository_under_the_models_name(
+        self, tmp_path, monkeypatch
+    ):
+        translator = self._translator(tmp_path, monkeypatch)
+        self._generated(tmp_path)
+
+        translator.translate(image_step())
+
+        landed = tmp_path / "repo" / "ai_test_pattern.jpg"
+        assert landed.is_file()
+        assert landed.read_bytes() == b"\xff\xd8\xff\xe0 a jpeg"
+
+    def test_the_extension_is_the_one_agy_produced(self, tmp_path, monkeypatch):
+        """A request for `.png` produced JPEG, measured 2026-09-08.
+
+        The tool honours no requested extension, so naming the file after
+        what was asked for would produce a `.png` that every viewer then
+        refuses to open.
+        """
+        translator = self._translator(tmp_path, monkeypatch)
+        self._generated(tmp_path, "icon_1788856211696.jpeg")
+
+        translator.translate(image_step("icon"))
+
+        assert (tmp_path / "repo" / "icon.jpeg").is_file()
+        assert not (tmp_path / "repo" / "icon.png").exists()
+
+    def test_the_file_tree_is_told_which_file_appeared(self, tmp_path, monkeypatch):
+        """`files_modified` was empty, which is the visible half of the bug.
+
+        `files_written_by` is a table of tools to their *path arguments*
+        and this tool has none, so it answered `[]` and the tree never
+        reloaded — the image could have been in the repository and still
+        not shown up.
+        """
+        translator = self._translator(tmp_path, monkeypatch)
+        self._generated(tmp_path)
+
+        result = self._result(translator.translate(image_step()))
+
+        landed = str(tmp_path / "repo" / "ai_test_pattern.jpg")
+        assert result.payload["files_modified"] == [landed]
+        assert translator.stats.files_modified == [landed]
+        assert landed in result.payload["content"]
+
+    def test_a_call_still_running_collects_nothing(self, tmp_path, monkeypatch):
+        translator = self._translator(tmp_path, monkeypatch)
+        self._generated(tmp_path)
+
+        events = translator.translate(image_step(state="ACTIVE"))
+
+        assert names(events) == ["toolUse"]
+        assert not list((tmp_path / "repo").iterdir())
+
+    def test_a_failed_call_collects_nothing(self, tmp_path, monkeypatch):
+        """An image `agy` says it did not make is not one to go looking for.
+
+        The directory is the conversation's, not the call's, so a failed
+        call plus an earlier success is exactly the shape that would
+        collect the wrong picture and report it as this one's.
+        """
+        translator = self._translator(tmp_path, monkeypatch)
+        self._generated(tmp_path)
+
+        result = self._result(translator.translate(image_step(state="ERROR")))
+
+        assert result.payload["files_modified"] == []
+        assert not list((tmp_path / "repo").iterdir())
+
+    def test_an_earlier_turns_image_is_not_collected(self, tmp_path, monkeypatch):
+        """The guard the consultant does not need and the engine does.
+
+        A consultation is one process holding one conversation for one
+        call. An engine conversation is long-lived and resumable, so its
+        directory accumulates every image of every turn — and a model that
+        reuses an `ImageName` would otherwise have last turn's picture
+        collected and reported as this one's.
+        """
+        translator = self._translator(tmp_path, monkeypatch)
+        stale = self._generated(tmp_path)
+        os.utime(stale, (0, translator._started_at - 3600))
+
+        result = self._result(translator.translate(image_step()))
+
+        assert result.payload["files_modified"] == []
+        assert not list((tmp_path / "repo").iterdir())
+
+    def test_a_second_image_does_not_overwrite_the_first(self, tmp_path, monkeypatch):
+        translator = self._translator(tmp_path, monkeypatch)
+        (tmp_path / "repo" / "ai_test_pattern.jpg").write_bytes(b"the first one")
+        self._generated(tmp_path)
+
+        result = self._result(translator.translate(image_step()))
+
+        assert (tmp_path / "repo" / "ai_test_pattern.jpg").read_bytes() == b"the first one"
+        landed = tmp_path / "repo" / "ai_test_pattern_1788856211696.jpg"
+        assert landed.is_file()
+        assert result.payload["files_modified"] == [str(landed)]
+
+    def test_a_name_that_is_a_path_cannot_leave_the_repository(
+        self, tmp_path, monkeypatch
+    ):
+        """The schema asks for a name; nothing enforces that it is one.
+
+        A separator in it reaches the destination as a directory, so the
+        basename is taken rather than trusted. The image is still
+        collected — refusing it would lose a picture over its name.
+        """
+        translator = self._translator(tmp_path, monkeypatch)
+        nested = tmp_path / "brain" / CONVERSATION / "sub"
+        nested.mkdir(parents=True)
+        (nested / "icon_1788856211696.jpg").write_bytes(b"x")
+
+        translator.translate(image_step("sub/icon"))
+
+        assert (tmp_path / "repo" / "icon.jpg").is_file()
+        assert not (tmp_path / "repo" / "sub").exists()
+
+    def test_a_name_that_climbs_out_writes_nothing_at_all(
+        self, tmp_path, monkeypatch
+    ):
+        translator = self._translator(tmp_path, monkeypatch)
+        self._generated(tmp_path, "escape_1788856211696.jpg")
+
+        translator.translate(image_step("../../escape"))
+
+        assert not list((tmp_path / "repo").iterdir())
+        assert not (tmp_path.parent / "escape.jpg").exists()
+
+    def test_an_image_that_cannot_be_found_does_not_lose_the_turn(
+        self, tmp_path, monkeypatch
+    ):
+        """A pump that raised would cost the rest of the turn a picture."""
+        translator = self._translator(tmp_path, monkeypatch)
+
+        result = self._result(translator.translate(image_step()))
+
+        assert result.payload["status"] == "success"
+        assert result.payload["files_modified"] == []
+
+    def test_the_consultants_translator_collects_nothing_here(
+        self, tmp_path, monkeypatch
+    ):
+        """It builds its own and collects after the turn, from the frames.
+
+        Two collections of the same image would put it in the repository
+        twice under different names, since the consultant's caller supplies
+        the destination and the engine derives one.
+        """
+        monkeypatch.setattr(steps, "BRAIN_DIR", tmp_path / "brain")
+        self._generated(tmp_path)
+
+        result = self._result(
+            AgyTranslator("r1", agent_id="ag-1").translate(image_step())
+        )
+
+        assert result.payload["files_modified"] == []
+
+    def test_a_call_with_no_name_at_all_is_survivable(self, tmp_path, monkeypatch):
+        translator = self._translator(tmp_path, monkeypatch)
+        self._generated(tmp_path)
+
+        result = self._result(translator.translate(image_step(image_name="")))
+
+        assert result.payload["files_modified"] == []
+
+
+class TestTheLocatorIsSharedAndDiffers:
+    """One locator, one option, and the option is the whole difference."""
+
+    def _brain(self, tmp_path, *names):
+        directory = tmp_path / CONVERSATION
+        directory.mkdir(parents=True, exist_ok=True)
+        for name in names:
+            (directory / name).write_bytes(b"x")
+        return tmp_path
+
+    def test_the_name_the_model_chose_is_matched_with_agys_suffix(self, tmp_path):
+        brain = self._brain(tmp_path, "duck_1788856211696.jpg", "other_17.jpg")
+        found = steps.locate_generated_image(brain, CONVERSATION, "duck")
+        assert found.name == "duck_1788856211696.jpg"
+
+    def test_the_engine_does_not_fall_back_to_the_newest_file(self, tmp_path):
+        brain = self._brain(tmp_path, "something_else_17.jpg")
+        assert steps.locate_generated_image(brain, CONVERSATION, "duck") is None
+
+    def test_the_consultant_does(self, tmp_path):
+        brain = self._brain(tmp_path, "something_else_17.jpg")
+        found = steps.locate_generated_image(
+            brain, CONVERSATION, "duck", allow_newest=True
+        )
+        assert found.name == "something_else_17.jpg"
+
+    def test_a_conversation_with_no_directory_is_not_an_error(self, tmp_path):
+        assert steps.locate_generated_image(tmp_path, CONVERSATION, "duck") is None
+        assert steps.locate_generated_image(tmp_path, "", "duck") is None
+
+    def test_sub_directories_are_skipped_because_an_image_is_a_file(self, tmp_path):
+        brain = self._brain(tmp_path)
+        (brain / CONVERSATION / "duck_1").mkdir()
+        assert steps.locate_generated_image(brain, CONVERSATION, "duck") is None
+class TestAStoppedSubagentSaysStopped:
+    """The word on a stopped row is this host's, and it has to be.
+
+    ``scripts/probe_agy_subagent_stop.py`` starved a real subagent on
+    2026-09-10 and ``agy`` reported the step **DONE**, not ``CANCELED`` —
+    defensible from the harness's side, since the agent did read the
+    refusal and wind down, and wrong on a row, because ``DONE`` maps to
+    ``completed`` and puts a green LED over work a user stopped.
+
+    So the override is deliberate and narrow: it changes the *word*, never
+    the terminality, and only for an id ``stop_task`` recorded.
+    """
+
+    AGENT = SUBAGENT_ENTRY["conversation_id"]
+
+    def test_a_stopped_subagent_is_stopped_rather_than_completed(self):
+        t = AgyTranslator("r1")
+        t.translate(frame(SUBAGENT_ACTIVE))
+        t.mark_stopped(self.AGENT)
+        payload = t.translate(frame(SUBAGENT_DONE))[0].payload
+        assert payload["status"] == "stopped"
+        assert payload["terminal"] is True
+
+    def test_an_untouched_subagent_still_completes(self):
+        """The negative control: without ⏹ the stream's word stands.
+
+        Amber everywhere would satisfy the assertion above while meaning
+        the LED had stopped distinguishing anything.
+        """
+        t = AgyTranslator("r1")
+        t.translate(frame(SUBAGENT_ACTIVE))
+        payload = t.translate(frame(SUBAGENT_DONE))[0].payload
+        assert payload["status"] == "completed"
+
+    def test_a_stop_does_not_settle_a_running_subagent(self):
+        """Pressing ⏹ is a request; the row settles when the stream says so.
+
+        ``chat-panel/index.js::_stopSubagent`` is written against this:
+        ``stop_task`` answers ``stopping``, and a row that went terminal on
+        the request would claim a subagent had ended while its tools were
+        still running.
+        """
+        t = AgyTranslator("r1")
+        t.mark_stopped(self.AGENT)
+        payload = t.translate(frame(SUBAGENT_ACTIVE))[0].payload
+        assert payload["status"] == "running"
+        assert payload["terminal"] is False
+
+    def test_the_announced_ids_are_readable_for_the_containment_check(self):
+        """``stop_task`` refuses to aim at a conversation this turn never had.
+
+        An ``agent_id`` here is ``agy``'s own conversation id, so an
+        unchecked one would be "stop any Antigravity conversation on this
+        machine by id" — the containment ``agy/subagents.py`` states for
+        the reading half of the same identifier.
+        """
+        t = AgyTranslator("r1")
+        assert t.subagents == frozenset()
+        t.translate(frame(SUBAGENT_ACTIVE))
+        assert t.subagents == frozenset({self.AGENT})

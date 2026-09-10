@@ -261,8 +261,20 @@ record is and the browser cannot pick the wrong one ([`../next.md`](../next.md) 
 **Nothing is written and the refresh token is never used.** The CLI refreshes its own token on a 401 and
 rewrites the credential file; doing that from here would rotate the token out from under the CLI's copy
 and could lock the user out of their own editor — a far worse outcome than a missing gauge. An expired
-token is reported as a reason, not repaired, which costs nothing in practice because AIC⚡DC *spawns*
-the CLI and a turn is what keeps the file fresh.
+token is reported as a reason, not repaired.
+
+**That last part used to carry a reason that was false**, and it is recorded here rather than deleted
+because it licensed a real bug for as long as it stood. The claim was that a stale token "costs nothing
+in practice because AIC⚡DC *spawns* the CLI and a turn is what keeps the file fresh". It does not. A
+resumed session — which is every server start after the first — runs its CLI child under a temporary
+`CLAUDE_CONFIG_DIR` whose `.credentials.json` has `refreshToken` stripped by the SDK on purpose
+(`_write_redacted_credentials`). That child therefore *cannot* refresh, and what it does write goes to
+the temp dir rather than to `~/.claude`. Turns taken inside AIC⚡DC never refreshed anything; only an
+interactive `claude` in a terminal did, which is why "run the CLI, then restart AIC⚡DC" was the folk
+remedy for `Failed to authenticate: OAuth session expired and could not be refreshed`. Repairing the
+token is now [`token_refresh`](../../src/aic_dc/claude_code/token_refresh.py)'s job — before connect, and
+again before expiry for a session already running — and it stays out of this panel, which still only
+reads.
 
 **A redirected engine is never asked.** With `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`, an API
 key, or a base-URL override in the environment, turns bill somewhere this endpoint knows nothing about
@@ -520,6 +532,28 @@ than fix it. This is the same family as [`chat.md` § *Engine Indicator and Noti
 (AG-9): a surface that is unbuilt or not yet started must say so in its own register, not borrow the one
 that means broken.
 
+**The same rule, at the two other places on this tab that report an engine's absence.** Fixed 2026-09-08;
+the breakdown headline above had been corrected five days earlier and these two were left saying the same
+wrong thing in the same colour, which is what a rule stated at one site rather than as a rule looks like.
+
+- **The Debug section's Initialize reply.** `get_server_info` sent no `reason` at all, so the browser could
+  not tell the two apart even in principle and painted every failure red. The fix is on the service:
+  `_control_failure()` now names the reason for `get_server_info` and `get_context_usage` alike, one
+  function rather than the two hand-written pairs it replaces — a vocabulary the viewer branches on,
+  spelled out separately at each site, is a vocabulary that grows a third spelling. `no-engine` reads
+  *"No initialize reply yet — the engine sends it when a session starts"* in grey. The reply **is** the
+  handshake, so having none is precisely what a window nobody has prompted in looks like.
+- **The footer under numbers that are real.** With a breakdown already on screen and the session then
+  ending, *"Last refresh failed"* blamed a refresh for a session's ordinary end and sent the reader
+  looking for a fault. `no-engine` now reads *"No session to ask — the numbers above are the last reading
+  of the one that ended"*, which is what the reader is actually looking at. Still stated, not silent:
+  stale figures must never look current.
+
+**An unlabelled error keeps the error colour** at both sites, and at the headline above. Red on a state
+that turns out to be ordinary is a smaller fault than grey on a real failure, so the fallback keeps the
+louder of the two — the same reason the absent-`reason` row of the table above gets the advice that holds
+either way.
+
 **Deadlines are laid out so the innermost one fires first.** The engine bounds a control request at
 60s; the transport waits 75s; this tab's own deadline is 90s. Each layer knows more about the call than
 the layer outside it, so the useful error is the innermost one, and a layer that fires first steals the
@@ -606,6 +640,49 @@ on one profile — or a downgrade — do not each clear the other's preferences.
 
 `Files modified` is new to the HUD and earns its place: the single most useful thing to know
 immediately after an agentic turn is which files changed.
+
+### Five Sections In 300px Is Measured Now
+
+**Measured 2026-09-08**, by a `usage-hud` scene in
+[`scripts/layout_probe.py`](../../scripts/layout_probe.py) — checks [5]–[7], 34 of them. Everything above
+was asserted from the DOM, which jsdom answers honestly because collapse is *presence*; whether the
+sections fit had only ever been read by eye ([next.md § D2](../next.md) held the residue). The fixture is
+the worst case rather than a typical turn: a 1M window at 100% for the widest possible headline
+(`100% · 1.00M/1.00M`), the longest label in the rate-limit table ("7-day Sonnet limit"), three model
+rows, and a far-future `resets_at` so the window never closes and the long reset form renders every run.
+
+**The 300px is the content box, and the footprint is 302px.** `.hud` declares `width: 300px` and draws a
+`1px` border under the default `box-sizing: content-box`, so the overlay occupies 302px on the
+background. The check asserts the content box and prints the footprint beside it: asserting 300 on the
+border box would be asserting a `box-sizing: border-box` this component never declares and nothing asks
+it for. Open, the worst case measures **302×366px** with a 280px head per section, and nothing overflows
+horizontally.
+
+**Closing costs no height and hides no answer, in numbers.** Each head measures the same closed as open
+(14–15px, equal within a pixel), each body goes to exactly 0px, and each headline still has text —
+`100% · 1.00M/1.00M`, `3 models`, `87%`, `3`. The whole HUD goes from 366px to **157px** with all four
+closed, and still fits.
+
+**The name is the half that gives way, and it takes an ARN to prove it.** `.token-value` is `flex: none`
+against a `.token-model` that ellipsises, so a row too narrow for both loses model characters and never
+count characters — deleting that one declaration makes the count the clipped half, which is the mutation
+the check was verified against. What the measurement adds is *when the rule bites*: a dated id
+(`claude-opus-4-6-20260514`) fits at 300px with room, and so does the `us.anthropic.claude-opus-5-v1:0`
+form this file's own Bedrock examples use. It takes a full cross-region inference-profile ARN as the
+`turn_model_usage` key to clip anything. So the fixture carries one, as a positive control — a fixture
+whose rows all fit demonstrates nothing about an ellipsis rule — and the honest reading is that the rule
+is real but only reachable on ARN-shaped keys, which is exactly the case
+[§ Per-Model Rows Are Not Summed](#per-model-rows-are-not-summed) has to survive.
+
+**The ceiling holds, and the reason given for it is weaker than the ceiling.** Forty file chips produce
+1067px of content in an **882px** box (`max-height: 80vh` at a 1100px window) and it scrolls rather than
+truncating. But the comment in `usage-hud.js` justifies the ceiling by saying such a turn "runs off the
+bottom of the screen", and with the ceiling removed the overlay reached 1085px of that 1100px window —
+still on screen. That claim needs a shorter viewport (~900px, an ordinary 1080p laptop with browser
+chrome) before it is true. What the ceiling does unconditionally is stop an overlay becoming a page,
+which is the part worth keeping; the off-screen consequence is viewport-dependent and is recorded that
+way rather than inflated by a fixture larger than the forty files the comment itself calls an ordinary
+refactor. It is the one assertion here whose failure has not been witnessed.
 
 ### Rate Limits Is A Gauge, Not A Second Alarm
 
@@ -739,6 +816,59 @@ A `$0.00` is still never printed for a turn whose cost is unknown
 (see [risks § R-6](../plan/risks.md#r-6--cost-becomes-invisible-instead-of-cheap)) — but the fix is
 naming the reason, not labelling a billing mode. An unpriced turn's spend is not lost: the baseline is
 deliberately not advanced, so it lands on the next turn the engine can price.
+
+#### Three Of The Four Rows Are Measured Now
+
+**Verified live 2026-09-09** — [`scripts/turn_cost_probe.py`](../../scripts/turn_cost_probe.py), 19
+checks in one session against a real CLI, every figure read back out of the DOM. This closes
+[`../next.md`](../next.md) § D4, whose complaint was that "nothing extra" and "cost unknown" held in 60
+unit tests and **no ordinary turn causes either**.
+
+| Turn | What provoked it | Basis | Chip |
+|---|---|---|---|
+| A | an ordinary prompt (the positive control) | `measured` `0.0623465` | `$0.0623` |
+| B | `/help` — forwarded, 4ms, **0 engine turns** | `measured` **`0`** | `nothing extra` |
+| C | `/help` again | `measured` `0` | `nothing extra` |
+| D | a second ordinary prompt | `measured` `0.0126215` | `$0.0126` |
+| E | `SIGKILL` on the CLI child, 6s into a streaming turn | `unpriced` `None` | `cost unknown` |
+
+**Phase 6's two-turns-minimum rule is what the table is arranged around.** Turn A, being the session's
+first, reported `turn_cost_usd == total_cost_usd == 0.0623465` — it *cannot* distinguish a difference
+from a running total, so on its own it proves nothing about the arithmetic. Turn D is the one that does:
+`0.0126215` against a session total that went `0.0623465 → 0.074968`, which is the delta exactly. The
+chip showed `$0.0126`, not `$0.0750`.
+
+**A forwarded slash command is where a real measured zero comes from.** `/help` reaches the CLI, returns
+in 4ms with `num_turns: 0`, and moves nothing — so `total - baseline` is a genuine `0.0` rather than a
+missing number, which is the distinction the `measured` row's "**zero is an answer**" claims and had
+never been watched making. The chip read `nothing extra` with no `turn-cost-unknown` class and the
+tooltip *"The session's cost estimate did not move for this turn — it was served entirely from what had
+already been paid for."* Twice, so it is not a once-per-session artefact. The session's own cumulative
+total was byte-identical before and after, and `session_models` still carried the model while
+`turn_model_usage` was empty — a zero-cost turn adds no model row and erases none.
+
+**A prediction this spec got wrong, kept because the correction is the useful part.** The probe was first
+written expecting `/help` to produce `reset` — that a forwarded command returns `total_cost_usd: 0`,
+which is `total < baseline`, which re-anchors the ledger and over-reports the *next* turn. The evidence
+was a `scripts/engine_smoke.py` run whose `/help` reported a zero total. That reading was wrong: in the
+smoke run `/help` was the session's only turn, so the total was zero **because nothing had been spent**,
+not because the command zeroes it. Measured in a session that had already spent, the same command
+reports `0.062346` before and after. *A zero read from a session with one turn in it is not evidence
+about what that turn did.*
+
+**`reset` is unreachable from the app, and is skipped out loud rather than left as a silent gap.** The
+CLI restarts its ledger on `/clear`, and `SLASH_ROUTES` routes `/clear` to a new AIC⚡DC session before
+the CLI ever sees it; a resume reconnects and calls `CostLedger.reset()`, so the next turn is measured
+against no baseline and comes back `measured`. The renderer stays regardless, because the CLI's own
+schema warns the total can restart — its coverage is the unit tests, and no browser can add to it.
+
+**"Cost unknown" was earned the honest way**: the CLI child was found by a `/proc` walk and `SIGKILL`ed
+six seconds into a streaming turn, so the turn failed *late* — the case the tooltip is written for. The
+footer that arrived is one AIC⚡DC wrote (`_fail_turn`: `basis='unpriced'`, `turn=None`, `total=None`,
+`is_error=True`), and the chip read `cost unknown` with *"…what it spent is not lost — it lands on the
+next turn the engine prices. A turn that fails late has usually spent real money."* The check that
+matters is the one asserting it is **not** `nothing extra`: both are cheap-looking chips, and the
+difference between them is the whole reason `turn_cost_basis` exists.
 
 Cost is formatted in the CLI's own format — four decimals up to fifty cents, two above — so a figure
 here reads like the one the terminal shows. Two decimals throughout would render most per-turn costs as
@@ -896,6 +1026,13 @@ tier-distribution HUD.
 - Memory files, system prompt sections, and every MCP server including `aic-dc` appear in the Session section with their token cost.
 - The HUD renders the turn without waiting on an RPC. The context breakdown is a follow-up control
   request and fills in when it lands.
+- Nothing in the HUD overflows its 300px of content — no section head, no token row, no file chip — and
+  that is measured in a browser rather than asserted from a stylesheet. The 300px is the content box;
+  302px is the footprint the border makes of it.
+- A collapsed section costs no height in its head and leaves its headline figure on screen. Both halves
+  are numbers: the head measures the same closed as open, and the body measures zero.
+- Where a token row cannot fit, the model name is what gives way and the count is never clipped.
+- The HUD is bounded and scrolls. No turn, however many files it touched, makes the overlay a page.
 - The HUD sends no `get_context_usage` while the engine is known gone, and says so rather than leaving
   the last good breakdown on screen looking current.
 - "Gone" is never concluded from `connected` alone; that field is also false before the first prompt.

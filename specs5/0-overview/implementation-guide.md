@@ -222,3 +222,156 @@ about the probe itself, both of which would have shipped as findings:
 
 Anything a probe bounds — a top-N, a sampling, a skipped retry — gets logged as dropped. Silent
 truncation reads as "covered everything".
+
+### The launch cost is shared now — `scripts/_live_app_probe.py`
+
+Two of these probes existed before the third made the pattern obvious, and everything above the first
+assertion was the same in all of them: pick free ports, launch a backend, parse the real ones out of its
+log, launch a Chrome nobody else owns, install a recorder, wait for the app, send a turn, wait for it to
+end, write a screenshot, tally. [`scripts/_live_app_probe.py`](../../scripts/_live_app_probe.py) is that
+support — `Backend`, `Browser`, `Page`, `Report`, `send_turn`, `wait_for_turn` — and it is what made
+[`scripts/turn_cost_probe.py`](../../scripts/turn_cost_probe.py) and
+[`scripts/subagent_stop_probe.py`](../../scripts/subagent_stop_probe.py) each a file of *scenarios*.
+The same economics as a layout scene: the second live probe costs a fraction of the first, so the reason
+to write one is now a single sentence in a spec that no test can reach.
+
+**Record at the window, not on the instance.** The app shell re-dispatches every server push as a window
+`CustomEvent`, so a document-start `window.addEventListener` sees `stream-complete`, `subagent-event`,
+`permission-request` and the rest with no patching of anything the app owns — and it survives a reload,
+because the record lives in `sessionStorage`. **Trim what you keep**: a full result payload carries the
+whole transcript and will blow the storage quota mid-run, so the recorder stores the dozen fields the
+assertions actually read.
+
+**A probe's `window.confirm` stub answers `false` unless a scenario says otherwise.** The default decides
+what happens when a probe clicks something it did not mean to, and every confirmation in this app guards
+something irreversible — a stop, a grant, a destroy. Defaulting to "yes" makes a harness bug into an
+action.
+
+**Assert the basis and the rendering separately.** A basis that arrives and renders nothing is a finding
+a probe should be able to state, and a single check over both cannot tell you which half broke.
+
+**Say which verdict you mean.** `add` is pass/fail, `skip` is "not reachable and here is why in a
+sentence a reader can check", and `void` marks the run **uninterpretable** — reserved for a precondition
+whose absence would void *every* assertion. Getting that boundary right is a judgement per probe: a
+missing green sibling in the stop probe makes "the LED distinguishes outcomes" untested, but it does not
+touch the finding that the ⏹ produced a terminal status, because the refused-confirmation control already
+carries that. Downgrading it to a loud skip was correct; downgrading a dead precondition would not be.
+
+**Keep a wrong prediction in the docstring.** `turn_cost_probe.py` was written expecting a `reset` basis
+from `/help` on the strength of a smoke run, and the correction — a zero read from a single-turn session
+is not evidence about the turn — is worth more than the prediction would have been if it were right.
+
+#### Traps, each paid for once
+
+- **`pgrep -g` will not find the CLI child.** The SDK's `claude` process is *not* in the backend's
+  process group, so a group query reports nothing while a turn is visibly streaming. Walk `ppid` over
+  `/proc` instead.
+- **Do not identify the CLI by excluding `aic-dc` from its command line.** The SDK launches it with an
+  inline `--mcp-config` that names our own MCP server, so `"aic-dc" not in cmdline` filters out the one
+  process being looked for. Match the basename of `argv[0]`/`argv[1]` against `claude` / `cli.js`.
+- **A skip has to be diagnosable.** The version of that filter that found nothing skipped its scenario
+  with a one-line reason and no evidence, twice. It now dumps the descendant list it rejected.
+- **Require `rpcConnected` before sending.** `send()` returns silently when the socket is not up, so a
+  probe that only waits for the panel to mount waits out its timeout on a turn it never sent.
+- **Abort a turn wait on a permission request.** Nothing in a headless probe answers one, so a dialog
+  turns a real finding into a timeout. Fail immediately, naming the tool that asked.
+- **Inspect subagent tabs before the next send.** `send()` calls `clearSubagentTabs`, so a scenario that
+  sends again has thrown away the state its assertions were about.
+- **Both halves of an absence, when the absence is a stop.** Click ⏹ with the confirmation *refused* and
+  assert nothing happened; then confirm, and assert a sibling subagent still went green. The first proves
+  the confirmed click did the work, the second proves the resulting colour is a distinction.
+
+## Measuring Layout in a Real Browser
+
+jsdom does no layout. Every UI test in the suite therefore asserts that a CSS rule *arrives*, and none of
+them can see what it lays out — which is how a permission dialog shipped with 520px of empty editor for a
+38px diff in front of 60 passing dialog tests, and why the tool-card header's grid had been read by hand at
+three widths, twice, with neither reading repeatable by anything in the suite.
+
+[`scripts/layout_probe.py`](../../scripts/layout_probe.py) closes that gap, and the shape of it is the part
+worth copying:
+
+**It is a measurement harness that writes screenshots, not a screenshot harness.** Every check asserts on
+numbers read out of a real layout engine; the PNGs beside them are evidence for whoever has to understand a
+failure, never the assertion. A picture nobody looks at is not a regression test — it is a file. This also
+avoids a golden-image maintenance burden, where every deliberate visual change is a diff to re-bless and the
+suite teaches people to re-bless without looking.
+
+**Screenshots go to files, never inline.** Raising the buffer ceiling made one inline screenshot survivable,
+and a ceiling is not a budget. Output defaults to `.aic-dc/layout-probe/`, which is gitignored.
+
+**The app declares the bounds; the probe reads them.** Where a check needs a number the CSS already knows —
+a floor, a ceiling, a rail width — it reads the custom property off the computed style instead of carrying a
+copy. A number duplicated into the harness that checks it is a number that will disagree with itself.
+
+**Components are mounted directly, on synthetic payloads.** [`webapp/src/layout-harness.js`](../../webapp/src/layout-harness.js)
+exposes `window.__layout.build(scene, opts)` and each scene returns measurements. These are layout
+questions, so a live engine would add credentials, a turn of latency and a non-deterministic payload to
+answer a question about pixels — the argument for driving the real app in the section above is about claims
+in prose and mechanisms in our own code. What is load-bearing is that the CSS, the component and the browser
+are the real ones.
+
+**Served by Vite dev, off its own bare page.** A harness pointed at `webapp/dist` reports on whatever was
+last built, and a regression harness that can pass against stale bytes is worse than none. The
+serving-mode caveat above does not bite here because every style involved is either a Lit `css` literal or
+emitted by Monaco at runtime: there is no build-time CSS transform for the two modes to disagree about.
+`webapp/layout-harness.html` is not in the shipped bundle — Vite's build input is `index.html` alone.
+
+**And it has a positive control**, per the section above: an implementation that made every editor 90px
+tall would pass "the editor is content-driven", so a 200-line diff must be *at* the ceiling and must
+scroll. Both checks run every time.
+
+**Adding a scene is a function, not a project, and the third one shows what that buys.** The usage HUD
+(2026-09-08, checks [5]–[7]) had two claims nothing could reach: that five sections and their heads fit
+300px, and that closing one costs no height. `usage-hud.js` states both and jsdom could only confirm the
+half that is presence. 34 checks now measure them, plus a 40-file positive control — see
+[`5-webapp/viewers-hud.md`](../5-webapp/viewers-hud.md) § *Five Sections In 300px Is Measured Now* for
+what they found, including one claim in a source comment that the measurement made *weaker* rather than
+confirming. That is the shape to expect: a scene is cheap enough that the reason to write one is a
+sentence in a stylesheet nobody has ever put a number to.
+
+**Mutation-test a new claim before believing the PASS.** Delete the declaration the check exists to
+protect, confirm the check fails, put it back. Two of the HUD's three claims were verified this way
+(remove `flex: none` from the token count → the count becomes the clipped half; remove `max-height` →
+the HUD grows unbounded and stops scrolling), and the third's failure has never been witnessed, which is
+recorded in the check's own docstring rather than left to be assumed. A green check that has never been
+red is a check that has not been shown to test anything — the same argument as the positive control, one
+level down.
+
+### Traps
+
+- **Read the bound port out of Vite's log.** `strictPort: false` means the port requested is not
+  necessarily the port served.
+- **Keep the page's console and print it on failure.** The first real run of this probe hit a module that
+  failed to parse and reported only "the harness page never became ready" — true, useless, and a sitting's
+  worth of guessing away from the parse error Chrome had already printed. Enable both `Log.enable` and
+  `Runtime.enable`: a parse failure arrives as a Log entry, a throw during evaluation as a Runtime
+  exception. A harness that watches a page and discards what the page said is reporting an absence it
+  created.
+- **No backticks inside a Lit `css` tagged template literal**, including in comments. One backtick in a
+  comment in `permission-dialog/styles.js` terminated the literal and made the module a syntax error.
+  `node --check` on the file catches it in a second and the browser will not tell you.
+- **Wait on a *decoration*, not on a rendered line.** Monaco computes the diff asynchronously and the
+  alignment view zones it inserts are part of the content height, so a scene that measures as soon as a
+  `.view-line` exists measures a pane that is about to change size.
+- **A scene's wait must reject, not resolve false.** A scene that measures something which never appeared
+  returns zeros, and zeros read as a finding.
+- **Clear `localStorage` at the top of a scene that measures a persisted preference.** The HUD stores its
+  collapsed-section set; a previous build in the same page decides what the next one measures, and the
+  first symptom is a check that passes or fails depending on the order the scenes ran in.
+- **Content box or border box — decide before asserting a declared width.** `.hud` declares `width: 300px`
+  and draws a 1px border under the default `box-sizing: content-box`, so `getBoundingClientRect()` says
+  302 and the check said "302px against a declared 300px". Assert `clientWidth` against the declaration
+  and print the footprint beside it; asserting 300 on the border box asserts a `box-sizing` the component
+  never declared.
+- **A fixture whose worst row still fits proves nothing about an ellipsis rule.** Two model-id forms fit
+  the HUD's 300px with room, so the "the name gives way, not the count" check passed while clipping
+  nothing. Split it: *every* row's count is unclipped, *and* at least one row clipped its name. The second
+  half is the positive control, and finding the input that trips it (a full Bedrock inference-profile ARN)
+  is how you learn where the rule actually bites.
+- **Drive a component's own gesture, not its private timers.** The HUD auto-hides after 8s; the way to
+  hold it open for a measurement is a real `PointerEvent('pointerenter')`, which is the documented pause.
+  A scene that reached into the timer would be measuring a state no user can produce.
+- **Set the app-level context a label depends on.** File chips render `toRepoPath(...)`, so a harness that
+  never called `setRepoRoot` measured absolute paths — wider than the app ever draws, and a width no user
+  will see. Screenshots caught it; the numbers looked fine.

@@ -263,19 +263,30 @@ interlude that found it; this list exists so that none of them has to be redisco
    deferred. The multi-root concern it raised is unaffected either way; the absolute path is one hover
    away, and a multi-root future changes what the *root* is, not how a path is named against it.
    [`../5-webapp/shell.md`](../5-webapp/shell.md) § *The Same Rule Names Files On Screen*.
-6. **Two rendering behaviours have no test and cannot get one from jsdom.** The `Bash` summary's
-   three-row clamp is layout, and jsdom has none; the dialog's Monaco style-clone tests assert that the
-   rules *arrive*, not that the editor lays out. Both were verified by driving a live tab and probing the
-   DOM. A screenshot-based regression harness is the only thing that would catch a re-break, and it should
-   still write files rather than return images inline — item 1 raised the ceiling that made one inline
-   screenshot fatal, but a harness returns many per run and a ceiling is not a budget.
+6. ~~**Two rendering behaviours have no test and cannot get one from jsdom.**~~ **Built 2026-09-08.** The
+   `Bash` summary's three-row clamp is layout, and jsdom has none; the dialog's Monaco style-clone tests
+   assert that the rules *arrive*, not that the editor lays out. Both were verified by driving a live tab
+   and probing the DOM. A screenshot-based regression harness is the only thing that would catch a
+   re-break, and it should still write files rather than return images inline — item 1 raised the ceiling
+   that made one inline screenshot fatal, but a harness returns many per run and a ceiling is not a budget.
+   What landed is `scripts/layout_probe.py`, which **measures** and writes its PNGs as evidence rather than
+   comparing images; its first run caught a third case the item never named (a permission dialog drawing
+   520px of editor for a 38px diff) and confirmed the two above are correct at three card widths. Recipe in
+   [`../0-overview/implementation-guide.md`](../0-overview/implementation-guide.md#measuring-layout-in-a-real-browser),
+   account in the work-log's § *Landed since*. Residue: the HUD-at-300px question in `next.md` § B1 is a
+   scene nobody has written yet, and writing one is now a function rather than a project.
 7. **The permission dialog re-clones the whole document head per editor creation.** The same cost the
    diff viewer has always paid, for the same reason (Monaco's constructor adds rules synchronously), and a
    request builds at most one editor — so it is unmeasured rather than known-cheap. Incremental cloning is
    the optimisation if that ever stops being true.
-8. **The question-preview `--without` A/B is not automated.** `scripts/question_preview_smoke.py`
-   supports it and the specs record its result, but nothing re-runs it when the CLI ships a new build —
-   and what it measures is exactly the kind of detail a version bump moves.
+8. ~~**The question-preview `--without` A/B is not automated.**~~ **Built 2026-09-08**, and not by
+   automating the A/B — the item's framing was the obstacle. Every fact the A/B established is a string
+   literal in the CLI binary (the variable name, the per-format prompt block, the unconditional `preview`
+   field, and the sentence deferring its format to that block), so `claude_code/cli_surface.py` reads them
+   with `mmap` and `test_claude_code_cli_surface.py` fails by name when a release moves one — offline, no
+   credentials, every run. `scripts/question_preview_smoke.py` keeps only what bytes cannot show: that the
+   block reaches the model, and that the CLI accepts the answer we build. Reasoning in
+   [`../impl-history/work-log.md`](../impl-history/work-log.md) § *Landed since*.
 9. ~~**Live subagent tabs have never watched a real fan-out.**~~ **Watched on 2026-08-17**, and it found
    what 33 green tests could not: **the CLI reports a slow `Bash` command as a task**
    (`task_type="local_bash"`, one per command past its backgrounding threshold) through the same four
@@ -284,10 +295,25 @@ interlude that found it; this list exists so that none of them has to be redisco
    pre-existing bug that only became visible when each row also became a tab. Fixed in
    `messages.py` by filtering them where the one rule serves every surface at once, and **re-verified live
    after a restart**: three long commands in the main scope and two subagents' own sleeps opened nothing,
-   while the two subagents opened exactly two tabs and settled green with their real counters. The run
-   left three things open; two are now closed:
-   - **⏹ Stop and the amber LED path are still unverified** — the one still open, and now for a better
-     reason. The first reason was wrong and the docstring carrying it is corrected: `stop_task` is its own
+   while the two subagents opened exactly two tabs and settled green with their real counters. **The
+   filter's latch was scoped to the turn until 2026-09-08**, so a command backgrounded with
+   `run_in_background` — which finishes in a *later* turn than the one that ran it — leaked back through
+   as a single phantom row and empty tab; see
+   [*Interlude — the shell command that came back as a subagent*](delivery.md#interlude--the-shell-command-that-came-back-as-a-subagent-2026-09-08).
+   The run left three things open; **all three are now closed**:
+   - ~~**⏹ Stop and the amber LED path are still unverified**~~ — **verified 2026-09-09**, by the only
+     route that could: the webapp's own ⏹, clicked in a real browser against a live CLI
+     ([`../5-webapp/subagent-browser.md`](../5-webapp/subagent-browser.md) § *Amber Is Measured Now, And
+     The Engine Answers Twice*, 17 checks). **The clause below turned out to understate what the two
+     paths disagree about.** It is not that `TaskStop` reported nothing and ⏹ reports something: one ⏹
+     produced *two* terminal events with two different words — a `task_updated` patch of `killed`, then a
+     `task_notification` of `stopped` — so the docstring's "or" is not exclusive either, and the LED is
+     stable across the pair only because `_TERMINAL_LED` maps both words to amber. The stopped tab went
+     amber with `stopped` in its tooltip, ⏹ left it, its feed survived, and a sibling subagent settled
+     green beside it as the positive control. The original reasoning stands unedited below, because the
+     part of it that was right — that the cyan LED was a property of the substitute and not a defect in
+     this surface — could only be *confirmed* by spending the expensive route.
+     The first reason was wrong and the docstring carrying it is corrected: `stop_task` is its own
      control subtype (`SDKControlStopTaskRequest`, a sibling of the interrupt request), and `client.py:454`
      says the CLI answers it with a `task_notification` of status `stopped` **in the message stream** — so
      it does not end the host turn, and `service.py`'s claim that it did had nothing behind it.

@@ -93,6 +93,30 @@ def _text(body: str) -> dict[str, Any]:
     return {"content": [{"type": "text", "text": body}]}
 
 
+class _Observer:
+    """The open tab, as a consultant sees it.
+
+    Callable, so the call site stays ``observer(step)`` and nothing about
+    the SDK path changed when the CLI transport arrived. It carries the
+    translator because the two transports read their answer from
+    different places — ``conversation.last_response`` for the SDK, an
+    absorbed ``result`` frame for ``agy`` — and the second of those lives
+    in the pump.
+
+    ``None`` is still the no-browser case, so every consultant must work
+    with no observer at all; this object never means "no tab".
+    """
+
+    def __init__(self, feed: Any, translator: Any) -> None:
+        self._feed = feed
+        #: The pump this tab's events came out of, for a consultant that
+        #: needs to read the turn back off it.
+        self.translator = translator
+
+    def __call__(self, raw: Any) -> None:
+        self._feed(raw)
+
+
 class ConsultantBridge:
     """The consultant, as tools a Claude Code turn can call.
 
@@ -188,10 +212,21 @@ class ConsultantBridge:
     ) -> Any:
         """Feed each step through the shared pump, tagged with our id.
 
-        The translator is ``steps.StepTranslator`` — imported, not
-        reimplemented, which is AG-R-9's redrawn tripwire. Its
+        The translator is the *consultant's own* — ``StepTranslator`` for
+        the SDK, ``AgyTranslator`` for the CLI — imported by whichever
+        module can read those objects rather than reimplemented here,
+        which is AG-R-9's redrawn tripwire and, since AG-16, the seam
+        that keeps this class from knowing which transport it holds. Its
         ``agent_id`` makes every block it produces carry that scope, and
         that is the whole of what puts the text in the tab.
+
+        Returned as a callable *object* rather than a closure so the
+        consultant can read the translator back off it. That matters for
+        the ``agy`` transport, where the turn's prose arrives in a
+        ``result`` frame the pump has already absorbed: without it the
+        consultant would have to translate the frames a second time to
+        find the answer, and two passes over one stream is two chances
+        for them to disagree.
         """
 
         def observe(step: Any) -> None:
@@ -208,7 +243,7 @@ class ConsultantBridge:
                 self._tasks.add(task)
                 task.add_done_callback(self._tasks.discard)
 
-        return observe
+        return _Observer(observe, translator)
 
     async def _push(self, event: Any, request_id: str) -> None:
         try:
@@ -250,7 +285,16 @@ class ConsultantBridge:
             return
 
         agent_id = self._new_agent_id()
-        translator = StepTranslator(self._turn() or "", agent_id=agent_id)
+        # Asked for rather than named: the consultant knows which raw
+        # objects it will feed this thing (AG-16). `StepTranslator` is
+        # still the answer on the SDK transport, and the fallback keeps a
+        # consultant written before this seam existed working.
+        make = getattr(self._consultant, "make_translator", None)
+        translator = (
+            make(self._turn() or "", agent_id)
+            if callable(make)
+            else StepTranslator(self._turn() or "", agent_id=agent_id)
+        )
         await self._announce(agent_id, label)
         status = "failed"
         # Mutable, shared with the heartbeat: it is the only way the
@@ -345,8 +389,12 @@ class ConsultantBridge:
         """Stop a running consultation. AG-13's ⏹, and it is real.
 
         Reached from ``stop_task``, which is why that method belongs to
-        the ``subagent_tabs`` surface. A button that did nothing would
-        read as a hung engine rather than as a missing feature.
+        the ``subagent_stop`` surface. A button that did nothing would
+        read as a hung engine rather than as a missing feature. Note that
+        the surface being ``UNBUILT`` on this transport does not make this
+        method decorative: a consultation is stopped here, by the bridge,
+        without ever reaching the CLI — what is unbuilt is stopping a
+        subagent *`agy` itself* spawned.
         """
         return await self._consultant.cancel()
 

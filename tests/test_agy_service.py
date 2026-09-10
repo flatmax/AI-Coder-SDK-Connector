@@ -32,6 +32,7 @@ from aic_dc.agy import install
 from aic_dc.agy.service import AgyService
 from aic_dc.antigravity.service import AntigravityService
 from aic_dc.capabilities import ANTIGRAVITY
+from aic_dc.config import ConfigManager
 from aic_dc.engine_router import build_router
 
 
@@ -71,6 +72,20 @@ def service(tmp_path, **kw):
         "credentials", Credentials(mode=GEMINI_API, api_key="k", source="test")
     )
     return AgyService(config(tmp_path), **kw)
+
+
+def gated_service(tmp_path, **kw):
+    """A service whose executable is certainly on ``PATH``.
+
+    The gate refusals below are *after* the missing-binary refusal, so on
+    a machine with no ``agy`` they never reached the check they are about
+    and asserted the wrong error — the same machine-dependence the
+    ``GLOBAL_HOOKS`` comment warns of, one branch earlier. `connect_engine`
+    only asks whether the name resolves, and refuses long before anything
+    is launched, so a name that always resolves is enough.
+    """
+    kw.setdefault("executable", "sh")
+    return service(tmp_path, **kw)
 
 
 class TestItMounts:
@@ -115,7 +130,7 @@ class TestItWillNotRunUngated:
         # passes or fails on whether *they* have the gate installed — which
         # is how it went green for a day and then red the moment one was.
         monkeypatch.setattr(install, "GLOBAL_HOOKS", tmp_path / "hooks.json")
-        svc = service(tmp_path)
+        svc = gated_service(tmp_path)
         result = asyncio.run(svc.connect_engine())
         assert result["error"] == "gate_not_installed"
         assert result["reason"] == "absent"
@@ -139,7 +154,7 @@ class TestItWillNotRunUngated:
         _write_gate_entry(
             hooks, install.hook_command(tmp_path / "cfg", "/other/python")
         )
-        svc = service(tmp_path)
+        svc = gated_service(tmp_path)
         result = asyncio.run(svc.connect_engine())
         assert result["error"] == "gate_not_installed"
         assert result["reason"] == "stale"
@@ -564,7 +579,10 @@ class TestTheWriteGuidance:
         monkeypatch.setattr(AgyService, "_run_agy_turn", fake_run)
 
         async def fake_ensure(self):
-            return object()
+            # Not `object()`: the turn reads the session's conversation id
+            # to build the translator, since that is what names the
+            # directory `agy` writes a generated image into.
+            return types.SimpleNamespace(conversation_id="b1d377c5")
 
         monkeypatch.setattr(AgyService, "_ensure_session", fake_ensure)
         svc = service(tmp_path)
@@ -593,9 +611,420 @@ class TestTheWriteGuidance:
         text and stripping it on the way out is deliberate — the
         transcript's job is to say what the model was actually sent.
         """
-        from aic_dc.claude_code.history import strip_framing
-
         from aic_dc.agy import tools as agy_tools
+        from aic_dc.claude_code.history import strip_framing
 
         framed = agy_tools.WRITE_GUIDANCE + "do the thing"
         assert strip_framing(framed) == "do the thing"
+
+
+class TestModelPersistence:
+    """AG-R-15's other half: a picker that forgot what you told it.
+
+    `set_model` assigned an instance attribute and nothing else, so a model
+    chosen in Settings came back as the account's default at the next
+    server start — a control that appears to work, for one session.
+    """
+
+    def test_a_chosen_model_survives_a_restart(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("AIC_DC_CONFIG_HOME", str(tmp_path / "cfg"))
+        config = ConfigManager()
+        service = AgyService(config=config)
+        monkeypatch.setattr(
+            type(service),
+            "_list_models",
+            lambda _self: _completed([{"value": "gemini-3.8-flash-high"}]),
+        )
+        result = asyncio.run(service.set_model("gemini-3.8-flash-high"))
+        assert result["persisted"] is True
+        assert AgyService(config=ConfigManager())._model == "gemini-3.8-flash-high"
+
+    def test_a_failed_write_keeps_the_session_choice(self, tmp_path, monkeypatch):
+        """The selection is what the user asked for; persistence is a bonus
+        that must not cost it."""
+        monkeypatch.setenv("AIC_DC_CONFIG_HOME", str(tmp_path / "cfg"))
+        config = ConfigManager()
+        service = AgyService(config=config)
+        monkeypatch.setattr(
+            type(service),
+            "_list_models",
+            lambda _self: _completed([{"value": "gemini-3.8-flash-high"}]),
+        )
+        monkeypatch.setattr(
+            type(config),
+            "set_engine_option",
+            lambda *_a, **_k: (_ for _ in ()).throw(OSError("read-only")),
+        )
+        result = asyncio.run(service.set_model("gemini-3.8-flash-high"))
+        assert result["model"] == "gemini-3.8-flash-high"
+        assert result["persisted"] is False
+
+
+async def _completed(value):
+    return value
+
+
+class _StubStore:
+    """Only the one method ``_mirrors_session`` calls.
+
+    Deliberately not a ``RepoSessionStore``: the question under test is
+    whether the service *asks*, and a real store would answer it out of a
+    tree these tests would then have to build.
+    """
+
+    def __init__(self, session_ids=(), error=None):
+        self._ids = list(session_ids)
+        self._error = error
+        self.keys: list[str] = []
+
+    async def list_sessions(self, project_key):
+        self.keys.append(project_key)
+        if self._error is not None:
+            raise self._error
+        return [{"session_id": sid} for sid in self._ids]
+
+
+class _Reader:
+    """A stand-in for :mod:`aic_dc.agy.subagents`, recording every call.
+
+    The reader has its own test file, exercised against files on disk. What
+    these tests are about is the two gates *in front of* it, so the thing
+    that matters here is which of these functions was reached and with
+    what — and, for a refusal, that none of them was.
+    """
+
+    def __init__(self, *, rows=(), owned=(), messages=(), error=None):
+        self._rows = list(rows)
+        self._owned = set(owned)
+        self._messages = list(messages)
+        self._error = error
+        self.rows_for: list[str] = []
+        self.descendants_for: list[str] = []
+        self.loaded: list[str] = []
+
+    def rows(self, conversation_id):
+        self.rows_for.append(conversation_id)
+        if self._error is not None:
+            raise self._error
+        return self._rows
+
+    def descendants(self, conversation_id):
+        self.descendants_for.append(conversation_id)
+        if self._error is not None:
+            raise self._error
+        return self._owned
+
+    def load(self, conversation_id):
+        self.loaded.append(conversation_id)
+        return self._messages
+
+
+def _reading_service(tmp_path, monkeypatch, reader, *, mirrored=("sess",), store=None):
+    from aic_dc.agy import subagents
+
+    svc = service(tmp_path)
+    svc.session_store = _StubStore(mirrored) if store is None else store
+    # No session is attached, so the "which conversation is on screen?"
+    # answer has to be explicit rather than a mirror lookup.
+    svc._auto_resume = False
+    for name in ("rows", "descendants", "load"):
+        monkeypatch.setattr(subagents, name, getattr(reader, name))
+    return svc
+
+
+class TestSubagentTranscripts:
+    """The ``subagent_transcripts`` surface, and the two gates behind it.
+
+    The reader these methods delegate to takes a conversation id and
+    returns whatever ``agy`` wrote under it, which on this machine includes
+    **every conversation the user has ever had with the Antigravity IDE**.
+    Nothing in the id's shape distinguishes one of ours from one of those.
+    So the RPC is only as safe as its containment, and the containment is
+    two independent checks — the session has to be one this repository
+    mirrors, and the agent has to be reachable by announcement from it.
+
+    Half of these tests therefore assert that the reader was *not* called.
+    That is the assertion that fails when a refusal is turned into a
+    warning, which is the way this kind of check usually stops working.
+    """
+
+    # -- the listing -----------------------------------------------------
+
+    def test_it_lists_the_session_it_was_given(self, tmp_path, monkeypatch):
+        reader = _Reader(rows=[{"agent_id": "child"}])
+        svc = _reading_service(tmp_path, monkeypatch, reader)
+        got = asyncio.run(svc.list_subagent_transcripts("sess"))
+        assert got == [{"agent_id": "child"}]
+        assert reader.rows_for == ["sess"]
+
+    def test_it_defaults_to_the_session_on_screen(self, tmp_path, monkeypatch):
+        """Matching the Claude adapter, so the common call needs no argument
+        — and cannot name a session other than the one being read."""
+        reader = _Reader()
+        svc = _reading_service(tmp_path, monkeypatch, reader)
+        svc._resume_request = "sess"
+        asyncio.run(svc.list_subagent_transcripts())
+        assert reader.rows_for == ["sess"]
+
+    def test_a_session_we_do_not_mirror_is_not_read(self, tmp_path, monkeypatch):
+        """An empty list rather than an error, because the honest answer to
+        "what did that conversation delegate?" from this service is that it
+        has no such conversation. What matters is that it did not look."""
+        reader = _Reader(rows=[{"agent_id": "child"}])
+        svc = _reading_service(tmp_path, monkeypatch, reader, mirrored=("other",))
+        assert asyncio.run(svc.list_subagent_transcripts("sess")) == []
+        assert reader.rows_for == []
+
+    def test_no_session_lists_nothing(self, tmp_path, monkeypatch):
+        reader = _Reader()
+        svc = _reading_service(tmp_path, monkeypatch, reader)
+        assert asyncio.run(svc.list_subagent_transcripts()) == []
+        assert reader.rows_for == []
+
+    def test_a_failed_read_is_answered_rather_than_raised(self, tmp_path, monkeypatch):
+        """A session that delegated nothing and a listing that could not be
+        read want opposite reactions from the user, so they must not both
+        be an empty list."""
+        reader = _Reader(error=OSError("brain directory vanished"))
+        svc = _reading_service(tmp_path, monkeypatch, reader)
+        got = asyncio.run(svc.list_subagent_transcripts("sess"))
+        assert "brain directory vanished" in got["error"]
+
+    # -- one transcript --------------------------------------------------
+
+    def test_it_reads_a_subagent_this_session_announced(self, tmp_path, monkeypatch):
+        reader = _Reader(owned={"child"}, messages=[{"role": "user", "content": "hi"}])
+        svc = _reading_service(tmp_path, monkeypatch, reader)
+        got = asyncio.run(svc.get_subagent_transcript("child", "sess"))
+        assert got == [{"role": "user", "content": "hi"}]
+        assert reader.descendants_for == ["sess"]
+        assert reader.loaded == ["child"]
+
+    def test_a_conversation_this_session_never_announced_is_refused(
+        self, tmp_path, monkeypatch
+    ):
+        """The hole this method would otherwise be: an id from ``agy``'s
+        store that AIC⚡DC never owned, read because it parsed."""
+        reader = _Reader(owned={"child"}, messages=[{"role": "user", "content": "hi"}])
+        svc = _reading_service(tmp_path, monkeypatch, reader)
+        got = asyncio.run(svc.get_subagent_transcript("somebody-elses", "sess"))
+        assert "not a subagent of this conversation" in got["error"]
+        assert reader.loaded == []
+
+    def test_the_session_itself_is_refused_through_this_door(
+        self, tmp_path, monkeypatch
+    ):
+        """``descendants`` excludes the conversation it was asked about, and
+        this is the consequence that makes that exclusion matter: the main
+        transcript has its own RPC, with its own rules."""
+        reader = _Reader(owned={"child"})
+        svc = _reading_service(tmp_path, monkeypatch, reader)
+        got = asyncio.run(svc.get_subagent_transcript("sess", "sess"))
+        assert "error" in got
+        assert reader.loaded == []
+
+    def test_a_session_we_do_not_mirror_is_refused_before_the_id_is_used(
+        self, tmp_path, monkeypatch
+    ):
+        """Either gate alone leaks. This one is first because it is the one
+        that stops an unmirrored session's *own* announcements from
+        authorising anything."""
+        reader = _Reader(owned={"child"})
+        svc = _reading_service(tmp_path, monkeypatch, reader, mirrored=("other",))
+        got = asyncio.run(svc.get_subagent_transcript("child", "sess"))
+        assert got["error"] == "sess is not a session in this repository"
+        assert reader.descendants_for == []
+        assert reader.loaded == []
+
+    def test_an_empty_agent_id_is_refused(self, tmp_path, monkeypatch):
+        reader = _Reader()
+        svc = _reading_service(tmp_path, monkeypatch, reader)
+        assert "error" in asyncio.run(svc.get_subagent_transcript("", "sess"))
+        assert reader.descendants_for == []
+
+    def test_no_session_is_refused(self, tmp_path, monkeypatch):
+        reader = _Reader()
+        svc = _reading_service(tmp_path, monkeypatch, reader)
+        got = asyncio.run(svc.get_subagent_transcript("child"))
+        assert "No session" in got["error"]
+        assert reader.descendants_for == []
+
+    def test_a_pruned_transcript_says_so_rather_than_drawing_an_empty_tab(
+        self, tmp_path, monkeypatch
+    ):
+        """A subagent that ran wrote records, so nothing to render means the
+        record is gone — not that the subagent said nothing."""
+        reader = _Reader(owned={"child"}, messages=[])
+        svc = _reading_service(tmp_path, monkeypatch, reader)
+        got = asyncio.run(svc.get_subagent_transcript("child", "sess"))
+        assert "no readable transcript" in got["error"]
+
+    def test_a_failed_read_is_answered_here_too(self, tmp_path, monkeypatch):
+        reader = _Reader(error=RuntimeError("unreadable"))
+        svc = _reading_service(tmp_path, monkeypatch, reader)
+        got = asyncio.run(svc.get_subagent_transcript("child", "sess"))
+        assert "unreadable" in got["error"]
+
+    # -- the ownership check itself --------------------------------------
+
+    def test_without_a_mirror_nothing_is_owned(self, tmp_path, monkeypatch):
+        """No repository, no mirror, and so no way to tell one of our
+        conversations from one of the IDE's."""
+        reader = _Reader(owned={"child"})
+        svc = _reading_service(tmp_path, monkeypatch, reader)
+        svc.session_store = None
+        assert asyncio.run(svc.list_subagent_transcripts("sess")) == []
+        assert reader.rows_for == []
+
+    def test_a_check_that_fails_refuses_rather_than_allows(
+        self, tmp_path, monkeypatch
+    ):
+        """The direction this must fail in. A store that cannot be listed is
+        a reason to show nothing, never a reason to show everything."""
+        reader = _Reader(owned={"child"})
+        svc = _reading_service(
+            tmp_path,
+            monkeypatch,
+            reader,
+            store=_StubStore(error=OSError("store gone")),
+        )
+        got = asyncio.run(svc.get_subagent_transcript("child", "sess"))
+        assert "not a session in this repository" in got["error"]
+        assert reader.loaded == []
+
+    def test_the_check_asks_about_this_repository(self, tmp_path, monkeypatch):
+        """Not about the store as a whole: `agy`'s conversations are keyed by
+        project, and the mirror for another checkout is not ours either."""
+        from claude_agent_sdk import project_key_for_directory
+
+        store = _StubStore(("sess",))
+        reader = _Reader()
+        svc = _reading_service(tmp_path, monkeypatch, reader, store=store)
+        asyncio.run(svc.list_subagent_transcripts("sess"))
+        assert store.keys == [project_key_for_directory(str(tmp_path))]
+
+    # -- where the file work happens -------------------------------------
+
+    def test_the_reads_are_handed_to_an_executor(self):
+        """One transcript is one file, but it is on the user's disk and this
+        loop is serving a live turn. Asserted structurally because the cost
+        of getting it wrong is a stall nothing measures — the same reason
+        the other history reads here are pinned this way.
+        """
+        source = inspect.getsource(AgyService.list_subagent_transcripts)
+        source += inspect.getsource(AgyService.get_subagent_transcript)
+        for name in ("subagents.rows", "subagents.descendants", "subagents.load"):
+            index = source.index(name)
+            assert "run_in_executor" in source[max(0, index - 120) : index], name
+class TestStoppingOneSubagent:
+    """``stop_task`` — ⏹ on a row, built 2026-09-10.
+
+    The RPC contract is the browser's: ``stopping``, never ``stopped``.
+    ``chat-panel/index.js::_stopSubagent`` keeps the row live until the
+    *stream* reports it terminal, because a row that greyed out on the
+    request would claim a subagent had ended while its tools were still
+    running. These tests are about what the method does to the gate and to
+    the row's word; whether the refusal reaches the agent is
+    ``scripts/probe_agy_subagent_stop.py``'s question and was measured on a
+    live turn.
+    """
+
+    ANNOUNCED = "45f0eec3-66f6-4544-a1fd-a15dabe512bd"
+    STRANGER = "01dab20c-69b0-4c09-ac35-3382a7b1c8d1"
+
+    def _service_with_a_live_subagent(self, tmp_path):
+        from aic_dc.agy.steps import AgyTranslator
+
+        svc = service(tmp_path)
+        translator = AgyTranslator("r1")
+        translator._subagents[self.ANNOUNCED] = {"agent_id": self.ANNOUNCED}
+        svc._turns["r1"] = translator
+
+        class FakeGate:
+            def __init__(self):
+                self.refused = {}
+
+            def refuse_conversation(self, conversation_id, reason):
+                self.refused[conversation_id] = reason
+
+        gate = FakeGate()
+        svc._agy_gate = gate
+        return svc, gate, translator
+
+    def test_an_announced_subagent_is_refused_and_reported_stopping(self, tmp_path):
+        svc, gate, _translator = self._service_with_a_live_subagent(tmp_path)
+        answer = asyncio.run(svc.stop_task(self.ANNOUNCED))
+        assert answer == {"status": "stopping", "task_id": self.ANNOUNCED}
+        assert self.ANNOUNCED in gate.refused
+        assert "stopped this subagent" in gate.refused[self.ANNOUNCED]
+
+    def test_the_reason_tells_the_model_not_to_route_around_it(self, tmp_path):
+        """AG-R-11's sentence, one level down.
+
+        A refused agent has been measured reaching for another way; the
+        reason a stopped subagent reads has to close that off, because
+        unlike a denied *call* there is no second dialog behind it.
+        """
+        svc, gate, _translator = self._service_with_a_live_subagent(tmp_path)
+        asyncio.run(svc.stop_task(self.ANNOUNCED))
+        assert "not try another way" in gate.refused[self.ANNOUNCED]
+
+    def test_a_conversation_this_turn_never_announced_is_refused_the_handle(
+        self, tmp_path
+    ):
+        """The containment half, and the reason this is not a thin wrapper.
+
+        ``task_id`` here is ``agy``'s own conversation id, so an unchecked
+        one would let a caller aim a refusal at any conversation on the
+        machine — the same door ``agy/subagents.py`` shuts on the reading
+        side of the identifier.
+        """
+        svc, gate, _translator = self._service_with_a_live_subagent(tmp_path)
+        answer = asyncio.run(svc.stop_task(self.STRANGER))
+        assert answer["status"] == "not_running"
+        assert gate.refused == {}
+
+    def test_the_row_is_marked_so_it_settles_stopped_rather_than_completed(
+        self, tmp_path
+    ):
+        """``agy`` reports a starved subagent DONE — measured, 2026-09-10.
+
+        Left alone, the LED table would take that to ``completed`` and put
+        green over something the user stopped, so the terminal word for a
+        stopped id is this host's.
+        """
+        svc, _gate, translator = self._service_with_a_live_subagent(tmp_path)
+        asyncio.run(svc.stop_task(self.ANNOUNCED))
+        assert self.ANNOUNCED in translator._stopped
+
+    def test_a_session_with_no_gate_says_so_rather_than_pretending(self, tmp_path):
+        svc, _gate, _translator = self._service_with_a_live_subagent(tmp_path)
+        svc._agy_gate = None
+        answer = asyncio.run(svc.stop_task(self.ANNOUNCED))
+        assert "error" in answer
+
+    def test_an_empty_id_is_an_error_not_a_refusal_aimed_at_nothing(self, tmp_path):
+        svc, gate, _translator = self._service_with_a_live_subagent(tmp_path)
+        answer = asyncio.run(svc.stop_task(""))
+        assert "error" in answer
+        assert gate.refused == {}
+
+    def test_a_remote_client_cannot_stop_anything(self, tmp_path):
+        """The localhost rule every write-shaped RPC on this service follows.
+
+        Through ``_collab``, which is what ``_check_localhost_only``
+        actually reads — the first version of this test patched
+        ``_localhost_available`` instead, which is the gate's deadline
+        question, and passed the call straight through while asserting it
+        had been stopped.
+        """
+        svc, gate, _translator = self._service_with_a_live_subagent(tmp_path)
+
+        class Remote:
+            def is_caller_localhost(self):
+                return False
+
+        svc._collab = Remote()
+        answer = asyncio.run(svc.stop_task(self.ANNOUNCED))
+        assert answer == {"error": "restricted", "reason": "localhost_only"}
+        assert gate.refused == {}

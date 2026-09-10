@@ -49,7 +49,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import shutil
-from pathlib import Path
 from typing import Any
 
 from aic_dc.agy import install
@@ -107,7 +106,11 @@ class AgyService(AntigravityService):
         #
         # None means "agy's own default", which is the only value this
         # side can be sure it accepts.
-        self._model = model
+        #
+        # An explicit argument wins; otherwise a model the user chose in a
+        # previous session is read back from `engines.agy_model`, which is
+        # the half `set_model` was missing until 2026-09-09.
+        self._model = model or getattr(self._config, "agy_model", None)
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -210,6 +213,15 @@ class AgyService(AntigravityService):
         Takes effect on the next session, matching the SDK transport:
         restarting mid-conversation would drop the context the user is
         talking to.
+
+        **Persisted since 2026-09-09.** This assigned ``self._model`` and
+        nothing else, so a model chosen in the picker was silently
+        forgotten at the next server start and the account's own default
+        came back — a control that looks like it worked, for one session.
+        It now writes ``engines.agy_model`` to ``app.json`` as well, and a
+        write failure costs the persistence rather than the selection: the
+        session the user is configuring still gets the model they asked
+        for, and the log says it will not survive a restart.
         """
         restricted = self._check_localhost_only()
         if restricted is not None:
@@ -229,7 +241,17 @@ class AgyService(AntigravityService):
                 "models": known,
             }
         self._model = model
-        return {"model": self._model}
+        persisted = True
+        try:
+            self._config.set_engine_option("agy_model", model)
+        except Exception:  # noqa: BLE001 - a config write must not lose a selection
+            logger.warning(
+                "Chose %s for this session, but could not write it to "
+                "app.json; it will not survive a restart.",
+                model,
+            )
+            persisted = False
+        return {"model": self._model, "persisted": persisted}
 
     async def connect_engine(self, resume: str | None = None) -> dict[str, Any]:
         """Start ``agy``. **Localhost only.**
@@ -379,7 +401,16 @@ class AgyService(AntigravityService):
         except Exception as exc:  # noqa: BLE001
             return self._record_error("connect", exc)
 
-        translator = AgyTranslator(request_id)
+        # The conversation id is read here rather than inside the pump
+        # because `init` is consumed by the session, before a translator
+        # for this turn exists. It is what names the directory `agy` puts
+        # a generated image in, and the repo root is where that image has
+        # to end up — neither is anywhere in the turn's own frames.
+        translator = AgyTranslator(
+            request_id,
+            repo_root=self._repo_root,
+            conversation_id=session.conversation_id,
+        )
         self._turns[request_id] = translator
         import asyncio
 
@@ -432,6 +463,221 @@ class AgyService(AntigravityService):
                 await self._dispatch(event, request_id)
         finally:
             self._turns.pop(request_id, None)
+
+    # ------------------------------------------------------------------
+    # Subagent transcripts
+    # ------------------------------------------------------------------
+    #
+    # The ``subagent_transcripts`` surface, which reads ``agy``'s own
+    # conversation store rather than our mirror — see
+    # :mod:`aic_dc.agy.subagents` for why there is nothing in the mirror to
+    # read. Both methods are **synchronous file work on the executor**, like
+    # every other history read here: a listing is one file per subagent and
+    # a transcript is one file, but they are on the user's disk and the event
+    # loop is serving a live turn.
+
+    async def list_subagent_transcripts(
+        self, session_id: str | None = None
+    ) -> list[dict[str, Any]] | dict[str, Any]:
+        """The subagents a conversation delegated to, one row per tab.
+
+        Defaults to the session on screen, matching the Claude adapter, so
+        the common call needs no argument and cannot name a session other
+        than the one being read.
+
+        A bare list on success and ``{"error": …}`` on failure, which is
+        the union the RPC table specifies and the distinction the history
+        browser draws differently: a session that delegated nothing and a
+        listing that could not be read want opposite reactions from the
+        user.
+
+        **A session we do not own answers an empty list, not an error.**
+        The id would have to come from somewhere other than our own
+        session list to get here, and the honest answer to "what did that
+        conversation delegate?" from this service is that it has no such
+        conversation — see :meth:`_mirrors_session`.
+        """
+        target = session_id or await self._visible_session_id()
+        if not target:
+            return []
+        if not await self._mirrors_session(target):
+            logger.warning(
+                "Refused a subagent listing for %s, which is not a session "
+                "this repository mirrors",
+                target,
+            )
+            return []
+
+        from aic_dc.agy import subagents
+
+        try:
+            loop = asyncio.get_running_loop()
+            return await loop.run_in_executor(None, subagents.rows, target)
+        except Exception as exc:  # noqa: BLE001 - answered, not raised
+            logger.exception("list_subagent_transcripts failed for %s", target)
+            return {"error": f"Could not read the subagent transcripts: {exc}"}
+
+    async def get_subagent_transcript(
+        self, agent_id: str, session_id: str | None = None
+    ) -> list[dict[str, Any]] | dict[str, Any]:
+        """One subagent's conversation, rendered like any other.
+
+        Rendered messages rather than raw records, for the reason the
+        Claude adapter states: a subagent tab draws through the same panel
+        code as the main transcript.
+
+        **The id is checked against what this session announced**, and
+        that check is the reason this method is not a hole. ``agent_id`` is
+        a conversation id in ``agy``'s own store, so an unchecked read here
+        would be "open any Antigravity conversation on this machine by id"
+        — including the ones the user had with the IDE, which AIC⚡DC never
+        owned and has no business showing. Two gates, because either alone
+        leaks: the session has to be one we mirror, and the agent has to be
+        reachable by announcement from it (AG-R-12's family).
+
+        A refusal reads as an unreadable transcript rather than as a
+        permission error, and deliberately: the browser renders the reason
+        inside the tab, and "not this session's subagent" is a sentence
+        about the request, which is what happened.
+        """
+        if not agent_id:
+            return {"error": "An agent ID is required"}
+        target = session_id or await self._visible_session_id()
+        if not target:
+            return {"error": "No session to read subagents from"}
+        if not await self._mirrors_session(target):
+            return {"error": f"{target} is not a session in this repository"}
+
+        from aic_dc.agy import subagents
+
+        try:
+            loop = asyncio.get_running_loop()
+            owned = await loop.run_in_executor(None, subagents.descendants, target)
+            if agent_id not in owned:
+                logger.warning(
+                    "Refused subagent %s: not announced by session %s",
+                    agent_id,
+                    target,
+                )
+                return {
+                    "error": (
+                        f"{agent_id} is not a subagent of this conversation, "
+                        f"so there is no transcript here to read."
+                    )
+                }
+            messages = await loop.run_in_executor(None, subagents.load, agent_id)
+        except Exception as exc:  # noqa: BLE001 - answered, not raised
+            logger.exception("get_subagent_transcript failed for %s", agent_id)
+            return {"error": f"Could not read subagent {agent_id}: {exc}"}
+
+        if not messages:
+            # A subagent that ran wrote records, so nothing to render means
+            # the conversation was pruned out of `agy`'s store — worth
+            # saying rather than drawing as an empty conversation. Same
+            # reasoning as `history_load`'s.
+            return {"error": f"Subagent {agent_id} has no readable transcript"}
+        return messages
+
+    async def _mirrors_session(self, session_id: str) -> bool:
+        """Whether this repository's mirror holds ``session_id``.
+
+        The ownership half of the containment check. ``agy``'s store holds
+        every conversation the user has ever had with this CLI, in this
+        repository or anywhere else; our mirror holds the ones AIC⚡DC ran
+        here. Only the second set is this service's to hand out.
+
+        The store's own ``list_sessions`` rather than
+        ``history.list_sessions``: this needs the ids, and that one parses
+        every transcript to count its messages, which is a session-list
+        page's worth of work to answer a yes/no.
+        """
+        if self.session_store is None:
+            return False
+        from claude_agent_sdk import project_key_for_directory
+
+        try:
+            rows = await self.session_store.list_sessions(
+                project_key_for_directory(str(self._repo_root))
+            )
+        except Exception:  # noqa: BLE001 - a failed check refuses, never allows
+            logger.exception("Could not list mirrored sessions to check ownership")
+            return False
+        return any(
+            isinstance(row, dict) and row.get("session_id") == session_id
+            for row in rows
+        )
+
+    #: What a stopped subagent is told, and it is written to be read by a
+    #: model rather than logged: the second sentence is AG-R-11's, because
+    #: an agent refused one way has been measured reaching for another.
+    STOP_SUBAGENT_REASON = (
+        "The user stopped this subagent in AIC-DC. Stop what you are doing, "
+        "do not continue, and do not try another way of making this change."
+    )
+
+    async def stop_task(self, task_id: str) -> dict[str, Any]:
+        """⏹ **one subagent**, leaving the rest of the turn running.
+
+        There is no halt frame on this transport, so this is the same
+        starvation ``cancel_streaming`` performs, aimed at one
+        conversation: the gate refuses every later call from it with a
+        reason the model reads, and the parent turn is untouched. The id is
+        the subagent's own ``agy`` conversation, which is what the row
+        carries and what the gate already claims as the announcement
+        arrives.
+
+        **``stopping``, never ``stopped``.** The row keeps rendering as
+        live until the *stream* reports the subagent terminal, and that is
+        the contract ``chat-panel/index.js::_stopSubagent`` is written
+        against: a row that greyed out on the request would claim a
+        subagent had stopped while its tools were still running. What this
+        returns is a fact about the gate — the refusal is recorded — and
+        nothing about the agent.
+
+        **The id is checked against what this turn announced.** An
+        unchecked one would let a caller aim a refusal at any conversation
+        on this machine, which is the containment
+        :mod:`aic_dc.agy.subagents` states for the reading half of the
+        same id.
+
+        Three limits, stated in ``capabilities.py`` before this was built
+        and unchanged by building it: a subagent producing only prose never
+        asks for a tool and runs to its end; a subagent's own subagent has
+        an id of its own that this does not match; and what ``agy`` reports
+        for a starved subagent decides the row's LED, which is the stream's
+        answer rather than this method's.
+        """
+        restricted = self._check_localhost_only()
+        if restricted is not None:
+            return restricted
+        if not task_id:
+            return {"error": "A task ID is required"}
+        if self._agy_gate is None:
+            return {
+                "error": "This session has no permission gate, so there is "
+                "nothing to refuse a subagent's calls through."
+            }
+        stopped_on = [
+            translator
+            for translator in self._turns.values()
+            if task_id in translator.subagents
+        ]
+        if not stopped_on:
+            # Not an error: a subagent whose turn has ended is a stale
+            # button rather than a bad request, and the browser draws Stop
+            # only while a row is live.
+            logger.info(
+                "stop_task for %s, which no live turn announced", task_id
+            )
+            return {"status": "not_running", "task_id": task_id}
+        self._agy_gate.refuse_conversation(task_id, self.STOP_SUBAGENT_REASON)
+        # The row's terminal word is ours, because `agy` reports a starved
+        # subagent as DONE and a green LED over a stop is a lie the user
+        # would have to read twice. See `AgyTranslator.mark_stopped`.
+        for translator in stopped_on:
+            translator.mark_stopped(task_id)
+        logger.info("Stopped subagent %s by refusing its calls", task_id)
+        return {"status": "stopping", "task_id": task_id}
 
     async def cancel_streaming(self, request_id: str) -> dict[str, Any]:
         """⏹ — starve the turn. **Localhost only.**

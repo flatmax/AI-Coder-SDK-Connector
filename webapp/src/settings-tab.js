@@ -144,6 +144,70 @@ const PREFERENCE_CARDS = [
       + ' and the pass that loads it; outlines keep their structure either'
       + ' way. app.json → doc_index.keywords_enabled.',
   },
+  {
+    key: 'engine-policy',
+    configType: 'app',
+    path: ['engines', 'enabled'],
+    icon: '🛡️',
+    label: 'Engines allowed',
+    control: 'select',
+    // No key means every engine — the state every install had before
+    // this control existed, and the only default that cannot silently
+    // take a feature away from somebody who never asked for a policy.
+    fallback: null,
+    options: [
+      { value: 'all', label: 'Claude and Antigravity' },
+      { value: 'claude-agy', label: 'Claude + Antigravity subscription' },
+      { value: 'claude-sdk', label: 'Claude + Antigravity API key' },
+      { value: 'claude', label: 'Claude only' },
+    ],
+    applies: 'app-restart',
+    note: 'Engines mount at startup — restart AIC⚡DC to apply.',
+    title:
+      'Which engines this install may mount at all (plan-ag AG-17). Claude'
+      + ' only removes the Antigravity engines from the selector *and* the'
+      + ' second_opinion and generate_image tools from every Claude turn,'
+      + ' which are the surfaces that reach Google without anyone switching'
+      + ' engine. This is a convenience, not an enforced policy: whoever can'
+      + ' set it here can unset it here, so a workplace rule belongs in a'
+      + ' managed app.json. app.json → engines.enabled.',
+    /**
+     * The file's list as one of the options above, or null for a
+     * combination this control cannot say.
+     *
+     * Null is not an error and is not "off": it is a config the user
+     * wrote by hand that the select has no way to represent, and
+     * `_prefState` renders that as a disabled control with the reason
+     * rather than as a preset that would overwrite it on the next
+     * gesture. A four-option select that silently rounded a hand-written
+     * policy to the nearest preset would be a control that edits
+     * something it was not asked to.
+     */
+    decode(raw) {
+      if (raw === null || raw === undefined) return 'all';
+      if (!Array.isArray(raw)) return null;
+      const names = new Set(raw.filter((n) => typeof n === 'string'));
+      // `claude` is always in force whatever the file says — the reader
+      // adds it back rather than leaving the app with no engine — so it
+      // is not part of what distinguishes these.
+      names.delete('claude');
+      if (names.has('antigravity') && names.has('agy')) return 'all';
+      if (names.size === 0) return 'claude';
+      if (names.size === 1 && names.has('agy')) return 'claude-agy';
+      if (names.size === 1 && names.has('antigravity')) return 'claude-sdk';
+      return null;
+    },
+    /** An option back into the list the file holds. */
+    encode(option) {
+      if (option === 'claude') return ['claude'];
+      if (option === 'claude-agy') return ['claude', 'agy'];
+      if (option === 'claude-sdk') return ['claude', 'antigravity'];
+      // Written out in full rather than as `null`. A reader meeting this
+      // file should see what is permitted, not an absence they have to
+      // know the default for.
+      return ['claude', 'antigravity', 'agy'];
+    },
+  },
 ];
 
 /**
@@ -325,6 +389,19 @@ export class SettingsTab extends RpcMixin(LitElement) {
     _resolved: { type: String, state: true },
     /** True while a `set_model` call is in flight. */
     _modelPending: { type: Boolean, state: true },
+    /**
+     * `Settings.get_consultant_model()`'s answer, or null before the first
+     * read. `{model, models, inherit_value}`.
+     *
+     * Separate from `_models` above rather than sharing it, because they are
+     * different lists answering different questions: that one is the master
+     * engine's menu from whichever engine is running, this one is `agy`'s and
+     * is readable while no engine is connected at all — which is the point,
+     * since a consultation runs from inside a *Claude* turn.
+     */
+    _consultant: { type: Object, state: true },
+    /** True while a `set_consultant_model` call is in flight. */
+    _consultantPending: { type: Boolean, state: true },
     /**
      * `list_engines()`'s answer, or null before the first read.
      *
@@ -989,6 +1066,7 @@ export class SettingsTab extends RpcMixin(LitElement) {
     });
     this._loadInfo();
     this._loadModel();
+    this._loadConsultantModel();
     this._loadEngines();
     this._loadAgyGate();
     this._loadPermissionRules();
@@ -1005,6 +1083,10 @@ export class SettingsTab extends RpcMixin(LitElement) {
    */
   onTabVisible() {
     this._loadModel();
+    // Same reason as the files below: app.json can move without this tab,
+    // and a picker showing a value the file stopped holding writes the
+    // stale one back on the next change.
+    this._loadConsultantModel();
     // The files can move without this tab: the textarea in another
     // window, `/permissions` in this one, an editor outside the app. A
     // switch showing a value the file stopped holding is worse than the
@@ -1075,11 +1157,25 @@ export class SettingsTab extends RpcMixin(LitElement) {
           + ' edit it. Open the card below and fix the file.',
       };
     }
-    return {
-      value: readPreference(content, card.path, card.fallback),
-      ready: true,
-      reason: card.title,
-    };
+    const raw = readPreference(content, card.path, card.fallback);
+    if (!card.decode) return { value: raw, ready: true, reason: card.title };
+    // A card whose file value is not what its control offers — a list
+    // where the select has presets. `decode` answering null means the
+    // file says something this control cannot, and the honest response
+    // is to show it disabled with the reason: rounding a hand-written
+    // policy to the nearest preset would make the next gesture edit
+    // something the user did not ask about.
+    const decoded = card.decode(raw);
+    if (decoded === null) {
+      return {
+        value: card.fallback,
+        ready: false,
+        reason:
+          `${card.configType}.json holds a combination this control cannot`
+          + ' show. Open the card below to read or change it.',
+      };
+    }
+    return { value: decoded, ready: true, reason: card.title };
   }
 
   /**
@@ -1116,7 +1212,11 @@ export class SettingsTab extends RpcMixin(LitElement) {
         }
         base = typeof res.content === 'string' ? res.content : '';
       }
-      const next = writePreference(base, card.path, value);
+      // The control's own vocabulary back into the file's. Only the
+      // engine-policy card has one today; every other card's value *is*
+      // what the file holds.
+      const written = card.encode ? card.encode(value) : value;
+      const next = writePreference(base, card.path, written);
       if (next === null) {
         this._emitToast(
           `${card.configType}.json does not parse, so ${card.label} could not be`
@@ -1204,6 +1304,23 @@ export class SettingsTab extends RpcMixin(LitElement) {
       this._emitToast(
         `${card.label}: ${label}. Applies when the session next starts —`
         + ' use Restart session below.',
+        'info',
+      );
+      return;
+    }
+    if (card.applies === 'app-restart') {
+      // The third disposition, added with AG-17. This tab had two and
+      // said so — a field takes effect on the next session or on the
+      // next background pass — and neither is true of a value read
+      // *once*, while the engine adapters are being constructed. There
+      // is no control here that can get it there: Restart session
+      // restarts the engine, not the application, so saying "restart the
+      // session" would be a promise this tab cannot keep. The toast
+      // names the thing the user has to do instead, and does not offer a
+      // button that would do something else.
+      this._emitToast(
+        `${card.label}: ${label}. Applies when AIC⚡DC next starts —`
+        + ' the engines are mounted once, at startup.',
         'info',
       );
       return;
@@ -1352,6 +1469,63 @@ export class SettingsTab extends RpcMixin(LitElement) {
       return;
     }
     this._probeHostAuthority();
+  }
+
+  /**
+   * Read the consultation model and the menu `agy` offers (AG-R-15).
+   *
+   * Independent of `_loadModel` and deliberately not folded into it: this
+   * answer does not need an engine to be connected, and a consultation is
+   * something a *Claude* session does, so gating it on the Antigravity
+   * engine's handshake would hide the control exactly when it is relevant.
+   *
+   * Failures leave the panel absent rather than empty. There is no "last
+   * known good" to preserve here and an empty picker under a heading reads
+   * as "your account has no models", which is the confusion the server-side
+   * empty-list rule exists to avoid.
+   */
+  async _loadConsultantModel() {
+    if (!this.rpcConnected) return;
+    try {
+      const res = await this.rpcExtract('Settings.get_consultant_model');
+      if (!res || typeof res !== 'object' || res.error) {
+        console.warn('[settings] get_consultant_model failed', res?.error);
+        return;
+      }
+      this._consultant = {
+        model: typeof res.model === 'string' ? res.model : '',
+        inheritValue: res.inherit_value || 'auto',
+        models: Array.isArray(res.models) ? res.models : [],
+      };
+    } catch (err) {
+      console.warn('[settings] get_consultant_model failed', err);
+    }
+  }
+
+  /**
+   * Ask for a consultation model. The select is a request; `_consultant` is
+   * the answer, so it is written from the reply and never from the event.
+   */
+  async _onConsultantSelect(event) {
+    const value = event?.target?.value;
+    if (!value || !this._consultant) return;
+    this._consultantPending = true;
+    try {
+      const res = await this.rpcExtract('Settings.set_consultant_model', value);
+      if (!res || typeof res !== 'object' || res.error) {
+        console.warn('[settings] set_consultant_model failed', res?.error);
+        // Put the control back to what the server still holds, or the
+        // select would show a choice that was refused.
+        this.requestUpdate();
+        return;
+      }
+      this._consultant = { ...this._consultant, model: res.model || '' };
+    } catch (err) {
+      console.warn('[settings] set_consultant_model failed', err);
+      this.requestUpdate();
+    } finally {
+      this._consultantPending = false;
+    }
   }
 
   /**
@@ -2162,6 +2336,7 @@ export class SettingsTab extends RpcMixin(LitElement) {
       ${this._renderPermissionRulesPanel()}
 
       ${this._renderModelPanel()}
+      ${this._renderConsultantPanel()}
 
       ${this._renderPreferenceCards()}
 
@@ -2581,6 +2756,80 @@ export class SettingsTab extends RpcMixin(LitElement) {
         already running finishes on the model it started with. Which model
         actually answered is reported per turn, by model, in the usage HUD.
       </p>
+    `;
+  }
+
+  /**
+   * The consultation model, and which of the choices are a second vendor.
+   *
+   * **The flag is the reason this is a control rather than a config key.**
+   * `agy`'s menu carries `claude-*` and `gpt-oss-*` beside the Gemini ids,
+   * and AG-13's premise is that a second opinion is a second *vendor* — so
+   * picking Claude here makes the feature quietly worthless while everything
+   * still appears to work. The option stays selectable, because a deliberate
+   * cross-vendor comparison is a legitimate thing to want; it just cannot be
+   * chosen without being told.
+   *
+   * The server marks them (`second_vendor`) rather than this file matching on
+   * a name, per AG-R-4: no webapp branch keys off a vendor or engine string.
+   */
+  _renderConsultantPanel() {
+    if (!this._consultant || this._consultant.models.length === 0) return '';
+    const { model, models, inheritValue } = this._consultant;
+    const current = model || inheritValue;
+    const chosen = models.find((m) => m.value === current);
+    const readOnly = this._isHost === false;
+    const disabled = !this.rpcConnected || readOnly || this._consultantPending;
+    return html`
+      <div class="model-panel" role="group" aria-label="Second opinion model">
+        <div class="model-head">
+          <span class="model-title">🔍 Second opinion</span>
+          <select
+            class="model-select"
+            .value=${current}
+            ?disabled=${disabled}
+            autocomplete="off"
+            aria-label="Second opinion model"
+            title=${readOnly
+              ? 'Only the host can change the consultation model'
+              : 'The model that answers second_opinion'}
+            @change=${(e) => this._onConsultantSelect(e)}
+          >
+            ${models.map(
+              (option) => html`<option
+                value=${option.value}
+                ?selected=${option.value === current}
+              >
+                ${option.second_vendor ? '⚠ ' : ''}${option.displayName
+                  || option.value}
+              </option>`,
+            )}
+            <option
+              value=${inheritValue}
+              ?selected=${current === inheritValue}
+            >
+              Whatever agy is set to
+            </option>
+          </select>
+          ${this._consultantPending
+            ? html`<span class="model-pending" aria-hidden="true">…</span>`
+            : ''}
+        </div>
+        <p class="model-note">
+          ${chosen?.second_vendor
+            ? html`<strong>⚠ This is not a second vendor.</strong> A second
+                opinion is worth something because it comes from a different
+                model family; this one asks the same family twice. `
+            : ''}
+          ${current === inheritValue
+            ? html`Follows the model you picked in <code>agy</code>'s own
+                settings, which may not be Google's — the menu offers Claude
+                and GPT-OSS too. `
+            : ''}
+          Applies to your <strong>next</strong> second opinion. Stored in
+          <code>app.json</code> as <code>engines.consultant_model</code>.
+        </p>
+      </div>
     `;
   }
 

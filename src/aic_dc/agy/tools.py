@@ -73,7 +73,106 @@ TOOL_CLASSES: dict[str, str] = {
     # Agent-initiated question. Gated by class, and blocked on the same
     # missing dialog the SDK's `ask_question` is.
     "ask_question": "interact",
+    # --- Added 2026-09-10, from the 1.2.0 inventory ---
+    #
+    # `scripts/probe_agy_tool_inventory.py` read the `init` frame's tool
+    # list on 1.2.0 and found **43 of 57 names absent from this table**.
+    # Everything below is a name that can only mean a mutation, and each is
+    # in `MUTATING_TOOLS` too. The direction matters: adding a name here
+    # only ever *adds* gating and improves the dialog, so being wrong costs
+    # one modal. Nothing was added in the other direction — see
+    # :data:`SEEN_UNCLASSIFIED` for why.
+    #
+    # `sed_file` is the sharpest of them. [AG-R-11](../../../specs5/plan-ag/risks.md#ag-r-11)
+    # was raised because an agent refused an `edit_file` reached for `sed -i`
+    # through `run_command`; on 1.2.0 that is a **first-class tool**, and
+    # this seam did not name it.
+    "sed_file": "write",
+    "delete_knowledge": "write",
+    "execute_browser_javascript": "exec",
+    "notebook_execution": "exec",
+    "send_command_input": "exec",
+    # Arbitrary tool by proxy: whatever an MCP server exposes, which this
+    # host cannot enumerate and must not assume is read-only.
+    "call_mcp_tool": "exec",
+    # Delegation, for AG-5's stated reason — a child inherits the tool set,
+    # so a gate that stops at the parent is bypassed by asking a child.
+    # `invoke_subagent` was the only spelling this table knew; 1.2.0 has
+    # three more.
+    "define_subagent": "delegate",
+    "manage_subagents": "delegate",
+    "browser_subagent": "delegate",
 }
+
+#: Names the binary advertises that this table deliberately does **not**
+#: classify, so the inventory probe's `unclassified` bucket can be empty by
+#: declaration rather than empty by neglect — the shape
+#: [AG-R-2](../../../specs5/plan-ag/risks.md#ag-r-2) specifies for the SDK
+#: probe, brought to the transport that had none.
+#:
+#: **Being here changes nothing about how a call is treated.** An
+#: unclassified name falls to ``GATED_BY_DEFAULT.get(None, True)``, so every
+#: one of these already raises the dialog; `derive_rules` offers no standing
+#: rule for a class it does not recognise, so a user cannot grant one of
+#: these permanently either. The list is a record of what was seen, not a
+#: policy.
+#:
+#: **Why they are not classified.** The `init` frame carries bare names —
+#: no descriptions, no schemas — so the only evidence available is the
+#: spelling. Classifying one as ``read`` is the single direction that
+#: *removes* a dialog, and this directory's method does not spend that on a
+#: guess. Most of these look read-only, and that is the point: they need
+#: the binary's own account of what they do, not ours.
+#:
+#: **The membership test is the merged table, not this one.**
+#: `permissions.TOOL_CLASSES` folds the SDK's vocabulary in underneath
+#: ``agy``'s, so a name either product classifies is classified for both —
+#: ``finish`` is ``read`` there and was wrongly listed here until a test
+#: said so. A reader deciding whether a name belongs on this list must ask
+#: the merged table, which is what `scripts/probe_agy_tool_inventory.py`
+#: does.
+#:
+#: **What it costs while they sit here** is the defect phase 4 fixed for the
+#: names it knew: a user driving `agy` meets a modal for `wait`, for
+#: `schedule`, for `command_status`. Dialog fatigue is not cosmetic on a
+#: transport whose only containment is a human reading dialogs.
+SEEN_UNCLASSIFIED = frozenset(
+    {
+        "ask_custom_permission",
+        "ask_permission",
+        "browser_click_element",
+        "browser_drag_pixel_to_pixel",
+        "browser_get_dom",
+        "browser_get_network_request",
+        "browser_input",
+        "browser_list_network_requests",
+        "browser_mouse_down",
+        "browser_mouse_up",
+        "browser_move_mouse",
+        "browser_press_key",
+        "browser_refresh_page",
+        "browser_resize_window",
+        "browser_scroll",
+        "browser_scroll_dom",
+        "browser_select_option",
+        "capture_browser_console_logs",
+        "capture_browser_screenshot",
+        "click_browser_pixel",
+        "command_status",
+        "list_browser_pages",
+        "list_permissions",
+        "list_resources",
+        "manage_inbox",
+        "manage_task",
+        "open_browser_url",
+        "read_browser_page",
+        "read_resource",
+        "schedule",
+        "send_message",
+        "wait",
+        "wait_5_seconds",
+    }
+)
 
 #: The write seam for this transport — [AG-5](../../../specs5/plan-ag/decisions.md#ag-5)'s
 #: boundary in ``agy``'s words.
@@ -86,6 +185,12 @@ TOOL_CLASSES: dict[str, str] = {
 #: ``invoke_subagent`` is here because a subagent inherits the tool set, so
 #: a gate stopping at the top-level trajectory is bypassed by asking a
 #: child to do the write — the same hole one level down.
+#: Widened 2026-09-10 against the 1.2.0 inventory. ``sed_file`` is the
+#: entry worth pausing on: AG-R-11 exists because an agent refused an edit
+#: reached for ``sed -i`` through ``run_command``, and this release makes
+#: that a tool of its own. The three extra delegation spellings are here on
+#: AG-5's reasoning about ``invoke_subagent``, unchanged — a child inherits
+#: the tool set.
 MUTATING_TOOLS = frozenset(
     {
         "replace_file_content",
@@ -95,6 +200,15 @@ MUTATING_TOOLS = frozenset(
         "generate_image",
         "run_command",
         "invoke_subagent",
+        "sed_file",
+        "delete_knowledge",
+        "execute_browser_javascript",
+        "notebook_execution",
+        "send_command_input",
+        "call_mcp_tool",
+        "define_subagent",
+        "manage_subagents",
+        "browser_subagent",
     }
 )
 
@@ -119,7 +233,13 @@ ARG_ALIASES: dict[str, dict[str, str]] = {
         "CodeContent": "content",
         "Description": "description",
     },
-    "generate_image": {"OutputPath": "file_path", "Prompt": "description"},
+    # No path entry, because this tool has no path argument — see
+    # `steps.BRAIN_DIR`. `OutputPath` sat here until 2026-09-08 and never
+    # matched a real call: it is one of `generate_image`'s *results* on
+    # the SDK transport, and `agy` does not merge results into arguments.
+    # A mapping that cannot fire is not inert, it is a claim that the
+    # dialog can show a PATH for this call, and it cannot.
+    "generate_image": {"Prompt": "description"},
     "run_command": {
         "CommandLine": "command",
         "Cwd": "cwd",

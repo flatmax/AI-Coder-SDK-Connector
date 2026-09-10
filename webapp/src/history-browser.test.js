@@ -2909,7 +2909,10 @@ describe('HistoryBrowser on an engine with only some of these surfaces', () => {
   async function setup({ subagents, fork }) {
     setCapabilities({
       transcript_history: surface(true),
-      subagent_tabs: surface(subagents),
+      // The key this guard reads was `subagent_tabs` until 2026-09-10, when
+      // it split — `agy` can read a subagent's transcript back and cannot
+      // stop one, so the listing RPC hangs off the half named for reading.
+      subagent_transcripts: surface(subagents),
       session_fork: surface(fork),
     });
     const listSubagents = vi.fn().mockResolvedValue([]);

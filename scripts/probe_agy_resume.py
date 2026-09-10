@@ -284,11 +284,13 @@ async def run(phase: int, work: Path | None) -> int:
 
     state = install.status(config_dir())
     log(f"installed gate: {state['state']} ({state.get('path')})")
-    installed_here = False
-    if state["state"] != "current":
+    # Restore what was there, never "remove what this probe added" — see
+    # the same block in `probe_agy_write.py`. A *stale* gate installed
+    # over and then uninstalled leaves the user with none at all.
+    restore = state["state"]
+    if restore != "current":
         log("installing the gate for the duration of this probe")
         install.install(config_dir())
-        installed_here = True
 
     # Trusted, so that a turn which decides to write anyway lands where it
     # says it did rather than in agy's scratch directory (AG-R-3).
@@ -305,8 +307,10 @@ async def run(phase: int, work: Path | None) -> int:
         )
         return completed.returncode
     finally:
-        if installed_here:
+        if restore == "absent":
             install.uninstall()
+        elif restore != "current":
+            log(f"NOTE: the gate was {restore} before this run and is now current")
         shutil.rmtree(root, ignore_errors=True)
 
 

@@ -395,10 +395,20 @@ arrives as **markdown**, with anything that is not a non-empty string normalised
 dialog's "does this option have an example?" test is a truth test.
 
 Two facts about it are not guessable from the tool schema, which types it as a bare optional string
-and defers the format to the tool description (verified against the bundled CLI 2.1.233):
+and defers the format to the tool description (verified against the bundled CLI 2.1.233, and re-read at
+2.1.229 — the pin in the tree on 2026-09-08 — where the same strings are present; the number is
+provenance now rather than the claim, because the gate below reads whatever is installed):
 
 - **The format is the host's choice, and there are two of them.** `previewFormat` on the SDK's `askUserQuestion` options reaches the CLI as `CLAUDE_CODE_QUESTION_PREVIEW_FORMAT`, which takes `"markdown"` or `"html"`. Markdown is "rendered as markdown in a monospace box"; html requires "a self-contained HTML fragment (no `<html>`/`<body>` wrapper, no `<script>` or `<style>` tags)" and is validated as such before the call runs. AIC⚡DC asks for markdown — see `src/aic_dc/claude_code/options.py`, `QUESTION_PREVIEW_FORMAT`, for why the other one is not a display preference.
 - **Unset, the format is nobody's decision.** The same env var decides whether the tool's *prompt* carries the "Preview feature" block that documents the field — what it is for, which format to author, that the UI turns side-by-side, that it is single-select only. Unset, the CLI adds that block for a terminal session and omits it for every SDK entrypoint; ours is `sdk-py`. The field itself stays in the schema either way, so this is not an on/off switch: a live A/B against the bundled CLI produced previews with the variable removed from the environment altogether, because the model knows the field without being told. What the omission actually costs is the format — the schema's own description defers it to a tool description that then says nothing, leaving markdown-or-html to the model, and the dialog renders one of those as a mockup and the other as a wall of angle brackets. Asking makes the format the host's.
+
+Both facts are the CLI's, arrive through no Python surface, and would move silently on an upgrade —
+so they are gated rather than only recorded. `src/aic_dc/claude_code/cli_surface.py` reads the
+load-bearing strings straight out of the bundled binary — the variable name, the markdown and html
+prompt blocks, the schema field, and the sentence deferring its format — and the suite fails by name,
+with what the absence would mean, when a release moves one. It is a presence check on string literals,
+not behaviour: what still needs a real turn is that the block reaches the model and that the CLI accepts
+the answer we send, which is `scripts/question_preview_smoke.py` and its `--ab`.
 
 The tool's guidance also says previews are supported for single-select questions only. The payload
 carries them regardless of `multi_select`, because a payload that dropped model-authored content on a

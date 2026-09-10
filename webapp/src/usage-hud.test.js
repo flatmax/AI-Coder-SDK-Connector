@@ -833,11 +833,26 @@ describe('UsageHud model label', () => {
     expect(label.textContent.trim()).toBe('claude-opus-4-6');
   });
 
-  it('falls back to a generic name when neither knows', async () => {
+  it('names no engine when neither source knows', async () => {
+    // Was `'Claude Code'` until 2026-09-10, which is a claim about which
+    // product is answering rather than a placeholder. The second engine
+    // reports neither source — per-model usage and the context read-back
+    // are both `absent` in its descriptor — so that literal titled every
+    // Antigravity session with the wrong vendor's name. Found in a
+    // screenshot, invisible to this file's other sixty tests.
     const usage = usageFixture();
     delete usage.model;
     const label = await labelFor({ turn_model_usage: null }, usage);
-    expect(label.textContent.trim()).toBe('Claude Code');
+    expect(label.textContent.trim()).toBe('');
+  });
+
+  it('explains the empty label in its tooltip', async () => {
+    const usage = usageFixture();
+    delete usage.model;
+    const label = await labelFor({ turn_model_usage: null }, usage);
+    expect(label.title).toBe(
+      'This engine does not report which model answered',
+    );
   });
 
   it('titles the single-model case with the model name', async () => {

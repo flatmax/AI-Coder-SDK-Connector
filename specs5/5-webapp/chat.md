@@ -510,6 +510,7 @@ The agent spawns subagents with its own `Task` tool. They are internal to the tu
 create them, cannot send them a message, and cannot grant them files.
 
 - A turn that spawns subagents grows a row per subagent inside the assistant turn — description, agent type, live status, last tool name, token usage
+- Only a task the session typed as a subagent gets a row. A backgrounded `Bash` command is a task too, and it gets none — including when it finishes in a turn later than the one that launched it (see [subagent-browser.md § A backgrounded shell command is not a subagent](subagent-browser.md#a-backgrounded-shell-command-is-not-a-subagent-in-any-turn))
 - Tool cards from a subagent render indented under its row, keyed by `agent_id`, **collapsed behind a disclosure** that counts them
 - A row is terminal when its status reaches a terminal value. A task can reach a terminal status with no notification event, so the row must not wait for one to stop spinning
 - Clicking a row opens its full transcript in the subagent browser (see [subagent-browser.md](subagent-browser.md))

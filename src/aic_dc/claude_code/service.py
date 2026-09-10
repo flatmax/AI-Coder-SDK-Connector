@@ -304,6 +304,27 @@ def _log_control_failure(exc: Exception, what: str) -> None:
     logger.exception("%s failed", what)
 
 
+def _control_failure(exc: Exception, what: str, prefix: str) -> dict[str, Any]:
+    """A failed control request, named in the vocabulary the viewer reads.
+
+    ``reason`` is the load-bearing key. *There is no engine yet* and *a
+    request to a live engine failed* arrive as one error string, look
+    identical to a browser holding it, and have opposite answers — wait, or
+    try again. ``get_context_usage`` learned to say which; ``get_server_info``
+    did not, so the Debug tab painted a window nobody had prompted in yet in
+    the error colour and told its reader a call had *failed* when no call had
+    ever been made (specs5/next.md § C11).
+
+    One function rather than the two hand-written pairs it replaces: a
+    vocabulary the viewer branches on, spelled out separately at each site,
+    is a vocabulary that grows a third spelling.
+    """
+    if isinstance(exc, EngineNotReadyError | SessionLostError):
+        return {"error": str(exc), "reason": "no-engine"}
+    _log_control_failure(exc, what)
+    return {"error": f"{prefix}: {exc}", "reason": "failed"}
+
+
 def _review_file_paths(changed_files: Any) -> list[str]:
     """Just the paths out of a review's changed-file dicts.
 
@@ -842,17 +863,53 @@ class ClaudeCodeService:
         also why this is not recorded as a degradation: an unconfigured
         optional engine is not a fault in this one.
 
-        The two reasons are reported separately, and that is worth a line
+        The reason is reported *specifically*, and that is worth a line
         because the first version did not. A base install *with* a key
         logged "no Gemini API key or Vertex project" and told the user to
         set one they already had — a diagnostic that sends someone to fix
-        the wrong thing is worse than none.
+        the wrong thing is worse than none. There are now four ways to be
+        absent across two transports, and
+        :func:`~aic_dc.agy.consultant.choose_consultant` returns the
+        sentence rather than leaving this method to guess which held.
+
+        **Which transport answers is AG-16's question, not this one's.**
+        This method used to construct the SDK consultant directly and its
+        own log line said *"There is no agy equivalent — the CLI has no
+        one-shot consultation mode"*, which was true of nothing except
+        the state of the tree when it was written: ``agy`` runs headlessly
+        per prompt, and phase 8 had already built the process, the stream
+        reader and the gate a consultation needs. It now asks for one and
+        logs which arrived, because on a free-tier key the SDK transport
+        cannot generate an image at all (AG-12) and ``agy`` reaches the
+        account holder's own subscription.
         """
         try:
-            from aic_dc.antigravity import Consultant, ConsultantBridge
+            from aic_dc.agy.consultant import choose_consultant
+            from aic_dc.antigravity import ConsultantBridge
             from aic_dc.antigravity.bridge import SERVER_NAME as AG_SERVER_NAME
 
-            consultant = Consultant(self._repo_root)
+            # AG-16: two transports reach the same product, and which one
+            # is here decides whether `generate_image` can work at all.
+            consultant, why = choose_consultant(
+                self._repo_root,
+                config_dir=getattr(self._config, "config_dir", None),
+                transport=getattr(self._config, "consultant_transport", "auto"),
+                # AG-17. The consultant follows the engine policy rather
+                # than carrying a switch of its own: reaching Antigravity
+                # from inside a Claude turn is the same question as
+                # running it as master, and two switches for one question
+                # are two things that can disagree.
+                enabled=getattr(self._config, "enabled_engines", None),
+                # AG-R-15. Passed as the manager rather than as a resolved
+                # name so the model is read per consultation: app.json is
+                # reloadable, so the Settings control takes effect on the
+                # next second opinion instead of on the next restart.
+                config=self._config,
+            )
+            if consultant is None:
+                self.consultant_bridge = None
+                logger.info("Antigravity consultant not mounted: %s", why)
+                return mcp_servers
             # AG-13: the consultation streams into its own agent tab. The
             # bridge needs two things from the session to do that — a way
             # to push, and the id of the turn the tab belongs to.
@@ -866,31 +923,13 @@ class ClaudeCodeService:
                 request_id=lambda: self.session.active_request_id,
             )
             self.consultant_bridge = bridge
-            if not bridge.available:
-                from aic_dc.antigravity.surface import sdk_installed
-
-                if not sdk_installed():
-                    logger.info(
-                        "Antigravity consultant not mounted: "
-                        "google-antigravity is not installed. It is an "
-                        "optional extra because it bundles a second ~119 MB "
-                        "binary (AG-R-10); install aic-dc[antigravity] for "
-                        "second opinions and image generation from a Claude "
-                        "turn. There is no agy equivalent — the CLI has no "
-                        "one-shot consultation mode."
-                    )
-                else:
-                    logger.info(
-                        "Antigravity consultant not mounted: no Gemini API key "
-                        "or Vertex project. Set one to offer second opinions "
-                        "and image generation from a Claude turn (AG-R-8)."
-                    )
-                return mcp_servers
             servers = dict(mcp_servers or {})
             servers[AG_SERVER_NAME] = bridge.build_server()
             logger.info(
-                "Antigravity consultant mounted as %s (credential from %s)",
+                "Antigravity consultant mounted as %s over %s (credential "
+                "from %s)",
                 AG_SERVER_NAME,
+                why,
                 consultant.credentials.source,
             )
             return servers
@@ -1858,6 +1897,16 @@ class ClaudeCodeService:
         patch of ``"killed"`` with no notification at all. Hence the
         ``"stopping"`` below: the terminal word arrives as an event, not as
         this return value.
+
+        Measured live 2026-09-09 (``scripts/subagent_stop_probe.py``), and the
+        ``or`` above is not exclusive: one ⏹ from the webapp against a
+        foreground ``Task`` produced **both**, in this order — a
+        ``task_updated`` patch of ``"killed"``, then a ``task_notification``
+        of ``"stopped"``. So a caller must tolerate either arriving alone
+        *and* the pair arriving together, with two different words for the one
+        outcome. Nothing here needs to pick a winner, because the browser's
+        LED table maps ``killed`` and ``stopped`` to the same amber; that
+        table is what makes the ordering unobservable rather than lucky.
         """
         restricted = self._check_localhost_only()
         if restricted is not None:
@@ -1869,7 +1918,7 @@ class ClaudeCodeService:
         # by asking the CLI first and falling back on an error, because a
         # `stop_task` for an unknown id is not a *failure* the CLI reports
         # cleanly, and AG-13's button has to be real rather than decorative
-        # (it maps to the `subagent_tabs` surface for exactly this reason).
+        # (it maps to the `subagent_stop` surface for exactly this reason).
         bridge = getattr(self, "consultant_bridge", None)
         if bridge is not None and str(task_id).startswith("consultation-"):
             stopped = await bridge.cancel()
@@ -1904,14 +1953,10 @@ class ClaudeCodeService:
         """
         try:
             usage = await self.session.get_context_usage()
-        except (EngineNotReadyError, SessionLostError) as exc:
-            return {"error": str(exc), "reason": "no-engine"}
         except Exception as exc:
-            _log_control_failure(exc, "get_context_usage")
-            return {
-                "error": f"Could not read context usage: {exc}",
-                "reason": "failed",
-            }
+            return _control_failure(
+                exc, "get_context_usage", "Could not read context usage"
+            )
         # The memory-file list crosses the wire exactly as the engine
         # reported it, absolute paths and all. This used to enrich each
         # entry with a ``relPath`` — the repo-relative name, added only
@@ -1990,11 +2035,8 @@ class ClaudeCodeService:
         """Advertised commands, tools, and output styles from initialize."""
         try:
             info = await self.session.get_server_info()
-        except (EngineNotReadyError, SessionLostError) as exc:
-            return {"error": str(exc)}
         except Exception as exc:
-            _log_control_failure(exc, "get_server_info")
-            return {"error": f"Could not read server info: {exc}"}
+            return _control_failure(exc, "get_server_info", "Could not read server info")
         return info or {}
 
     async def list_commands(self) -> dict[str, Any]:

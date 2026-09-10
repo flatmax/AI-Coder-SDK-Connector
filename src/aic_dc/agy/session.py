@@ -44,12 +44,14 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import shutil
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
+from aic_dc.agy import scope
 from aic_dc.agy.gate_server import AgyGateServer
-from aic_dc.agy.steps import AgyTranslator, unwrap
+from aic_dc.agy.steps import AgyTranslator, subagent_entries, unwrap
 from aic_dc.claude_code.messages import Event
 
 logger = logging.getLogger(__name__)
@@ -71,6 +73,15 @@ class AgyNotInstalledError(RuntimeError):
 
 class TurnInProgressError(RuntimeError):
     """One turn at a time, and the second one is refused rather than queued."""
+
+
+class PromptNotSentError(RuntimeError):
+    """The process would not take the prompt, so the turn never started.
+
+    Distinct from a turn that failed: nothing ran, and nothing was
+    written. :meth:`AgySession.stream_turn` converts it into the system
+    event a browser can render; a Python caller catches it.
+    """
 
 
 class AgySession:
@@ -185,7 +196,10 @@ class AgySession:
             # conversation was created, which is the same id the mirror
             # filed the transcript under.
             argv += ["--conversation", self._resume]
-        return argv
+        # AG-R-14, and it goes last so that everything above describes the
+        # `agy` invocation itself rather than the thing launching it.
+        # Unchanged where the platform has no scope to offer.
+        return scope.wrap(argv, getattr(self._gate, "scope_unit", None))
 
     async def start(self) -> str:
         """Spawn, read ``init``, and claim the conversation. Returns its id.
@@ -198,6 +212,20 @@ class AgySession:
             return self._conversation_id or ""
 
         await self._gate.start()
+        # Asked before spawning, not inferred from the spawn failing. Under
+        # a systemd scope the process that `exec` resolves is
+        # `systemd-run`, which exists — so a missing `agy` no longer raises
+        # `FileNotFoundError` and would surface as the opaque "exited
+        # before sending its init frame", which is the diagnostic this
+        # named error was written to replace. The `except` below stays, for
+        # the unscoped path and for a `systemd-run` that goes missing
+        # between the availability probe and here.
+        if shutil.which(self._executable) is None:
+            raise AgyNotInstalledError(
+                f"{self._executable!r} is not on PATH, so the agy transport "
+                "cannot start. Install the Antigravity CLI or choose another "
+                "engine."
+            )
         try:
             self._proc = await asyncio.create_subprocess_exec(
                 *self._argv(),
@@ -260,8 +288,21 @@ class AgySession:
 
         # The one window. After this the hook recognises our calls; before
         # it, it would pass them through as a stranger's.
-        self._gate.claim(self._conversation_id)
+        self._gate.claim(self._conversation_id, agy_pid=self._agy_pid)
         return self._conversation_id
+
+    @property
+    def _agy_pid(self) -> int | None:
+        """The ``agy`` process this session's conversations run in.
+
+        Recorded on every claim so a registry entry can outlive this host
+        and still say whether anything is left to gate — our own child
+        survives a killed parent, which is what separates an abandoned
+        entry from an orphaned agent
+        (:func:`aic_dc.agy.registry.entry_is_live`).
+        """
+        proc = self._proc
+        return None if proc is None else proc.pid
 
     async def _read_frame(self) -> dict[str, Any] | None:
         """One NDJSON frame, or ``None`` at end of stream.
@@ -292,15 +333,26 @@ class AgySession:
         except Exception:  # noqa: BLE001 - draining must not kill a turn
             logger.debug("agy stderr drain ended", exc_info=True)
 
-    async def stream_turn(
-        self, prompt: str, *, translator: AgyTranslator
-    ) -> AsyncIterator[Event]:
-        """Send one prompt and yield its events until the ``result`` frame.
+    async def stream_frames(self, prompt: str) -> AsyncIterator[dict[str, Any]]:
+        """Send one prompt and yield its raw frames until ``result``.
 
-        Ends on ``result``, or on end-of-stream if the process died. Both
-        close the turn out through the translator, because with no RPC
-        reply left to carry a failure the event stream is the only channel
-        there is — the lesson the SDK transport learned the hard way.
+        The reader, with no rendering in it. :meth:`stream_turn` is this
+        plus a translator and the turn's close; the consultant
+        (:mod:`aic_dc.agy.consultant`, AG-16) is this plus a translator
+        and *no* close, because a consultation is not a turn — emitting a
+        ``streamComplete`` for one would end the user's Claude turn in the
+        browser, which is holding the tool call the consultation is
+        answering.
+
+        One reader rather than two: the frame loop, the turn latch and the
+        gate's ``resume`` are the parts that must not diverge between the
+        two callers, and a second copy of them is how the SDK transport's
+        two fetch paths quietly stopped being copies.
+
+        Raises rather than reporting when the prompt cannot be sent. The
+        event-shaped version of that failure belongs to :meth:`stream_turn`,
+        whose caller is a browser waiting on a stream; a consultation's
+        caller is a Python ``await`` that can be told with an exception.
         """
         if self._proc is None:
             raise RuntimeError("the agy session has not been started")
@@ -312,11 +364,6 @@ class AgySession:
         self._turn_active = True
         self._cancelled = False
         self._gate.resume()
-        # False if the prompt never reaches the process. The turn is closed
-        # out below either way — returning early here would skip
-        # `stream_complete` and leave the browser spinning, which is the
-        # same mistake the SDK transport's error path made this morning.
-        sent = True
         try:
             try:
                 self._proc.stdin.write(
@@ -329,37 +376,139 @@ class AgySession:
                     + b"\n"
                 )
                 await self._proc.stdin.drain()
-            except (BrokenPipeError, ConnectionResetError, RuntimeError, OSError):
-                # The process died between turns. Reported as an event
-                # rather than raised, and then closed out below: the
-                # browser is waiting on this stream and an exception here
-                # would leave it spinning with no explanation.
+            except (
+                BrokenPipeError,
+                ConnectionResetError,
+                RuntimeError,
+                OSError,
+            ) as exc:
                 logger.warning("agy would not accept a prompt; the process is gone")
-                yield Event(
-                    "systemEvent",
-                    {
-                        "subtype": "engine_error",
-                        "data": {
-                            "message": (
-                                "The agy process is no longer running, so the "
-                                "turn was not sent. Restart the session."
-                            )
-                        },
-                    },
-                )
-                sent = False
+                raise PromptNotSentError(
+                    "The agy process is no longer running, so the turn was "
+                    "not sent. Restart the session."
+                ) from exc
 
-            while sent:
+            while True:
                 frame = await self._read_frame()
                 if frame is None:
                     logger.warning("agy's stream ended mid-turn")
                     break
-                for event in translator.translate(frame):
-                    yield event
+                # Before the yield, and before the translator: this is the
+                # earliest instant this process can act on the frame, and
+                # what it buys is the gate closing over the subagent
+                # sooner. See `_gate_subagents`.
+                self._gate_subagents(frame)
+                yield frame
                 if frame.get("event") == "result":
                     break
         finally:
             self._turn_active = False
+
+    def _gate_subagents(self, frame: dict[str, Any]) -> None:
+        """Claim a subagent's conversation, so its tool calls reach the gate.
+
+        **The hole this closes.** ``agy`` runs under
+        ``--dangerously-skip-permissions``, so this host's gate is the only
+        thing between the model and the tree — and the hook routes to it by
+        *conversation id*, passing through everything unclaimed, which is
+        what keeps a second session of the user's own out of our dialog
+        (``probe_agy_isolation.py``). A subagent is given a conversation of
+        its own. So until this existed, a delegation was a route around the
+        permission dialog: ``invoke_subagent`` raised a dialog, the user
+        approved *the spawn*, and every call the subagent then made — reads,
+        commands and writes into the repository — was passed through
+        unreviewed. Measured on 2026-09-09 by
+        ``scripts/probe_agy_subagent_gate.py``, which denied everything but
+        the delegation and watched the subagent's edit land anyway.
+
+        AG-5's table puts the spawners in the *still asks* column because "a
+        subagent inherits the tool set". It does inherit it; what it did not
+        inherit was the gate.
+
+        **Claimed on any announcement, and never released here.** The first
+        cut read ``state`` the obvious way — claim on ``ACTIVE``, release on
+        ``DONE`` — and the live re-run failed exactly as the unfixed code
+        had. ``DONE`` on a ``subagent`` step means **the launch finished**,
+        not the subagent: measured at ``duration_seconds: 0.10`` on a
+        delegation whose work then ran for six more seconds, over frames
+        the parent spent waiting on it. Some runs announce ``ACTIVE`` and
+        ``DONE``, some only ``DONE``, so a release keyed on that word
+        un-gates a subagent that is still working — and on the run that
+        never says ``ACTIVE``, releases a claim that was never made.
+
+        The subagent therefore stays claimed for the life of the session
+        and is released by :meth:`AgyGateServer.stop`. Holding a claim
+        costs one registry file; dropping one early costs the review.
+
+        **The residue, stated rather than papered over:** ``agy`` spawns
+        the child before it announces it, so a tool call made in that
+        window reaches the hook before the claim is on disk and passes
+        through. This side cannot close it — ``invoke_subagent``'s own
+        arguments carry no conversation id, because the child does not
+        exist when the dialog for the spawn is answered — and the honest
+        mitigations are upstream: a parent id on the hook payload, or a
+        way to spawn pre-claimed.
+        """
+        step = unwrap(frame, "step_update")
+        if step is None or str(step.get("step_type") or "") != "subagent":
+            return
+        for entry in subagent_entries(step):
+            child = str(entry.get("conversation_id") or "")
+            if not child or child == self._conversation_id:
+                continue
+            try:
+                # The subagent runs inside this session's own `agy`, so it
+                # carries the same pid: an entry for the child is abandoned
+                # exactly when the parent's is.
+                self._gate.claim(child, agy_pid=self._agy_pid)
+            except Exception:  # noqa: BLE001 - a turn must not die on this
+                # Logged loudly: a claim that failed is a subagent running
+                # ungated, which is the condition this method exists to
+                # prevent and must not be silent.
+                logger.exception(
+                    "Could not claim the subagent conversation %s; its tool "
+                    "calls will not reach the permission gate",
+                    child,
+                )
+
+    async def stream_turn(
+        self, prompt: str, *, translator: AgyTranslator
+    ) -> AsyncIterator[Event]:
+        """Send one prompt and yield its events until the ``result`` frame.
+
+        Ends on ``result``, or on end-of-stream if the process died. Both
+        close the turn out through the translator, because with no RPC
+        reply left to carry a failure the event stream is the only channel
+        there is — the lesson the SDK transport learned the hard way.
+        """
+        frames = self.stream_frames(prompt)
+        try:
+            async for frame in frames:
+                for event in translator.translate(frame):
+                    yield event
+        except PromptNotSentError as exc:
+            # Reported as an event rather than raised, and then closed out
+            # below: the browser is waiting on this stream and an exception
+            # here would leave it spinning with no explanation.
+            yield Event(
+                "systemEvent",
+                {
+                    "subtype": "engine_error",
+                    "data": {"message": str(exc)},
+                },
+            )
+        finally:
+            # **Closed explicitly, and this is not tidiness.** A caller
+            # that stops early — ⏹ is exactly that — closes *this*
+            # generator, which raises `GeneratorExit` at the yield above
+            # and leaves the inner one suspended, its `finally` waiting on
+            # a garbage collection that has not happened. The turn latch it
+            # clears would still be set, so the next `stream_turn` would be
+            # refused with `TurnInProgressError` on a session with no turn
+            # running. Found by the test that stops a turn and starts
+            # another; before the reader was split there was one generator
+            # and no inner one to forget.
+            await frames.aclose()
 
         for event in translator.stream_complete():
             yield event

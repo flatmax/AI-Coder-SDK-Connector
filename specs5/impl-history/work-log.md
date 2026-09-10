@@ -574,6 +574,244 @@ The classification tests work because they refuse to be read past, and that is t
 
 ### Landed since
 
+- **The health banner that cried wolf about a token with fourteen minutes of life on it** — 2026-09-10.
+  Closes the entry [`../known-issues.md`](../known-issues.md) carried for one day, reported from a live
+  session: the banner said *"The Claude subscription access token is expired or expiring and could not be
+  refreshed automatically"*, the user ran `claude` in a terminal, typed `hi`, and everything worked.
+
+  **The report arrived with its own diagnosis, which is why it never needed triage.** `ensure_fresh`
+  decided a ladder rung had worked by re-reading `claudeAiOauth.expiresAt` and requiring it to have moved
+  forward. Measured against a healthy token with 7.9 h of life left: `claude auth status --json` exits 0,
+  prints account metadata and carries no expiry field at all; `claude -p hi --max-turns 1` exits 0 in ~3 s
+  and leaves `expiresAt` byte-identical. **The CLI refreshes when *it* considers a refresh due, and its
+  threshold is narrower than our fifteen-minute `REFRESH_MARGIN_SECONDS`** — so every connect landing in
+  the gap between the two margins ran both rungs, saw nothing move, and reported a broken login. The
+  sentence was indistinguishable from the real failure, which is the fastest way there is to teach a user
+  to ignore a banner.
+
+  **"Did not move" is not "could not refresh", and the fix is to ask the other question.** The criterion
+  is now the token's *usability*, asked once after the ladder: a token still ahead of the clock has not
+  failed, whoever renewed it or didn't. `attempted` still means a subprocess ran, so the log keeps the
+  distinction the banner no longer draws.
+
+  **Two failures were wearing one sentence, and they have different remedies.** An access token past its
+  own `expiresAt` that the ladder could not move is `REFRESH_FAILED_DETAIL` — renew it and restart. A
+  `refreshTokenExpiresAt` in the past is `LOGIN_REQUIRED_DETAIL`, and it is the only failure here a
+  restart cannot touch: nothing can renew that credential, so the sentence asks for `claude auth login`
+  instead. It is also decided from the file rather than from a subprocess, so it is checked *before* the
+  ladder runs and is the one degradation that reports `attempted=False`. **Absent is not lapsed**: a
+  missing or non-numeric field reads as *cannot tell* and never as a failure, because inventing an expired
+  login from an absent field is the same defect in the other direction. The field was confirmed present
+  on a real credential file the same day — `refreshTokenExpiresAt` with 24.3 days on it, read read-only,
+  beside an access token with 4.76 h — so the branch is measured rather than assumed.
+
+  **A third defect was underneath, and it is the one that would have kept the true banner wrong.**
+  `note_degradation` had no counterpart: a degradation is a standing condition, deduplicated on its text
+  and never removed. Every other loss recorded there is settled at connect and lasts as long as the
+  session, but the token refresh is re-run on every watchdog tick — so a failure at connect that succeeded
+  twenty minutes later left a sentence on screen that nothing but a restart could dismiss. Since the
+  remedy for the real failure is *"go fix it in a terminal"*, the banner survived the fix it asked for.
+  `EngineHealth.clear_degradation` withdraws by exact text, which is why `note_degradation` deduplicates
+  on the same thing — a caller may only retire what it can name, so no clearing path can silence another
+  subsystem's loss — and `_refresh_access_token` withdraws both of its sentences on every `ok` outcome,
+  including the *refreshed* one, which carries a detail of its own. A test names that case, because
+  folding the withdrawal into the reporting branch is the obvious shape and it misses exactly the outcome
+  that is strongest evidence the condition has stopped standing. **No webapp change**: the banner already
+  renders `degradations` as a list and hides when it empties. A mid-session withdrawal reaches the browser
+  on the next `engineHealth` broadcast or `get_engine_health` fetch rather than being pushed, which is a
+  stated limit and not a silent one.
+
+  **The ladder itself was left alone, deliberately.** Measurement says neither rung renews a token the CLI
+  does not consider due, so the `-p hi` turn is provably wasted inside the margin gap and the tempting
+  next edit is to stop escalating until the token has actually lapsed. That trades a tiny turn for a
+  window in which the child snapshots a token it cannot renew, and the watchdog's coverage of that window
+  depends on the CLI's own threshold — an unknown. A behaviour change resting on an unmeasured constant is
+  not part of fixing a wrong sentence.
+
+  **Two things the report named and this does not build.** Surfacing `claude auth login`'s flow in the
+  banner as a click rather than as an instruction, which is a UI feature rather than a correctness fix;
+  and `claude setup-token` / `apiKeyHelper`, the two standing ways to sidestep the ~8-hour cycle entirely.
+  Both are recorded here rather than queued. **And this fix is offline-tested only**: 13 tests across
+  `test_claude_code_token_refresh.py` and `test_claude_code_session.py`, 4,721 green, and the state the
+  bug was reported in — a real credential inside the margin — is reachable on demand only by waiting for
+  it. The regression test names the condition it stands in for.
+
+- **§ D is empty: ⏹ and the cost chip were both watched doing their job** — 2026-09-09. Closes § D1 and
+  § D4 of [`../next.md`](../next.md), which leaves that file's verification debt with nothing in it. The
+  findings are in [`../5-webapp/subagent-browser.md`](../5-webapp/subagent-browser.md) § *Amber Is
+  Measured Now, And The Engine Answers Twice* and
+  [`../5-webapp/viewers-hud.md`](../5-webapp/viewers-hud.md) § *Three Of The Four Rows Are Measured Now*;
+  the recipe and its seven new traps are in
+  [`../0-overview/implementation-guide.md`](../0-overview/implementation-guide.md#the-launch-cost-is-shared-now--scripts_live_app_probepy).
+
+  **Both items needed the *whole app* live, which is what made them the last two.** D2's harness mounts a
+  component on a synthetic payload, because a pixel does not need an engine. Neither of these could take
+  that shortcut: a hand-built `stop_task` reply is a restatement of the assumption under test, and a
+  hand-built result footer prices nothing. So the shared support — `scripts/_live_app_probe.py`: pick free
+  ports, launch a backend, parse the real ones out of its log, drive an independent Chrome over plain CDP,
+  record every window event from document start — is the durable artefact, and the two probes on top of it
+  are files of scenarios. 36 checks between them, all green.
+
+  **The stop was clicked in the browser, and the engine answered twice with two different words.** One ⏹,
+  and the stream carried a `task_updated` patch of `killed` followed by a `task_notification` of
+  `stopped` — where `stop_task`'s docstring said *or*, and had been read as exclusive. The tooltip is
+  therefore decided by arrival order, and that is unobservable only because `_TERMINAL_LED` maps both
+  words to the same amber. **A table whose value is usually described as its default was earning its keep
+  through a synonym instead.** Neither terminal event carried a description or a task type, and the tab's
+  label survived on `labelDescription` being carried across the wholesale row replace: a terminal event is
+  a status, not a description of the thing it settles.
+
+  **D1's stated reason for existing was confirmed rather than assumed.** The entry said the cheap
+  substitute had failed — an agent's own `TaskStop` killed a live background subagent with the CLI
+  emitting no terminal message at all, LED left cyan. The webapp's ⏹ gets two. **The two paths are not
+  interchangeable, and the old cyan reading was not a defect in this surface** — which is a conclusion
+  only the expensive route could reach, and the argument for a section like § D at all.
+
+  **The cost chip's exceptional renderings came from a forwarded `/help` and a `SIGKILL`.** `/help`
+  reaches the CLI, returns in 4ms with `num_turns: 0` and moves the total by nothing, so `measured` with
+  a genuine `0.0` is a shape an ordinary turn never makes — chip `nothing extra`, twice, with the session
+  total byte-identical either side and `session_models` intact while `turn_model_usage` was empty. Then
+  the CLI child was found by a `/proc` ppid walk and killed six seconds into a stream, so the turn failed
+  *late* and the footer that arrived is one we wrote: `unpriced`, chip `cost unknown`. The check worth
+  having is the one asserting it is **not** `nothing extra`; both are cheap-looking chips and telling
+  them apart is the entire reason `turn_cost_basis` exists.
+
+  **Phase 6's two-turns rule was the design of the run, not a note on it.** Turn A, being first, reported
+  `turn_cost_usd == total_cost_usd` exactly — it cannot distinguish a difference from a running total, so
+  the delta was proved by a *fourth* turn: `0.0126215` against a total that went `0.0623465 → 0.074968`.
+
+  **And a wrong prediction is recorded in the probe rather than deleted.** It was written expecting
+  `/help` to produce `reset`, on the strength of a smoke run whose `/help` reported a zero total. That
+  reading was wrong: in the smoke run `/help` was the session's only turn, so the zero meant nothing had
+  been spent. **A zero read from a single-turn session is not evidence about what that turn did** —
+  measured in a session that had already spent, the same command reports `0.062346` on both sides. The
+  fourth basis, `reset`, is unreachable from the app at all (`SLASH_ROUTES` takes `/clear` before the CLI
+  sees it; a resume calls `CostLedger.reset()`), and the run says so out loud as a skip rather than
+  leaving a silent gap.
+
+- **A backgrounded shell command is not a subagent, in any turn** — 2026-09-08, `32d04ce7`. Recorded in
+  [`../5-webapp/subagent-browser.md`](../5-webapp/subagent-browser.md) § *A backgrounded shell command is
+  not a subagent, in any turn* and § *A tab that mirrored nothing reads its transcript*. Found by driving
+  the app, like everything else this week, and it never reached [`../next.md`](../next.md) at all.
+
+  Only `TaskStartedMessage` carries `task_type`, so the filter that drops `local_bash` tasks has to latch
+  the id — and the latch lived on the *turn's* translator. A command run with `run_in_background` returns
+  immediately and finishes on a later turn, whose translator has never heard of the task and gets an
+  untyped `task_notification`: the command came back as a **subagent**, a row headed "Subagent" with no
+  description, sorted to the bottom of an unrelated turn because its `tool_use_id` matched no card there,
+  beside a tab with no blocks to mirror. The latch now lives on `EngineSession` and is passed to every
+  translator it builds, so **a task's type outlives the turn that started it** — the same lesson as the
+  cost baseline one section up, in a different mechanism: per-turn state cannot answer a question about
+  something that outlives a turn.
+
+  The empty tab it produced turned out to be a real shape for a background *subagent* too, whose later
+  blocks are translated against another turn and can never be mirrored. A settled subagent tab with an
+  empty feed now reads `get_subagent_transcript`, gated so it can never displace mirroring: settled only,
+  empty only, once per tab, and on the user's gesture.
+
+- **The HUD in 300px, measured — and phase 7 turned out to have finished eleven days ago** — 2026-09-08.
+  Closes § B1's layout residue, § D2's last clause, and § A2 (d) of [`../next.md`](../next.md). The
+  measurements are in [`../5-webapp/viewers-hud.md`](../5-webapp/viewers-hud.md) § *Five Sections In 300px
+  Is Measured Now*; the new traps are in
+  [`../0-overview/implementation-guide.md`](../0-overview/implementation-guide.md#measuring-layout-in-a-real-browser).
+
+  **D2's estimate was the thing under test as much as the HUD was.** Its closing clause said adding a
+  scene was "now a function rather than a project", and it was: one scene in `layout-harness.js`, three
+  checks in `layout_probe.py`, 34 assertions, 53 in the suite. The launch cost D2 deferred since phase 3
+  was almost entirely fixed cost, which is the argument for taking the *next* layout question to the
+  harness rather than reading it by eye one more time.
+
+  **What it measures are two sentences `usage-hud.js` states and jsdom can only half-answer.** That five
+  sections and their heads fit `width: 300px`, and that closing one "costs no height and hides no answer".
+  Collapse is presence, so jsdom was honest about the part it could see; the numbers are new. Open, the
+  worst case — a 1M window at 100% for the widest headline, the longest rate-limit label, three model rows
+  — measures 302×366px with 280px heads and no horizontal overflow. Closed, every head measures the same
+  as it did open (14–15px), every body is exactly 0px, every headline still has text, and the overlay goes
+  to 157px.
+
+  **The 300px is the content box and the check said so the hard way.** The first run failed with "302px
+  against a declared 300px": `.hud` draws a 1px border under the default `box-sizing: content-box`. The fix
+  is to assert `clientWidth` and print the footprint beside it, because asserting 300 on the border box
+  would assert a `box-sizing` the component never declared and nothing asks it for.
+
+  **Two findings, and neither is a defect.** The token-row rule — the model name ellipsises, the count is
+  `flex: none` — is real, verified by deleting the declaration and watching the count become the clipped
+  half. But no ordinary model id is long enough to reach it at 300px, and neither is
+  `us.anthropic.claude-opus-5-v1:0`; it takes a full Bedrock cross-region inference-profile ARN as a
+  `turn_model_usage` key to clip anything, so the fixture carries one as a positive control. **A fixture
+  whose rows all fit demonstrates nothing about an ellipsis rule** — the check passed clipping nothing
+  before that, which is the same failure mode the harness's own positive-control rule exists to catch, one
+  level down. And `max-height: 80vh` is justified in a comment by forty files "running off the bottom of
+  the screen": with the ceiling removed the overlay reached 1085px of an 1100px window and stayed on
+  screen. The ceiling is right — it stops an overlay becoming a page — and the reason given for it needs a
+  ~900px viewport before it is true. Recorded as viewport-dependent rather than repeated, and it is the one
+  assertion here whose failure has not been witnessed; the check's docstring says so.
+
+  **§ A2 (d) closed by reading the remote, and had been closed for eleven days.** Phase 7's exit criterion
+  — a fresh machine, checked by `--check-engine` inside a `claude`-less `ubuntu:24.04` — was committed as
+  `1986d45` *after* the run that published the first release, so `next.md` recorded it as owed. Since then
+  pull requests #2–#6 merged into `master`, `1986d45` is an ancestor of all five, and each published a
+  release with three artefacts (`2026.08.29-12.26-f9d6c5ef` … `2026.09.06-05.37-ab7475c6`). The
+  verification steps live in the `build` job that `release` declares `needs:` on, so **an attached artefact
+  is a green leg** and the criterion has been met on five real builds. § E's sanctioned substitute worked
+  as designed: the next real PR carried the unproven steps, and no dispatch was spent.
+
+  **The reason it read as owed is § A2 (b)'s lesson inverted.** That item's rule is *check the remote
+  before writing a plan that turns on its state*, learnt when `gh` was authenticated all along. `gh`'s
+  keyring token has since gone invalid, so the tool the lesson was about is the one that no longer works —
+  and the answer was still one unauthenticated `GET` away, because the repository is public. **One broken
+  tool is not evidence that a claim is unverifiable**, and a stale "owed" is the expensive direction to be
+  wrong in: it reads as work remaining and keeps a finished phase open.
+
+- **A layout probe, the empty editor it caught, and C11** — 2026-09-08. Closes § D2 and § C11 of
+  [`../next.md`](../next.md). Recipe in
+  [`../0-overview/implementation-guide.md`](../0-overview/implementation-guide.md#measuring-layout-in-a-real-browser);
+  the sizing rule in [`../5-webapp/permission-dialog.md`](../5-webapp/permission-dialog.md);
+  C11 in [`../5-webapp/viewers-hud.md`](../5-webapp/viewers-hud.md) § *When the breakdown fails*.
+
+  D2 had waited since phase 3 for a reason worth the launch cost, and by 2026-09-03 it held three cases —
+  the Monaco style clone, the tool-card header grid, and a permission dialog drawing ~570px of empty
+  editor for a `+1 −0` diff. `scripts/layout_probe.py` over `webapp/src/layout-harness.js` now answers all
+  three in 19 checks.
+
+  **The item asked for a screenshot harness and that framing was half wrong.** What earns a browser is
+  that it *measures*: every check asserts on numbers from a real layout engine, and the PNGs it writes
+  beside them are evidence for whoever reads a failure, never the assertion. That satisfies the item's
+  write-files-not-inline requirement as a consequence rather than as a rule, and it skips the golden-image
+  maintenance burden — a suite where every deliberate visual change is a diff to re-bless is a suite that
+  teaches people to re-bless without looking. The half the item had exactly right is the positive control,
+  and it was needed: an implementation making every editor 90px tall passes "the editor is
+  content-driven", so a 200-line diff must be at the ceiling *and* must scroll, both checked every run.
+
+  **Built before the fix, deliberately.** The first run reported 18 checks, 1 failed — "520px of box for
+  38px of content" — and `dialog-one-line.png` showed one changed line above ~490px of nothing. That
+  ordering is what makes the fix a regression test rather than an edit. The height is now a CSS `clamp()`
+  whose middle term `diff-editor.js` writes from Monaco's own `getContentHeight()`; the bounds are custom
+  properties the probe reads off the computed style, because a number copied into Python is a number that
+  will disagree with itself. Five unit tests hold the writer and fail without it; a sixth guards the
+  zero-height check and passes either way, which it says so in place.
+
+  **The 17 checks that passed on unfixed code are worth as much as the one that failed.** Two behaviours
+  that had only ever been read by eye are now measured — and the container query turned out to do more
+  than the spec recorded: 282px of summary at a 300px card against the 164px of the layout it replaced.
+
+  **Three lessons the harness charged for.** A backtick inside a Lit `css` literal — in a *comment* —
+  terminated the template and made the module a syntax error, and all the probe said was "the harness page
+  never became ready": true, useless, and a sitting away from the parse error Chrome had already printed.
+  It now keeps the page's console and prints it on any failure. `node --check` catches that class of fault
+  in a second. And a scene must wait on a diff *decoration*, not a rendered line: Monaco's alignment view
+  zones are part of the content height and arrive later.
+
+  **C11 came along in the same tab and was not a colour bug.** `get_server_info` sent no `reason`, so the
+  browser could not tell "no engine yet" from "a request failed" even in principle — the ternary would
+  have had to guess from the error string, which is exactly what the breakdown's note stopped doing five
+  days earlier. A service-side `_control_failure()` now names the reason for `get_server_info` and
+  `get_context_usage` alike, replacing two hand-written pairs. The Debug section reads *"No initialize
+  reply yet"* in grey and the footer *"No session to ask — the numbers above are the last reading of the
+  one that ended"*; an unlabelled reason keeps the error colour, since red on an ordinary state is a
+  smaller fault than grey on a real failure. **A vocabulary the viewer branches on, spelled out separately
+  at each site, grows a third spelling** — this item is what that looks like from the far end.
+
 - **Phase 3's probe ran for the first time and found three bugs** — 2026-09-02. Reasoning in
   [`../plan-ag/delivery.md`](../plan-ag/delivery.md#phase-3--the-live-run-and-the-three-bugs-it-found-2026-09-02).
 
@@ -1971,6 +2209,50 @@ The classification tests work because they refuse to be read past, and that is t
   wrong — the SDK's fifteen client methods include exactly one that starts a turn, and `can_use_tool`
   already answers on the concurrent channel while a turn blocks on it. See
   [`3-engine/session.md` § Mid-turn availability](../3-engine/session.md#mid-turn-availability).
+
+- **The question-preview contract is gated offline, and the A/B never had to be automated** —
+  2026-09-08, closing [`../next.md`](../next.md) § D3 and [`../plan/README.md`](../plan/README.md) open
+  item 8.
+
+  The item asked for a live A/B to re-run on every CLI upgrade, and it was blocked by its own framing.
+  What that A/B established is not behaviour — it is **text in the CLI binary**: the variable name the
+  CLI reads, the per-format prompt block the variable selects between, the `preview` field that sits in
+  the tool's input schema unconditionally, and the sentence inside that field's own description — *"See
+  the tool description for the expected content format"* — which is the thing that makes the variable
+  load-bearing at all. Read back out of the bytes, the recorded finding is confirmed word for word.
+  `claude_code/cli_surface.py` scans the ~300 MiB executable with `mmap` (no resident cost, and the
+  claims are substring searches), and `test_claude_code_cli_surface.py` fails **by name, with what the
+  absence would mean**, when a release moves one. Offline, no credentials, no tokens, every suite run —
+  strictly stronger than a note asking somebody to remember.
+
+  Three decisions carry the weight. **The markers are string literals, not code**, because the bundle is
+  minified: the format branch is `if(i==="markdown"||i==="html")` and `i` is whatever the minifier chose
+  that day, so what is anchored on is the English the CLI shows a model. One claim is code-shaped
+  (`startsWith("sdk-")`, the exemption that makes an *unset* format mean "nobody chose" rather than
+  "markdown"), and a test asserts it stays the only one — the temptation when a marker goes red is to
+  replace it with the surrounding minified code, which would go red again next release for no reason.
+  **`holds` is `None`, not `False`, when nothing could be scanned**: a binary that is absent, empty or
+  unreadable has disproved nothing, and reporting `False` would make a stripped install look like a CLI
+  regression *and* make a real regression indistinguishable from a missing file. **The measured version
+  is recorded and not gated on** — a bump that leaves the claims standing needs no action, and failing
+  on the number alone is how a tripwire gets switched off.
+
+  It reads the *bundled* copy rather than `resolve_cli().path`, so a reader's `engine.json` `cli_path`
+  cannot make the result machine-dependent — the same fault `0de670c` had just fixed elsewhere. The gate
+  was proved able to fail against synthetic binaries before it was believed, this project having shipped
+  two inert checks already ([`../next.md`](../next.md) § A2 (a) and (d)). And the claims about *our* side
+  never skip, so an install with no binary still gates the format being one the CLI accepts (a typo
+  falls through silently rather than erroring) and `CLAUDE_CODE_ENTRYPOINT` never being set by us, since
+  `options.env` merges *after* the SDK's `sdk-py` stamp and would win.
+
+  The live script was not declared obsolete, which was the other tempting wrong answer. A string in the
+  binary does not prove the block reaches the model, and nothing static shows the CLI *accepts* the
+  answer we build — a `FakeSession` accepts any shape we invent. So `question_preview_smoke.py` keeps
+  exactly those two jobs, and its new `--ab` runs both arms in one process with the expected outcome
+  stated up front: **no difference**, because the field is unconditional. Previews in the "with" arm only
+  contradicts the record and exits 1; previews in neither is a model declining an optional field and
+  exits 2. That turns the judgement call into one command with a stated answer, rather than a reader
+  holding two runs in their head.
 
 ## Resumption protocol
 

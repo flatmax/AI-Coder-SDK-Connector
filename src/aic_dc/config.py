@@ -74,6 +74,26 @@ _MANAGED_FILES = frozenset({
     "app.json",
 })
 
+# Managed files upgraded key-by-key rather than wholesale. `app.json` is
+# the only one, and it is here because "managed" and "written by the
+# Settings tab" were both true of it: `CONFIG_TYPES` exposes `app` for
+# editing, `engines.master` moves when a session switches engines, and
+# AG-17's `engines.enabled` is an organisation's *policy* — so the
+# upgrade that overwrote this file reverted every one of those, and
+# quietly turned a Claude-only deployment back into a two-provider one
+# (plan-ag AG-R-13). Overwriting is still right for `commit.md`: it is
+# prose the bundle owns, a user who edits it is patching a prompt, and
+# the backup is how they get their text back.
+#
+# Merging needs a third leg, because a user's file is a *copy of the
+# bundle* taken at install: comparing it against the new bundle cannot
+# tell "I chose this" from "this was the default". `_PRISTINE_DIR` holds
+# the bundled file as it was last installed, so the comparison is the
+# familiar three-way one — see `_merge_json`.
+_MERGED_MANAGED_FILES = frozenset({
+    "app.json",
+})
+
 _USER_FILES = frozenset({
     "engine.json",
 })
@@ -101,6 +121,16 @@ RETIRED_FILES: tuple[str, ...] = (
 # Version marker filename inside the user config dir. Hidden (leading
 # dot), not in either file set so the upgrade iterator skips it.
 _VERSION_MARKER = ".bundled_version"
+
+# Where the pristine copies live: a hidden directory inside the user
+# config dir holding each merged managed file exactly as the bundle last
+# shipped it. Hidden and a directory, so neither the upgrade iterator
+# (which walks filenames) nor the retired-file scan (which looks for
+# files by name) sees it. An install that predates this directory has no
+# pristine copy, and the merge reads that as "every value on disk is the
+# user's" — the safe direction, since the alternative reverts an edit we
+# cannot prove was ours.
+_PRISTINE_DIR = ".pristine"
 
 # Per-repo working directory name. Created under the repo root on
 # first run; added to .gitignore.
@@ -245,6 +275,59 @@ def _backup_name(original: Path, installed_version: str) -> Path:
     return original.with_name(original.name + suffix)
 
 
+# Distinguishes "the pristine copy records null for this key" from "the
+# pristine copy does not mention this key". ``.get(key)`` cannot: both
+# answer None, and they mean opposite things here.
+_ABSENT = object()
+
+
+def _merge_json(
+    user: Mapping[str, Any],
+    pristine: Mapping[str, Any],
+    bundled: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Three-way merge of one managed JSON file, key by key.
+
+    ``pristine`` is the bundled file as it was last installed — the
+    common ancestor. Per key:
+
+    - Absent from ``user`` → take the bundled value. This is how a key
+      a release *adds* reaches an existing install.
+    - Present in all three and ``user == pristine`` → take the bundled
+      value. The user never touched it, so a changed default lands.
+    - ``user != pristine`` → keep the user's. Their edit is the answer,
+      and an upgrade is not the place to overrule it.
+    - No pristine record for the key → keep the user's, for the same
+      reason as above: without an ancestor there is no evidence the
+      value came from us.
+    - Present in ``user`` but not in ``bundled`` → keep it. A key the
+      bundle dropped is left on disk unread, exactly as a retired *file*
+      is (see § Retired files are ignored, not deleted).
+
+    Nested objects recurse, so ``engines.enabled`` survives a release
+    that changes ``engines.master``'s default. Lists are compared whole:
+    a user who edits ``doc_convert.extensions`` owns the list, and there
+    is no per-element ancestry to merge against.
+    """
+    merged = dict(user)
+    for key, bundled_value in bundled.items():
+        if key not in merged:
+            merged[key] = bundled_value
+            continue
+        user_value = merged[key]
+        pristine_value = pristine.get(key, _ABSENT)
+        if isinstance(user_value, Mapping) and isinstance(bundled_value, Mapping):
+            merged[key] = _merge_json(
+                user_value,
+                pristine_value if isinstance(pristine_value, Mapping) else {},
+                bundled_value,
+            )
+            continue
+        if pristine_value is not _ABSENT and user_value == pristine_value:
+            merged[key] = bundled_value
+    return merged
+
+
 # ---------------------------------------------------------------------------
 # ConfigManager
 # ---------------------------------------------------------------------------
@@ -292,8 +375,11 @@ class ConfigManager:
         self._app_config: dict[str, Any] | None = None
 
         # Run the upgrade pass. Failure here is non-fatal — if the
-        # user config directory can't be created (permissions, etc.)
-        # we log and fall back to reading the bundle directly.
+        # user config directory itself can't be created (permissions,
+        # etc.) we log and fall back to reading the bundle directly.
+        # Per-*file* failures inside the pass no longer reach this
+        # handler: they are reported and skipped there, so one
+        # unwritable file cannot cost the others their upgrade.
         try:
             self._ensure_user_dir()
             self._run_upgrade()
@@ -342,17 +428,57 @@ class ConfigManager:
         marker = self._user_dir / _VERSION_MARKER
         marker.write_text(version, encoding="utf-8")
 
+    def _pristine_path(self, filename: str) -> Path:
+        """Path of the last-installed bundled copy of ``filename``."""
+        return self._user_dir / _PRISTINE_DIR / filename
+
+    def _record_pristine(self, filename: str, bundled_path: Path) -> None:
+        """Snapshot the bundled file as the ancestor for the next merge.
+
+        Written on install and after every upgrade of a merged managed
+        file, so the next release compares against what *this* release
+        shipped rather than against the original install.
+        """
+        target = self._pristine_path(filename)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(bundled_path, target)
+
+    def _read_json_path(self, path: Path) -> dict[str, Any] | None:
+        """Parse a JSON object at ``path``, or None if it isn't one.
+
+        Distinct from :meth:`_read_user_json`, which answers ``{}`` for
+        both "absent" and "unparseable" because its callers want a dict
+        to ``.get()`` from. The merge cannot use that: an empty dict
+        would read as "the user set nothing" and hand the whole bundled
+        file back, which is the overwrite this method exists to avoid.
+        """
+        try:
+            parsed = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        return parsed if isinstance(parsed, dict) else None
+
     def _run_upgrade(self) -> None:
         """Version-aware upgrade pass.
 
         Compares the bundled version against the installed marker:
 
         - Match → no action (fast path)
-        - Mismatch or first install → copy new files, back up and
-          overwrite managed files, leave user files alone
+        - Mismatch or first install → copy new files, merge or overwrite
+          managed files, leave user files alone
 
-        Files not in either category set (the marker itself, any
-        stray files users may have added) are skipped.
+        Files not in either category set (the marker itself, the
+        pristine directory, any stray files users may have added) are
+        skipped.
+
+        Each file is upgraded inside its own error handling. A file the
+        pass cannot write — a read-only ``app.json`` shipped by
+        configuration management is the case that happens — is reported
+        and skipped, and the remaining files still upgrade. The marker is
+        written even then, deliberately: the alternative left every
+        subsequent startup repeating the whole pass, dropping another
+        backup each time, and never upgrading the files it *could*
+        write.
         """
         bundled_version = _bundled_version()
         installed_version = self._read_installed_version()
@@ -369,35 +495,24 @@ class ConfigManager:
             bundled_version or "(none)",
         )
 
+        left_alone: list[str] = []
         for filename in sorted(_MANAGED_FILES | _USER_FILES):
-            bundled_path = self._bundled_dir / filename
-            user_path = self._user_dir / filename
+            try:
+                reason = self._upgrade_one(filename, installed_version)
+            except OSError as exc:
+                reason = str(exc)
+            if reason is not None:
+                left_alone.append(f"{filename} ({reason})")
 
-            if not bundled_path.is_file():
-                # Missing from bundle — nothing to copy. Not an
-                # error (some files may be optional in future).
-                continue
-
-            if not user_path.exists():
-                # New file — copy from bundle regardless of category.
-                logger.info("Config install: %s", filename)
-                shutil.copy2(bundled_path, user_path)
-                continue
-
-            if filename in _USER_FILES:
-                # User file already exists — never touch.
-                continue
-
-            if filename in _MANAGED_FILES:
-                # Back up then overwrite.
-                backup = _backup_name(user_path, installed_version)
-                logger.info(
-                    "Config upgrade: %s → backup %s",
-                    filename,
-                    backup.name,
-                )
-                shutil.copy2(user_path, backup)
-                shutil.copy2(bundled_path, user_path)
+        if left_alone:
+            logger.warning(
+                "Config upgrade left %s as found: %s. The version marker "
+                "is written anyway so startup does not retry on every run "
+                "— resolve the cause and delete %s to run the pass again.",
+                "one file" if len(left_alone) == 1 else "files",
+                ", ".join(left_alone),
+                self._user_dir / _VERSION_MARKER,
+            )
 
         # Only write the marker if we actually have a bundled
         # version to record. Source installs (VERSION == "dev" or
@@ -405,6 +520,104 @@ class ConfigManager:
         # triggers an upgrade.
         if bundled_version:
             self._write_installed_version(bundled_version)
+
+    def _upgrade_one(self, filename: str, installed_version: str) -> str | None:
+        """Bring one config file up to the bundled version.
+
+        Returns None when the file needed nothing or was brought up to
+        date, and a short reason when it was deliberately left as found.
+        Raises :class:`OSError` for the write failures the caller
+        reports per file.
+        """
+        bundled_path = self._bundled_dir / filename
+        user_path = self._user_dir / filename
+
+        if not bundled_path.is_file():
+            # Missing from bundle — nothing to copy. Not an
+            # error (some files may be optional in future).
+            return None
+
+        if not user_path.exists():
+            # New file — copy from bundle regardless of category.
+            logger.info("Config install: %s", filename)
+            shutil.copy2(bundled_path, user_path)
+            if filename in _MERGED_MANAGED_FILES:
+                self._record_pristine(filename, bundled_path)
+            return None
+
+        if filename in _USER_FILES:
+            # User file already exists — never touch.
+            return None
+
+        if filename in _MERGED_MANAGED_FILES:
+            return self._merge_one(
+                filename, bundled_path, user_path, installed_version
+            )
+
+        # Managed prose — back up then overwrite.
+        backup = _backup_name(user_path, installed_version)
+        logger.info("Config upgrade: %s → backup %s", filename, backup.name)
+        shutil.copy2(user_path, backup)
+        shutil.copy2(bundled_path, user_path)
+        return None
+
+    def _merge_one(
+        self,
+        filename: str,
+        bundled_path: Path,
+        user_path: Path,
+        installed_version: str,
+    ) -> str | None:
+        """Three-way merge one managed JSON file in place.
+
+        The user's file is backed up and rewritten only when the merge
+        actually changes something, so an install that has diverged from
+        no default collects no backups. The pristine copy is refreshed
+        either way — it records what the bundle shipped, not what we
+        wrote.
+
+        Note that the merged file is re-serialised: key order follows the
+        user's file with bundled additions appended, and the bundle's
+        hand-wrapped arrays come back expanded. JSON carries no comments,
+        so there is nothing else to lose.
+        """
+        user_data = self._read_json_path(user_path)
+        bundled_data = self._read_json_path(bundled_path)
+        if user_data is None:
+            # Their file, unreadable or not an object. Overwriting would
+            # replace text we cannot read with text they did not write;
+            # every accessor already falls back to its own default, so
+            # the application runs either way and the user keeps the file
+            # they have to fix.
+            return "unparseable JSON, left for the user to fix"
+        if bundled_data is None:
+            return "bundled copy is not a JSON object"
+
+        pristine_data = self._read_json_path(self._pristine_path(filename)) or {}
+        merged = _merge_json(user_data, pristine_data, bundled_data)
+
+        if merged != user_data:
+            backup = _backup_name(user_path, installed_version)
+            logger.info(
+                "Config merge: %s → backup %s", filename, backup.name
+            )
+            shutil.copy2(user_path, backup)
+            try:
+                user_path.write_text(
+                    json.dumps(merged, indent=2) + "\n", encoding="utf-8"
+                )
+            except OSError:
+                # A read-only file is a workplace pinning it, not a
+                # fault. Take the backup back out: a copy of a file we
+                # failed to change is litter, and littering once per
+                # startup is what the old pass did.
+                backup.unlink(missing_ok=True)
+                raise
+        else:
+            logger.info("Config merge: %s already current", filename)
+
+        self._record_pristine(filename, bundled_path)
+        return None
 
     def _init_aic_dc_dir(self) -> None:
         """Create the per-repo ``.aic-dc/`` working directory.
@@ -608,6 +821,232 @@ class ConfigManager:
             )
             return capabilities.CLAUDE
         return chosen
+
+    @property
+    def enabled_engines(self) -> tuple[str, ...]:
+        """Which engines this install may mount at all (AG-17).
+
+        `app.json`'s `engines.enabled`, defaulting to every engine. It is
+        a *policy* rather than a preference: some workplaces are only
+        permitted to use Claude, and until this existed nothing could
+        express that — the `agy` adapter mounted on the binary being on
+        PATH with no configuration consulted, and `engines.master` names
+        which engine starts rather than which may run.
+
+        **The consultant follows this too**, which is the reason it is an
+        engine list rather than a set of feature switches. Reaching
+        Antigravity from inside a Claude turn is the same question as
+        running it as master — one provider, one answer — and two
+        switches for one question are two things that can disagree.
+
+        **Claude cannot be removed.** A list that omits it, or names only
+        engines this install does not have, would leave the application
+        with no engine at all: a config typo costing the user the whole
+        product, which is the failure `master_engine`'s fallback already
+        exists to prevent. It is added back with a warning.
+
+        Unknown names are dropped with a warning rather than raising, for
+        the same reason, and an `engines.enabled` that is not a list is
+        ignored entirely — a malformed policy must not read as a
+        *narrower* policy than the user wrote, because the direction of
+        that mistake decides whether they lose a feature or lose a
+        restriction. Ignoring it keeps every engine, which is the state
+        they had before writing it, and the Settings panel shows what is
+        in force.
+        """
+        section = self.app_config.get("engines", {})
+        if not isinstance(section, dict):
+            section = {}
+        chosen = section.get("enabled")
+        if chosen is None:
+            return tuple(capabilities.ENGINES)
+        if not isinstance(chosen, list):
+            logger.warning(
+                "app.json engines.enabled is %r, which is not a list of "
+                "engine names. Ignoring it; every engine stays enabled.",
+                chosen,
+            )
+            return tuple(capabilities.ENGINES)
+
+        named = [name for name in chosen if isinstance(name, str)]
+        unknown = [name for name in named if name not in capabilities.ENGINES]
+        if unknown:
+            logger.warning(
+                "app.json engines.enabled names %s, which %s not %s. "
+                "Ignoring the unknown %s.",
+                ", ".join(repr(name) for name in unknown),
+                "is" if len(unknown) == 1 else "are",
+                " or ".join(capabilities.ENGINES),
+                "name" if len(unknown) == 1 else "names",
+            )
+        enabled = [name for name in named if name in capabilities.ENGINES]
+        if capabilities.CLAUDE not in enabled:
+            logger.warning(
+                "app.json engines.enabled does not name %s. Adding it: an "
+                "install with no engine is not a configuration this "
+                "application can run.",
+                capabilities.CLAUDE,
+            )
+            enabled.insert(0, capabilities.CLAUDE)
+        # Ordered by ENGINES rather than by the file, so two configs that
+        # enable the same engines compare equal however they were written.
+        return tuple(name for name in capabilities.ENGINES if name in enabled)
+
+    @property
+    def consultant_transport(self) -> str:
+        """Which Antigravity transport answers ``second_opinion`` (AG-16).
+
+        ``"auto"`` by default, and auto prefers ``agy``: the SDK path
+        authenticates with a metered Gemini key whose free tier allows
+        twenty agent requests a day and *zero* image generations, while
+        ``agy`` reaches the account holder's own subscription. A default
+        that picks the transport which cannot generate an image would
+        leave AG-1's worked example broken for the reason it has always
+        been broken.
+
+        ``"sdk"`` and ``"agy"`` name one explicitly. The first is worth
+        having rather than theoretical: a user with a *paid* key may
+        prefer it, because it pins the model, and an opinion whose model
+        moves is not a second opinion.
+
+        An unknown value falls back to ``"auto"`` with a warning, for the
+        reason :meth:`master_engine` does — a typo should cost a
+        preference, not the application.
+        """
+        section = self.app_config.get("engines", {})
+        if not isinstance(section, dict):
+            section = {}
+        chosen = section.get("consultant")
+        if chosen is None:
+            return "auto"
+        if chosen not in ("auto", "agy", "sdk"):
+            logger.warning(
+                "app.json engines.consultant is %r, which is not one of "
+                "auto, agy, sdk. Choosing automatically.",
+                chosen,
+            )
+            return "auto"
+        return str(chosen)
+
+    #: What ``engines.consultant_model`` / ``engines.agy_model`` mean when
+    #: they hold this word: *do not pass ``--model``*, so ``agy`` uses the
+    #: model the account holder selected in its own settings.
+    #:
+    #: Spelled rather than left to ``null`` because :func:`_changed_fields`
+    #: in ``settings.py`` treats absent and explicitly-null as the same
+    #: value — deliberately, so a save that only changes how "unset" is
+    #: written does not offer a restart. A meaning that needs to survive
+    #: that has to be a value, and ``"auto"`` is the vocabulary
+    #: :meth:`consultant_transport` already uses for "you choose".
+    INHERIT_ACCOUNT_MODEL = "auto"
+
+    @property
+    def consultant_model(self) -> str | None:
+        """Which model answers ``second_opinion`` on the ``agy`` transport.
+
+        ``None`` means "pass no ``--model`` and let the account's own
+        setting decide"; a string is a model id handed to ``agy``.
+
+        **The default is pinned, and it is pinned for a reason that is not
+        performance** ([AG-R-15](../../specs5/plan-ag/risks.md#ag-r-15)).
+        ``agy models`` offers Claude and GPT-OSS entries beside the Gemini
+        ones, so inheriting the account's choice inherits the possibility
+        that a *second* opinion is the same vendor asked twice — which is
+        the one thing [AG-13](../../specs5/plan-ag/decisions.md#ag-13)
+        exists to prevent, arriving through a settings file this app does
+        not own. Effort is baked into the model name on this surface, so
+        the pin also settles the depth question the README raises about the
+        SDK transport: the point of a second opinion is a *capable* one.
+
+        This is not validated against ``agy models`` here, because that is
+        a subprocess and this is a property. :meth:`Settings.set_consultant_model`
+        validates before writing, and an unknown name reaching ``agy``
+        fails loudly at session start rather than silently downgrading.
+        """
+        from aic_dc.agy.consultant import DEFAULT_MODEL
+
+        section = self.app_config.get("engines", {})
+        if not isinstance(section, dict):
+            section = {}
+        chosen = section.get("consultant_model")
+        if chosen is None:
+            return DEFAULT_MODEL
+        if chosen == self.INHERIT_ACCOUNT_MODEL:
+            return None
+        if not isinstance(chosen, str) or not chosen.strip():
+            logger.warning(
+                "app.json engines.consultant_model is %r, which is not a "
+                "model id or %r. Using %s.",
+                chosen,
+                self.INHERIT_ACCOUNT_MODEL,
+                DEFAULT_MODEL,
+            )
+            return DEFAULT_MODEL
+        return chosen
+
+    @property
+    def agy_model(self) -> str | None:
+        """Which model the ``agy`` *engine* runs as master.
+
+        Unpinned by default — ``None``, the account holder's own choice —
+        and that asymmetry with :meth:`consultant_model` is the point.
+        A master engine is the one the user drives all day and whose cost
+        and latency they feel directly, so inheriting the tier they chose
+        in ``agy`` is respecting a decision. A consultation is a
+        cross-check bought by the answer it gives, and it has a vendor
+        requirement the master does not.
+
+        Persisted so a choice survives a restart, which
+        :meth:`AgyService.set_model` did not do until 2026-09-09: it
+        assigned an instance attribute, so every selection was silently
+        forgotten the next time the server started.
+        """
+        section = self.app_config.get("engines", {})
+        if not isinstance(section, dict):
+            section = {}
+        chosen = section.get("agy_model")
+        if chosen is None or chosen == self.INHERIT_ACCOUNT_MODEL:
+            return None
+        if not isinstance(chosen, str) or not chosen.strip():
+            logger.warning(
+                "app.json engines.agy_model is %r, which is not a model id "
+                "or %r. Letting agy choose.",
+                chosen,
+                self.INHERIT_ACCOUNT_MODEL,
+            )
+            return None
+        return chosen
+
+    def set_engine_option(self, key: str, value: Any) -> None:
+        """Write one key under ``app.json``'s ``engines`` section.
+
+        A read-modify-write of the file rather than of :attr:`app_config`,
+        because that cache may be stale against an edit the user made in
+        the Settings editor, and writing from it would silently revert
+        them. Whole-file rename for the same reason
+        :func:`aic_dc.agy.registry.claim` uses one: a reader can arrive at
+        any instant and a half-written config parses as no config.
+
+        The in-memory cache is invalidated rather than patched, so the next
+        read goes through the same accessors and defaults as a fresh start.
+        """
+        path = self.config_dir / "app.json"
+        try:
+            current = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(current, dict):
+                current = {}
+        except (OSError, ValueError):
+            current = {}
+        section = current.get("engines")
+        if not isinstance(section, dict):
+            section = {}
+        section[key] = value
+        current["engines"] = section
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(current, indent=2) + "\n", encoding="utf-8")
+        tmp.replace(path)
+        self._app_config = None
 
     @property
     def history_config(self) -> dict[str, Any]:

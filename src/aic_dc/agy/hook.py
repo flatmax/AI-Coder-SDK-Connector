@@ -42,6 +42,15 @@ themselves. Those must pass through untouched and unstalled.
 ``conversationId``; this module's job is to act on the answer and to fail
 in the right direction when it cannot get one.
 
+**Ownership is not only "is there an entry".** Since 2026-09-10 the
+registry also asks whether anything is left alive behind one, so a file a
+killed host abandoned answers *not ours* rather than denying against a
+socket nobody is holding — while an entry whose ``agy`` outlived its host
+still denies, because that is an orphaned agent and not a stale file. The
+reasoning is in :mod:`~aic_dc.agy.registry` § *A claim outlives the process
+that made it*; nothing in this module changes for it, which is the point of
+having asked the registry rather than the socket.
+
 Governing spec: ``specs5/plan-ag/`` — AG-14, AG-5, and
 ``risks.md`` AG-R-12, whose mitigations are requirements of this file:
 a ``"*"`` matcher, never exit 0 silently, and a tripwire that asserts the
@@ -57,7 +66,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from aic_dc.agy import registry
+from aic_dc.agy import registry, scope
 
 logger = logging.getLogger(__name__)
 
@@ -118,6 +127,20 @@ def decide(
 
     conversation_id = payload.get("conversationId")
     entry = registry.lookup(conversation_id, config_dir=config_dir)
+    if entry is None:
+        # AG-R-14. Nobody registered this conversation — which is the
+        # ordinary case for a stranger's session, and *also* what a
+        # subagent, a grandchild, and a child whose announcement has not
+        # arrived yet all look like. The two are told apart by asking the
+        # kernel rather than the registry: a call from inside a scope this
+        # host created is ours no matter who never wrote its id down.
+        #
+        # Second, not first, because it is the fallback path: a machine
+        # without systemd has no scopes and every call takes the branch
+        # above, exactly as it did before this existed.
+        entry = registry.scope_owner(
+            scope.current_cgroup(), config_dir=config_dir
+        )
     if entry is None:
         # Not ours. The overwhelmingly common case, because this hook is
         # global: the user's own `agy` sessions land here and must leave

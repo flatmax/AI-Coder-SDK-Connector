@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
 import textwrap
 from pathlib import Path
@@ -133,6 +134,29 @@ class TestTheHandshake:
         claimed = asyncio.run(go())
         assert claimed is not None
         assert claimed["socket"].endswith("g.sock")
+
+    def test_the_claim_records_the_agy_process_that_was_spawned(self, wired):
+        """What makes the claim outlive this host without lying about it.
+
+        A registry entry is a file, and a killed host leaves it behind. The
+        host pid alone cannot say whether anything is still running, because
+        ``agy`` is our *child* and a child survives a killed parent — so the
+        child's pid goes in the entry too, and only both being gone makes it
+        a corpse (AG-R-14 residue 3).
+        """
+        session, _server, config_dir, _events = wired
+
+        async def go():
+            await session.start()
+            claimed = registry.lookup(CONV, config_dir=config_dir)
+            spawned = session._proc.pid
+            await session.close()
+            return claimed, spawned
+
+        claimed, spawned = asyncio.run(go())
+        assert claimed["agy_pid"] == spawned
+        assert claimed["pid"] == os.getpid()
+        assert registry.entry_is_live(claimed) is True
 
     def test_close_releases_the_claim(self, wired):
         session, _server, config_dir, _events = wired
@@ -430,3 +454,111 @@ class TestTheAgentIsInTheRepository:
 
         source = inspect.getsource(mod.AgySession.start)
         assert "cwd=str(self._repo_root)" in source
+
+
+class TestASubagentIsGatedToo:
+    """The containment fix of 2026-09-09.
+
+    ``agy`` runs under ``--dangerously-skip-permissions``, so this host's
+    gate is the only thing between the model and the tree — and the hook
+    routes to it by conversation id, passing through everything unclaimed.
+    A subagent gets a conversation of its own, so until the session
+    claimed it too, a delegation was a route around the dialog: the user
+    approved the *spawn*, and every call the subagent then made ran
+    unreviewed. ``scripts/probe_agy_subagent_gate.py`` measured it — the
+    subagent's edit landed with the gate asked about nothing but
+    ``invoke_subagent``.
+    """
+
+    @staticmethod
+    def _frame(state, child="child-abc"):
+        return {
+            "event": "step_update",
+            "step_update": {
+                "conversation_id": "parent-1",
+                "step_index": 2,
+                "state": state,
+                "step_type": "subagent",
+                "tool_name": "invoke_subagent",
+                "subagent_info": {
+                    "subagents": [{"role": "Reader", "conversation_id": child}]
+                },
+            },
+        }
+
+    def test_an_announced_subagent_is_claimed(self, wired):
+        session, server, config_dir, _events = wired
+        session._gate_subagents(self._frame("ACTIVE"))
+        assert registry.lookup("child-abc", config_dir=config_dir) is not None
+
+    def test_a_done_announcement_claims_rather_than_releases(self, wired):
+        """`DONE` on a subagent step is *the launch*, not the subagent.
+
+        The first cut read it the obvious way and the live re-run failed
+        identically to the unfixed code: measured at
+        `duration_seconds: 0.10` while the subagent's work ran for six
+        more seconds. Some runs announce only `DONE`, so treating it as
+        settled released a claim that had never been made.
+        """
+        session, server, config_dir, _events = wired
+        session._gate_subagents(self._frame("DONE"))
+        assert registry.lookup("child-abc", config_dir=config_dir) is not None
+
+    def test_a_subagent_stays_claimed_across_both_announcements(self, wired):
+        session, server, config_dir, _events = wired
+        session._gate_subagents(self._frame("ACTIVE"))
+        session._gate_subagents(self._frame("DONE"))
+        assert registry.lookup("child-abc", config_dir=config_dir) is not None
+
+    def test_every_subagent_in_one_step_is_claimed(self, wired):
+        session, server, config_dir, _events = wired
+        frame = self._frame("ACTIVE")
+        frame["step_update"]["subagent_info"]["subagents"].append(
+            {"role": "Second", "conversation_id": "child-two"}
+        )
+        session._gate_subagents(frame)
+        assert registry.lookup("child-abc", config_dir=config_dir) is not None
+        assert registry.lookup("child-two", config_dir=config_dir) is not None
+
+    def test_other_step_types_claim_nothing(self, wired):
+        session, _server, config_dir, _events = wired
+        session._gate_subagents(
+            {
+                "event": "step_update",
+                "step_update": {
+                    "step_index": 1,
+                    "state": "ACTIVE",
+                    "step_type": "tool",
+                    "tool_name": "view_file",
+                },
+            }
+        )
+        assert registry.lookup("child-abc", config_dir=config_dir) is None
+
+    def test_a_claim_that_fails_does_not_kill_the_turn(self, wired, monkeypatch):
+        """It is logged instead — and loudly, because the consequence is a
+        subagent running ungated rather than a missing tab."""
+        session, server, _config_dir, _events = wired
+
+        def boom(_conversation_id):
+            raise OSError("read-only registry")
+
+        monkeypatch.setattr(server, "claim", boom)
+        session._gate_subagents(self._frame("ACTIVE"))
+
+    def test_the_claim_happens_before_the_frame_is_yielded(self):
+        """The window is the fix's whole residue, so its size is pinned.
+
+        `agy` spawns the child before we read the frame announcing it, so
+        a tool call made in that window still passes through. Reading the
+        frame and claiming in the same breath is what keeps the window a
+        frame read rather than the subagent's whole life — and a refactor
+        that moved the claim into the translator, or after the yield,
+        would widen it silently.
+        """
+        import inspect
+
+        from aic_dc.agy import session as mod
+
+        source = inspect.getsource(mod.AgySession.stream_frames)
+        assert source.index("_gate_subagents") < source.index("yield frame")

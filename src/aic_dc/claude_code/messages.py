@@ -261,6 +261,18 @@ class TurnTranslator:
         can report a result arriving before its own request, while a card's
         ``invoked_at`` has to be a time a reader can compare against the
         clock on their wall. Neither is derivable from the other.
+    non_subagent_tasks:
+        The latch backing :meth:`_is_not_a_subagent`, shared across the
+        session's turns. **This translator knows one turn; a backgrounded
+        `Bash` command does not.** Only ``TaskStartedMessage`` carries
+        ``task_type``, so the latch is the only thing that recognises the
+        rest of a bash task's events — and the command outlives the turn
+        that launched it, so its ``task_notification`` lands on a *later*
+        turn's translator. Left turn-local, that translator has an empty
+        latch and an untyped notification, and the shell command becomes a
+        subagent row and a tab. Passing the session's set is what makes the
+        latch outlive the turn. Defaults to a private set, so a translator
+        built on its own (every test, any one-turn use) behaves as before.
     """
 
     def __init__(
@@ -269,6 +281,7 @@ class TurnTranslator:
         *,
         clock: Callable[[], float] = time.monotonic,
         wall_clock: Callable[[], float] = time.time,
+        non_subagent_tasks: set[str] | None = None,
     ) -> None:
         self.request_id = request_id
         self._clock = clock
@@ -299,8 +312,13 @@ class TurnTranslator:
         # (specs5/5-webapp/subagent-browser.md § Refresh and Reconnect).
         self._subagents: dict[str, dict[str, Any]] = {}
         # task keys of tasks that are not subagents, latched on the one message
-        # that says so. See _NON_SUBAGENT_TASK_TYPES.
-        self._non_subagent_tasks: set[str] = set()
+        # that says so. Session-scoped when the caller supplies it, because a
+        # backgrounded shell command finishes in a turn later than the one that
+        # started it — see the class docstring. One short id per slow command,
+        # so it costs nothing to keep for the run.
+        self._non_subagent_tasks: set[str] = (
+            set() if non_subagent_tasks is None else non_subagent_tasks
+        )
         # tool_use_ids a permission dialog was shown for. Written by
         # note_permission_prompt, read when the card is built.
         self._gated: set[str] = set()
@@ -730,6 +748,10 @@ class TurnTranslator:
         a bash task's `progress` and `notification` events say nothing about
         what they belong to, and a row created by one of those would be a
         subagent tab for half a shell command.
+
+        The memory is the *session's*, not this turn's, for the reason in the
+        class docstring: a backgrounded command's `notification` arrives after
+        the turn that started it has ended.
         """
         key = self._task_key(payload)
         if payload.get("task_type") in _NON_SUBAGENT_TASK_TYPES:

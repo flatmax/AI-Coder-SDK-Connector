@@ -53,12 +53,14 @@ Governing spec: ``specs5/plan-ag/`` — AG-14, AG-5; and
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import logging
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
-from aic_dc.agy import registry
+from aic_dc.agy import registry, scope
 from aic_dc.antigravity.permissions import (
     AntigravityPermissionGate,
     denormalise_args,
@@ -77,6 +79,46 @@ UNREADABLE = {
         "by the user."
     ),
 }
+
+
+@dataclasses.dataclass(frozen=True)
+class StaticPolicy:
+    """A fixed answer for every tool call, with no dialog in it.
+
+    The consultant's posture (AG-16), and it is a *capability
+    restriction* rather than a permission decision — the same distinction
+    :mod:`aic_dc.antigravity.consultant` draws for the SDK transport,
+    where a one-shot consultation runs with a static allowlist while the
+    engine runs with the dialog.
+
+    Two reasons a consultation cannot use the dialog, and the second is
+    the one that makes this structural rather than a preference:
+
+    - **It was already answered.** A consultation only happens inside a
+      ``mcp__aic-dc-antigravity__*`` tool call, which reached the dialog by
+      the ordinary path before any of this ran. Asking again, per tool the
+      consultant's own agent reaches for, would put a second permission
+      question in front of a user who has already said yes to the thing
+      they can see.
+    - **Nobody is watching the right window.** The Claude turn that asked
+      is blocked on the tool result, so a dialog raised here interrupts a
+      turn to ask about a call the user never made and cannot evaluate.
+
+    ``allowed`` is therefore the whole policy: a name in it runs, anything
+    else is denied with ``reason``, and the reason is prose the model
+    reads — it is what steers a refused agent into answering rather than
+    into looking for another route (AG-R-11's mechanism, used positively).
+    """
+
+    #: Tool names, in ``agy``'s own spelling, that may run without asking.
+    allowed: frozenset[str]
+    #: What the model is told when it reaches for anything else.
+    reason: str
+
+    @classmethod
+    def of(cls, allowed: Iterable[str], reason: str) -> StaticPolicy:
+        """Build one from any iterable of names."""
+        return cls(allowed=frozenset(allowed), reason=reason)
 
 
 class _AgyContext:
@@ -118,19 +160,113 @@ class AgyGateServer:
         self,
         socket_path: Path | str,
         *,
-        gate: AntigravityPermissionGate,
+        gate: AntigravityPermissionGate | None = None,
         config_dir: Path | str | None = None,
+        policy: StaticPolicy | None = None,
     ) -> None:
+        if (gate is None) == (policy is None):
+            # Refused at construction rather than at the first tool call.
+            # A gate server with neither would answer every call by
+            # raising inside `_handle`, which fails closed — but a session
+            # whose every tool is refused for an internal reason is a
+            # defect that reads as an unhelpful model, and one with *both*
+            # would have two answers to one question.
+            raise ValueError(
+                "an agy gate server needs exactly one of `gate` (the "
+                "dialog) or `policy` (a static allowlist); it was given "
+                + ("both" if gate is not None else "neither")
+            )
         self._socket_path = Path(socket_path)
         self._gate = gate
+        self._policy = policy
         self._config_dir = config_dir
         self._server: Any = None
-        self._claimed: str | None = None
+        # A set, not one id: this host owns its session's conversation and
+        # its subagents' while they run. See `claim`.
+        self._claimed: set[str] = set()
         self._refusal: str | None = None
+        #: Conversations stopped one at a time — ⏹ on a subagent's row,
+        #: where `_refusal` is ⏹ on the whole turn. Keyed by conversation
+        #: id, valued by the reason the agent reads. Cleared by `resume`
+        #: with its turn-wide sibling.
+        self._refused_conversations: dict[str, str] = {}
+        #: The systemd scope `agy` will be launched into, or None where the
+        #: platform has none. Named at construction rather than at `start`
+        #: so `AgySession` can read it while assembling argv, and held here
+        #: rather than on the session because the registry entry it backs
+        #: maps the unit to *this server's socket* — the same pairing
+        #: `claim` publishes, for the calls a claim cannot cover in time.
+        self._scope_unit: str | None = (
+            scope.unit_name() if scope.available() else None
+        )
+        #: The `agy` pid already written onto the scope entry, so the rewrite
+        #: `claim` does happens once per session rather than once per
+        #: subagent. `None` until the child exists — the scope claim is
+        #: published before it does.
+        self._scope_agy_pid: int | None = None
+
+    @property
+    def asks(self) -> bool:
+        """Whether this gate can put a call to the user.
+
+        ``False`` for a consultation's static allowlist. Read where the
+        difference matters rather than inferred from the presence of a
+        broker, so a caller cannot be wrong about which posture it built.
+        """
+        return self._gate is not None
 
     @property
     def socket_path(self) -> Path:
         return self._socket_path
+
+    @property
+    def scope_unit(self) -> str | None:
+        """The systemd scope to launch ``agy`` into, or ``None``.
+
+        Read by :class:`~aic_dc.agy.session.AgySession` when it assembles
+        argv. ``None`` is an ordinary answer, not a failure: it is every
+        platform without a systemd user manager, and it means the session
+        runs exactly as it did before AG-R-14 — routed by conversation
+        claims, with that row's residues intact.
+        """
+        return self._scope_unit
+
+    def refuse_conversation(self, conversation_id: str, reason: str) -> None:
+        """Refuse one conversation's calls, leaving the rest of the turn.
+
+        This is ⏹ **on a single subagent**, and it is the same starvation
+        :meth:`refuse_all` performs, aimed. It can be aimed because the
+        hook payload names the conversation every call comes from and this
+        host claims a subagent's conversation as its announcement arrives
+        (AG-R-14) — so by the time a user can see a row to press stop on,
+        the id on that row is one the gate already recognises.
+
+        **Three limits, and all three were known before this was written**
+        (``src/aic_dc/capabilities.py``, ``subagent_stop``):
+
+        - A subagent producing only **prose** never asks for a tool, so
+          there is nothing to refuse and it runs to its end. The same limit
+          :meth:`refuse_all` has for a whole turn, one level down.
+        - A subagent's **own** subagent has a conversation id of its own,
+          which an id-scoped refusal does not match. It is caught here
+          anyway when its parent's next call is refused and the parent
+          winds down, but not immediately, and not if it never reports
+          back.
+        - What ``agy`` then *reports* for the starved subagent is the
+          stream's business, not this method's: it returns when the
+          refusal is recorded, which is a fact about the gate rather than
+          about the agent.
+
+        Cleared by :meth:`resume` with the turn-wide refusal, for the same
+        reason — a stop applies to the turn it was pressed during.
+        """
+        if not conversation_id:
+            return
+        self._refused_conversations[str(conversation_id)] = reason
+
+    def is_refusing(self, conversation_id: str) -> bool:
+        """Whether this conversation has been stopped. For the caller's report."""
+        return str(conversation_id) in self._refused_conversations
 
     def refuse_all(self, reason: str) -> None:
         """Refuse every subsequent call without asking. This is ⏹.
@@ -156,8 +292,16 @@ class AgyGateServer:
         the next one would make ⏹ a mode rather than an action, and the
         user would find their next turn refusing everything for no visible
         reason.
+
+        The per-conversation refusals go with it, and that matters more
+        than it looks: a subagent's conversation id is `agy`'s own, so a
+        refusal left standing would still be aimed at it if the user
+        resumed that conversation later — the interception
+        `registry.release` exists to prevent, arriving through a different
+        door.
         """
         self._refusal = None
+        self._refused_conversations.clear()
 
     async def start(self) -> None:
         """Listen. Safe to call once; a second call is a no-op."""
@@ -168,22 +312,93 @@ class AgyGateServer:
         # the failure is at session start where it reads as "the engine
         # will not run" rather than as stale state.
         self._socket_path.unlink(missing_ok=True)
+        # The registry entries that same killed process left behind are the
+        # same problem one layer up, and worth sweeping from here for the
+        # same reason: this is the moment a host exists again to do it, and
+        # a corpse entry costs the *user's* own sessions rather than ours
+        # (`registry.owns_anything`). Only corpses go — a second host on
+        # this machine has live entries in the same directory.
+        registry.reap_stale(self._config_dir)
         self._server = await asyncio.start_unix_server(
             self._handle, path=str(self._socket_path)
         )
+        # AG-R-14. Published *before* `agy` is launched, which is what makes
+        # it a fix rather than a narrower race: a conversation claim can be
+        # late because the conversation exists before we are told its id,
+        # and a scope claim cannot, because the scope does not exist until
+        # the session creates it. Everything the kernel later puts inside —
+        # a subagent, a grandchild, a shell command's own child — is
+        # covered by an entry that was already on disk.
+        if self._scope_unit:
+            registry.claim_scope(
+                self._scope_unit, self._socket_path, config_dir=self._config_dir
+            )
 
-    def claim(self, conversation_id: str) -> None:
+    def claim(self, conversation_id: str, *, agy_pid: int | None = None) -> None:
         """Take ownership of a conversation, so the hook stops passing it through.
 
         Called between ``init`` and the first prompt, which is the only
         window there is: the id is unknown before ``init``, and a tool call
         cannot precede the first prompt. Claiming late would wave the first
         tool call through as somebody else's session.
+
+        **More than one, since 2026-09-09.** A session owns its own
+        conversation and, while they run, its subagents' — each of which
+        ``agy`` gives a conversation id of its own. One claim per host was
+        not a simplification but a hole: the hook passes through every
+        conversation nobody has claimed, so a subagent's every tool call
+        went ungated past a dialog the user had approved only the *spawn*
+        through. Measured by ``scripts/probe_agy_subagent_gate.py``.
+
+        ``agy_pid`` is the process this conversation runs in, recorded so a
+        later reader can tell an entry this host abandoned from one whose
+        agent is still running without it. The caller supplies it because
+        this class never spawns anything — see
+        :func:`aic_dc.agy.registry.entry_is_live`.
+
+        **It is also where the scope entry gets its second pid**, and this is
+        the only place it can: :meth:`start` publishes that entry before the
+        child exists, precisely so nothing can beat it onto disk, which
+        leaves it naming a container and no process. Written once per
+        session — every subagent carries the same pid, because they all run
+        inside this session's one ``agy``.
         """
+        if not conversation_id:
+            return
         registry.claim(
-            conversation_id, self._socket_path, config_dir=self._config_dir
+            conversation_id,
+            self._socket_path,
+            config_dir=self._config_dir,
+            agy_pid=agy_pid,
         )
-        self._claimed = conversation_id
+        self._claimed.add(conversation_id)
+        if (
+            self._scope_unit
+            and agy_pid is not None
+            and agy_pid != self._scope_agy_pid
+        ):
+            registry.claim_scope(
+                self._scope_unit,
+                self._socket_path,
+                config_dir=self._config_dir,
+                agy_pid=agy_pid,
+            )
+            self._scope_agy_pid = agy_pid
+
+    def release(self, conversation_id: str) -> None:
+        """Give up one conversation, leaving the rest claimed.
+
+        For a subagent that has finished. Releasing matters as much as
+        claiming: a registry entry is a file that outlives the process, so
+        a claim left behind would make this host intercept a *later*
+        session of the user's own that happened to resume that
+        conversation — the isolation property ``probe_agy_isolation.py``
+        exists to hold.
+        """
+        if conversation_id not in self._claimed:
+            return
+        registry.release(conversation_id, config_dir=self._config_dir)
+        self._claimed.discard(conversation_id)
 
     async def stop(self) -> None:
         """Release the conversation, then close. Never raises.
@@ -195,9 +410,18 @@ class AgyGateServer:
         unowned, which is what they are once this host has let go.
         """
         self._refusal = None
-        if self._claimed:
-            registry.release(self._claimed, config_dir=self._config_dir)
-            self._claimed = None
+        # Every claim, not just the session's own: a subagent still
+        # running at teardown has one too, and leaving it behind is the
+        # interception-after-the-fact this class's `release` warns about.
+        for conversation_id in sorted(self._claimed):
+            registry.release(conversation_id, config_dir=self._config_dir)
+        self._claimed.clear()
+        # And the scope, for the same reason and with more force: it is
+        # matched on a unit name rather than on an id `agy` generated, so a
+        # unit left behind would adopt any later process systemd happened
+        # to place in a scope of that name.
+        if self._scope_unit:
+            registry.release_scope(self._scope_unit, config_dir=self._config_dir)
         server, self._server = self._server, None
         if server is not None:
             server.close()
@@ -228,6 +452,33 @@ class AgyGateServer:
         if self._refusal is not None:
             # Stopped. Answered without a dialog: the user already said so.
             return {"decision": "deny", "reason": self._refusal}
+
+        # Stopped one subagent, rather than the turn. Checked *after* the
+        # turn-wide refusal because a turn-wide stop subsumes it, and
+        # before everything else for the same reason that one is: the user
+        # has answered this question already and re-asking it per call
+        # would be the opposite of cancelling.
+        aimed = self._refused_conversations.get(
+            str(payload.get("conversationId") or "")
+        )
+        if aimed is not None:
+            logger.info(
+                "Refusing %s: its conversation was stopped by the user", tool_name
+            )
+            return {"decision": "deny", "reason": aimed}
+
+        if self._policy is not None:
+            # A consultation (AG-16). Terminal on purpose: this does not
+            # fall through to `pre_verdict`, because that path exists to
+            # decide *which* calls reach the dialog and there is no dialog
+            # here. A read is denied as firmly as a write — the SDK
+            # consultant enables no tools at all for a second opinion, and
+            # this is the nearest posture `agy` allows, since its tool set
+            # is the binary's rather than ours to restrict.
+            if tool_name in self._policy.allowed:
+                return {"decision": "allow"}
+            logger.debug("Consultation gate refused %s", tool_name)
+            return {"decision": "deny", "reason": self._policy.reason}
 
         # The narrowing that keeps reads out of the dialog, shared with the
         # SDK transport rather than reimplemented. Calling the broker

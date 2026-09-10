@@ -1755,6 +1755,18 @@ turn, verified as a *difference* rather than a running total — while its two r
 ("nothing extra" and "cost unknown") are still unobserved on screen because no ordinary turn produces
 them. The detail and the reason are under *Live verification*, not buried as a caveat.
 
+**Both were observed on 2026-09-09**, which closes this exit criterion in full — the last clause of it had
+stood open for 23 days as [`../next.md`](../next.md) § D4.
+[`scripts/turn_cost_probe.py`](../../scripts/turn_cost_probe.py) provoked them in one session: a forwarded
+`/help` returns in 4ms with `num_turns: 0` and moves the total by nothing, so a **genuine** measured zero
+is a shape that needs a slash command rather than a prompt; and a `SIGKILL` on the CLI child six seconds
+into a stream produced the `unpriced` footer this phase wrote `_fail_turn` for. Two of the three rows in
+the table below are measured now, `reset` is unreachable from the app at all, and the figures are in
+[`../5-webapp/viewers-hud.md`](../5-webapp/viewers-hud.md) § *Three Of The Four Rows Are Measured Now*.
+**This phase's own two-turns-minimum rule is what made the run interpretable** — see the note under
+*Live verification* below, and note it took a *fourth* turn to prove the difference, because the first
+cannot.
+
 The phase divides on which half of it owed a correctness pass. The **context** numbers had already had
 theirs, in the interlude: three readers of one RPC, each deriving the arithmetic independently and each
 wrong on its own terms, collapsed into `context-usage.js`. The **cost** numbers turned out to owe one
@@ -1928,13 +1940,23 @@ The cost span carried `class=""` rather than `muted` and the tooltip "What this 
 session's cost, now $1.52 in total. An estimate the engine computes, not a billing statement." — the
 `known` branch of `turn-cost.js`, on screen.
 
-**What is still unobserved is the criterion's actual pair.** Both turns were `measured` with a difference
-above zero, so the *priced* rendering is verified and the two that the criterion's third clause names —
-"nothing extra" (`measured`, difference exactly 0) and "cost unknown" (`reset`, `unpriced`) — have never
-been on screen. They hold in 60 tests. Reaching them live needs a turn that spends nothing or one the
-engine never priced, which no ordinary turn produces; an immediate Stop is the cheapest candidate. **The
-clause is met for the case that occurs and unmet for the two that are hard to cause**, which is a more
-useful way to leave it than "verified".
+~~**What is still unobserved is the criterion's actual pair.**~~ **Both were observed on 2026-09-09, 23
+days later** — see the closing note at the head of this phase. Both turns here were `measured` with a
+difference above zero, so the *priced* rendering was verified and the two that the criterion's third clause
+names — "nothing extra" (`measured`, difference exactly 0) and "cost unknown" (`reset`, `unpriced`) — had
+never been on screen. They hold in 60 tests. Reaching them live needs a turn that spends nothing or one the
+engine never priced, which no ordinary turn produces; **an immediate Stop is the cheapest candidate**, and
+that guess was wrong in both directions. A zero-cost turn is not a stopped turn at all but a *forwarded
+slash command* — `/help` reaches the CLI, returns in 4ms with `num_turns: 0`, and moves nothing. And
+"cost unknown" needed the opposite of an immediate stop: a `SIGKILL` on the CLI child six seconds *into* a
+stream, so the turn fails late, which is the case the tooltip is written for. **The clause was met for the
+case that occurs and unmet for the two that are hard to cause**, which was a more useful way to leave it
+than "verified" — and it is what let the pair be picked up as a named item rather than rediscovered.
+
+**Turn 1 versus turn 2 above is the rule the 2026-09-09 run was built around**, and it needed a *fourth*
+turn rather than a second: turns 2 and 3 were the zero-cost `/help`s, so the difference had to be proved by
+turn 4 — `0.0126215` against a session total that went `0.0623465 → 0.074968`. A zero on turn 2 is
+consistent with both a correct difference and a broken one.
 
 A method note worth keeping, because it cost a re-read: the probe that classified the second chip
 computed `known` by testing the row's HTML for `class="muted"`, and the *bits* span ("· 20 tool calls")
@@ -2213,6 +2235,18 @@ template had put a CSS class name in backticks, which terminates the template li
   re-runs it on a CLI upgrade, and the thing it measures — whether the tool's prompt documents the field —
   is exactly the kind of detail a version bump moves. Running `--neutral --without` after an upgrade is a
   judgement call, not a check.
+
+  **Closed on 2026-09-08, and this bullet named the wrong obstacle.** It read as "the A/B needs
+  automating", which is why it sat for two weeks: an A/B asks a model to fill an optional field, so a null
+  arm is inconclusive and no amount of scheduling makes it a gate. But *"whether the tool's prompt
+  documents the field"* is not behaviour — the prompt block is a string literal in the CLI binary, and so
+  are the other three facts underneath it. `claude_code/cli_surface.py` reads them with `mmap` and
+  `test_claude_code_cli_surface.py` fails by name when a release moves one, offline and on every run. The
+  bytes also confirmed the recorded finding word for word: the schema's `preview` field is unconditional
+  and its description says *"See the tool description for the expected content format"*, which is exactly
+  the division § *Interlude* argued for. The script keeps the two halves no static read can reach — that
+  the block reaches the model, and that the CLI accepts the answer — and `--ab` runs both arms in one
+  process with the expected outcome (no difference) stated before it starts.
 - **`annotations` on a question answered with prose alone carries the note and no preview.** Correct by the
   rule above, but it means a user who typed an answer *and* attached a note sends two free-text strings the
   model must tell apart by key. Nothing tests how well it does.
@@ -3256,5 +3290,75 @@ open-work note about retiring it — the map has since been retired.
 the alternative to the drain that item 3(a) built on. Left open deliberately; the agreement was to watch
 for A's residual mis-attribution first and take B only if it shows up. Nothing has shown up.
 
+> **2026-09-08:** something has. The interlude below is A's residual mis-attribution arriving exactly
+> where it was predicted — a task's trailing message read by a turn that is not its own — and it did not
+> need per-translator routing to fix, because the state the later turn was missing was one *fact* about
+> the task rather than its whole translator. Option B stays on the watch-list, one observation heavier.
+
 **Not carried over, deliberately:** the fix list's test-baseline totals. A pass count in a rolling
 document is stale by the next commit — run `pytest tests/ -q` and `npx vitest run src/` in `webapp/`.
+
+## Interlude — the shell command that came back as a subagent (2026-09-08)
+
+Found by a user pointing at two screenshots: a card headed **Subagent**, stuck to the bottom of the
+chat, reading *Background command "Run the phase 10 agy consultant probe" completed (exit code 0)*; and
+the tab beside it, empty but for `🤖 bo5c69b73`. Two complaints — "subagents are pinned to the bottom of
+the chat, I can switch to the tab instead" and "the subagent's tab is empty?" — and one bug under both.
+
+### The latch was scoped to the wrong lifetime
+
+`local_bash` tasks have been filtered since 2026-08-17 (§ *The live run, and the sixteen tabs nobody
+asked for*), and that filter has always latched the task id, because only `TaskStartedMessage` carries
+`task_type`. The latch lived on the `TurnTranslator` — **one instance per turn** — and a backgrounded
+command does not respect that boundary:
+
+- `run_in_background` returns immediately, so the task never enters `tasks_in_flight`; `DEFERRING_TASK_TYPES` excludes `local_bash` deliberately, and the engine does not hold the run open for a shell command.
+- The turn ends. Minutes later the command exits and the CLI sends `task_notification` on whatever turn is current.
+- That translator was built after the `started` went by. Empty latch, `task_type=None` — the field does not exist on `TaskNotificationMessage` at all — and the shell command is a subagent.
+
+Reproduced in eleven lines against the real SDK dataclasses before anything was changed, which is what
+made the rest of the diagnosis cheap: the row came out carrying `description: ''`, `tool_use_id:
+'toolu_bash_1'` and the exact summary string from the screenshot.
+
+### Both complaints are that one row
+
+Neither symptom was a design question, which is the part worth recording — the user's two asks read as
+requests to change how subagents are presented, and the answer to both was that this was not a subagent.
+
+- **"Pinned to the bottom."** The row's `tool_use_id` names a `Bash` card in a turn that had already ended, so no block in the current turn matches it, and `groupBlocksByScope` sends an unmatched row to the end of its list. On a streaming turn the end of the list is the bottom of the feed, re-rendered below each new block as the turn grows — a row that appears pinned there because it is being sorted there, over and over.
+- **"The tab is empty."** A shell command produces no blocks carrying an `agent_id`, so there is nothing to mirror. This is the same measurement the original filter was written from (`local_agent/has-blocks: 4, local_bash/empty: 17`), reappearing one task at a time instead of sixteen at once — which is why it read as a puzzle rather than as the known bug.
+- **The bare id** in both places is the third face of it: `description` is empty on a `notification`, so the row falls back to the noun "Subagent" and the tab to `bo5c69b73`.
+
+Fixed by giving `EngineSession` the set and passing it to every translator it builds. Two ids, one line
+of wiring, and the default stays a private set so a translator built alone — every test, any one-turn
+use — behaves as before.
+
+### The tab fallback, which is the ask that survived the bug
+
+The user's second question was worth answering on its own: a real background *subagent* has the same
+cross-turn shape, and its later blocks are translated against another turn, so its tab is empty for a
+reason no filter fixes. Asked which way to go, they chose reading the transcript.
+
+So a subagent tab with an empty feed now reads `get_subagent_transcript(agent_id)` — the historical
+tabs' read, on a live tab — gated four ways so it never displaces mirroring: settled only (a live
+subagent's blocks may still be coming, and § Empty States already says what an empty live tab shows),
+empty only, once per tab, and on the user's gesture rather than eagerly. The limit is stated rather than
+worked around: a row that only ever reported a `task_id` cannot be read, and the panel does not match a
+transcript by description to find one.
+
+### Tests
+
+Three in `test_claude_code_messages.py` — the cross-turn leak, a late *subagent* notification as the
+control that the shared latch drops bash tasks and not delegations, and the default-private-set case.
+One in `test_claude_code_session.py` pinning the wiring end to end, sitting next to
+`test_a_bash_task_is_not_a_reason_to_keep_reading`, which is the test that explains why the notification
+lands in a later turn at all. Nine in a new `subagent-feed-fallback.test.js` for the tab read, most of
+them about when it declines to fire.
+
+Both suites green: **4,472 webapp tests across 107 files**, **4,612 pytest**.
+
+### Deliberately not built
+
+- **Persisting the latch.** A server restarted mid-command has nothing to recognise the notification by, and the phantom returns once. Writing task ids to the session directory to suppress a row costs more than the row does.
+- **Guessing an `agent_id`.** `list_subagent_transcripts` would let a tab find a transcript by description. That is inventing a tab's contents, and the invariant against inventing tabs was written for the same reason.
+- **Changing the row's placement rule.** Rows with no matching card still land at the end. The rule is right — a running subagent the user cannot see is worse than one in the wrong place — and it was only ever reached by a task that should not have had a row.

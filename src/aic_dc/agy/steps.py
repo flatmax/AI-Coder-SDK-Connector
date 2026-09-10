@@ -49,6 +49,8 @@ Governing spec: ``specs5/plan-ag/`` — AG-14, AG-R-4;
 from __future__ import annotations
 
 import logging
+import shutil
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -67,12 +69,48 @@ TERMINAL_STATES = frozenset({"DONE", "ERROR", "CANCELED"})
 #: the vocabulary was documented as three members and turned out to have
 #: at least four.
 KNOWN_STEP_TYPES = frozenset(
-    {"user_input", "agent_response", "tool", "system_message"}
+    {"user_input", "agent_response", "tool", "system_message", "subagent"}
 )
+
+#: ``state`` → the status word the browser's LED table knows.
+#:
+#: Not free prose: ``subagent-tabs.js``'s ``_TERMINAL_LED`` maps
+#: ``completed`` to green, ``failed`` to red and ``stopped``/``killed`` to
+#: amber, and anything it does not recognise falls through to amber. So a
+#: cancelled subagent is reported as ``stopped`` — which is both what it
+#: is and the word that lands on the colour meant for it, rather than
+#: arriving at the same colour by not being understood.
+SUBAGENT_STATUS = {
+    "DONE": "completed",
+    "ERROR": "failed",
+    "CANCELED": "stopped",
+}
 
 
 def _iso_utc() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def subagent_entries(step: Any) -> list[dict[str, Any]]:
+    """The subagents one ``subagent`` step announces, in order.
+
+    Module level and shared, because **two callers need this and they need
+    it for different reasons**: the pump turns each entry into a row, and
+    :class:`~aic_dc.agy.session.AgySession` claims each entry's
+    conversation so the subagent's tool calls reach the permission gate.
+    A second copy of this parse is how one of them would quietly stop
+    seeing a subagent the other could see — and the one that stops seeing
+    is a containment hole rather than a missing tab.
+    """
+    if not isinstance(step, dict):
+        return []
+    info = step.get("subagent_info")
+    if not isinstance(info, dict):
+        return []
+    entries = info.get("subagents")
+    if not isinstance(entries, list):
+        return []
+    return [entry for entry in entries if isinstance(entry, dict)]
 
 
 def unwrap(frame: Any, event: str) -> dict[str, Any] | None:
@@ -95,8 +133,60 @@ class AgyTranslator:
     wants the running total. Everything else could be a function.
     """
 
-    def __init__(self, request_id: str) -> None:
+    def __init__(
+        self,
+        request_id: str,
+        *,
+        agent_id: str | None = None,
+        repo_root: Path | None = None,
+        conversation_id: str | None = None,
+    ) -> None:
         self.request_id = request_id
+        # Both are needed to collect a generated image, and neither is in
+        # the stream: `generate_image` names no path (see `BRAIN_DIR`), so
+        # the destination is this repository and the source is found under
+        # the conversation's own directory. Supplied by the service, which
+        # has the session, rather than scraped from frames — the engine's
+        # `init` frame is consumed before this translator exists.
+        #
+        # Left unset by the consultant, which builds a translator of its
+        # own and collects after the turn from the whole frame list. That
+        # is not a second implementation of this: it locates with the same
+        # function, and the two differ only in that one of them may fall
+        # back to the newest file in the directory.
+        self._repo_root = Path(repo_root).resolve() if repo_root else None
+        self._conversation_id = conversation_id or ""
+        # A file older than the turn belongs to an earlier turn of the
+        # same conversation. See `locate_generated_image`.
+        self._started_at = time.time()
+        # When set, every block and card this translator produces is
+        # attributed to that agent rather than to the main thread — which
+        # is how a consultation on this transport gets its own tab
+        # (AG-13, reached over `agy` by AG-16). The SDK translator has
+        # carried this since the consultation tab was built; this one was
+        # written for the engine, where there is only ever the main
+        # thread, and hardcoded `None` in the four places below.
+        #
+        # There is no per-step scope to derive here, unlike the SDK
+        # translator's `_scope`: `agy`'s stream carries no trajectory or
+        # depth field at all, so a nested trajectory is invisible to this
+        # pump and the whole turn belongs to one agent. That is why a
+        # subagent's *work* is not read out of this stream at all — it is
+        # read off disk from the conversation `agy` writes for the
+        # subagent, by `agy/subagents.py`, which is what makes the
+        # `subagent_transcripts` surface supported here. What this pump
+        # contributes is the announcement below, and nothing more.
+        self._agent_id = agent_id or None
+        # Every subagent this turn announced, by its own conversation id.
+        # Held rather than emitted and forgotten because the tab's
+        # *content* is not in this stream: `log_uri` is reported once, in
+        # the announcement, and is the only route to what the subagent
+        # actually did.
+        self._subagents: dict[str, dict[str, Any]] = {}
+        #: Subagents the user pressed ⏹ on, by conversation id. See
+        #: `mark_stopped` — `agy` reports a starved subagent as DONE, so
+        #: the terminal word for these is ours rather than the stream's.
+        self._stopped: set[str] = set()
         self._text: dict[int, str] = {}
         self._seq: dict[int, int] = {}
         self._tools: dict[int, dict[str, Any]] = {}
@@ -166,6 +256,8 @@ class AgyTranslator:
             return self._agent_response(step, index, state)
         if step_type == "tool":
             return self._tool(step, index, state)
+        if step_type == "subagent":
+            return self._subagent(step, index, state)
         if step_type == "user_input":
             # Our own prompt, echoed. The browser already rendered it
             # optimistically when the user pressed send.
@@ -220,10 +312,144 @@ class AgyTranslator:
                     "seq": self._seq[index],
                     "content": self._text[index],
                     "done": state in TERMINAL_STATES,
-                    "agent_id": None,
+                    "agent_id": self._agent_id,
                 },
             )
         ]
+
+    def mark_stopped(self, agent_id: str) -> None:
+        """Record that the *user* stopped this subagent.
+
+        Measured 2026-09-10 by ``scripts/probe_agy_subagent_stop.py``: a
+        subagent starved by an aimed refusal is reported by ``agy`` as
+        **DONE**, not ``CANCELED``. Which is defensible from the harness's
+        side — the step did finish, once the agent read the refusal and
+        wound down — and is the wrong thing to put on a row, because
+        ``DONE`` maps to ``completed`` and a green LED over work the user
+        stopped.
+
+        So the status is overridden here rather than inferred from the
+        stream. This host knows something the stream does not report: that
+        a human pressed ⏹ on this conversation. ``stopped`` is the word
+        ``subagent-tabs.js``'s LED table maps to amber, and it is what
+        happened.
+
+        Not a guess about the agent's *behaviour* — a subagent producing
+        only prose is never refused anything and finishes its work
+        normally, and this will still label it stopped. That is the honest
+        reading of the row all the same: it reports what the user did to
+        it, and the transcript beside it reports what it managed to do.
+        """
+        if agent_id:
+            self._stopped.add(str(agent_id))
+
+    @property
+    def subagents(self) -> frozenset[str]:
+        """Every subagent conversation id this turn has announced.
+
+        Read by :meth:`~aic_dc.agy.service.AgyService.stop_task`, which
+        must not aim a refusal at a conversation this turn never spawned:
+        a subagent's ``agent_id`` is `agy`'s own conversation id, so an
+        unchecked one is "stop any Antigravity conversation on this
+        machine by id" — the same containment `agy/subagents.py` states
+        for reading one.
+        """
+        return frozenset(self._subagents)
+
+    def _subagent(self, step: dict[str, Any], index: int, state: str) -> list[Event]:
+        """A delegation, as the row and tab the strip already renders.
+
+        **Antigravity names its subagents by announcement, not by scope.**
+        The SDK transport marks every step of a nested trajectory with
+        ``depth`` and ``trajectory_id``, which is what
+        ``antigravity/steps.py``'s ``_scope`` reads. This stream has
+        neither — a fact recorded at ``agy`` 1.1.22 and still true at
+        1.1.27 — and the conclusion drawn from it, that a subagent is
+        therefore invisible here, was wrong. A ``subagent`` step carries
+        ``subagent_info.subagents[]``, each entry naming a
+        ``conversation_id`` of its own, its ``role``, its ``type_name``
+        and a ``log_uri`` pointing at the transcript it writes. Measured
+        2026-09-09 by ``scripts/probe_agy_subagent_frames.py``.
+
+        That is enough for AG-13's five-point contract, which asks for an
+        *identity* rather than for the SDK's mechanism: the same id on the
+        event and on the blocks, a label, and a terminal flag. So no new
+        event name and no webapp change — ``subagent-tabs.js`` joins on
+        identifiers alone.
+
+        The id is the subagent's own ``conversation_id`` rather than a
+        minted one, which is the opposite of the consultation bridge's
+        choice (``antigravity/bridge.py._new_agent_id``) and for the
+        reason that decision states: it mints because an in-process MCP
+        handler *cannot learn* an id. Here the engine supplies one, it is
+        stable across the ACTIVE and DONE frames, and it is also the key
+        to the transcript on disk — so borrowing it costs nothing and buys
+        the join that content will need.
+
+        A list, not an entry: one step can announce several subagents, and
+        each gets its own row. The composed fallback id keeps a delegation
+        visible if a release ever omits the conversation id — this pump
+        renders what it cannot read rather than dropping it.
+        """
+        self._absorb_usage(step)
+        terminal = state in TERMINAL_STATES
+
+        events: list[Event] = []
+        for position, entry in enumerate(subagent_entries(step)):
+            agent_id = (
+                str(entry.get("conversation_id") or "")
+                or f"agy-subagent-{index}-{position}"
+            )
+            known = self._subagents.get(agent_id)
+            if known is None:
+                self.stats.tool_calls += 1
+                known = {
+                    "agent_id": agent_id,
+                    # Kept for the tab's content, which is not in this
+                    # stream: the subagent's steps go to its own
+                    # transcript, and this is the only place its location
+                    # is reported.
+                    "log_uri": str(entry.get("log_uri") or ""),
+                    "role": str(entry.get("role") or ""),
+                    "type_name": str(entry.get("type_name") or ""),
+                    "initial_prompt": str(entry.get("initial_prompt") or ""),
+                }
+                self._subagents[agent_id] = known
+            events.append(
+                Event(
+                    "subagentEvent",
+                    {
+                        # All three, because `streaming.js` falls back
+                        # through them in this order and a payload that
+                        # sets only one relies on which fallback ran.
+                        "task_id": agent_id,
+                        "agent_id": agent_id,
+                        "tool_use_id": agent_id,
+                        # Labels only, per the contract. `role` is what
+                        # the model called this subagent — "Notes Reader"
+                        # — which is the description a Claude `Task`
+                        # carries; `type_name` is its kind.
+                        "description": known["role"],
+                        "subagent_type": known["type_name"],
+                        "task_type": str(step.get("tool_name") or "subagent"),
+                        # A subagent the user stopped is `stopped`,
+                        # whatever `agy` says the step's state was — it
+                        # says DONE, measured. See `mark_stopped`.
+                        "status": (
+                            "stopped"
+                            if agent_id in self._stopped
+                            else SUBAGENT_STATUS.get(state, "running")
+                        )
+                        if terminal
+                        else "running",
+                        # Without this the tab streams for the rest of the
+                        # session: the browser sets
+                        # `state.streaming = !row.terminal`.
+                        "terminal": terminal,
+                    },
+                )
+            )
+        return events
 
     def _tool(self, step: dict[str, Any], index: int, state: str) -> list[Event]:
         self._absorb_usage(step)
@@ -247,7 +473,7 @@ class AgyTranslator:
                 # so the card says so from the moment it appears rather
                 # than after the fact.
                 "gated": True,
-                "agent_id": None,
+                "agent_id": self._agent_id,
                 "server_tool": False,
             }
             self._tools[call_id] = card
@@ -304,6 +530,19 @@ class AgyTranslator:
         # refused write modified nothing, and saying otherwise would make
         # the tree reload for a file that is not there.
         files = [] if failed else files_written_by(name, params)
+        content = "" if output is None else str(output)
+        # `files_written_by` is a table of tools to their *path arguments*
+        # and `generate_image` has none, so it cannot answer for this one
+        # on any transport — adding `ImageName` to that table would encode
+        # a name as a path and no file exists at it. The image is found
+        # instead, and only then is there a path to report.
+        if name == "generate_image" and not failed:
+            collected = self._collect_image(params)
+            if collected:
+                files = [collected]
+                content = (
+                    f"{content}\nCollected into the repository: {collected}"
+                ).strip()
         for path in files:
             if path not in self.stats.files_modified:
                 self.stats.files_modified.append(path)
@@ -314,13 +553,63 @@ class AgyTranslator:
                     "tool_use_id": call_id,
                     "name": name,
                     "status": "error" if failed else "success",
-                    "content": "" if output is None else str(output),
+                    "content": content,
                     "duration_ms": _duration_ms(step.get("duration_seconds")),
-                    "agent_id": None,
+                    "agent_id": self._agent_id,
                     "files_modified": files,
                 },
             )
         ]
+
+    def _collect_image(self, params: dict[str, Any]) -> str:
+        """Copy a generated image into the repository, and say where.
+
+        Returns ``""`` and logs rather than raising, on every failure. The
+        consultant's equivalent raises, and the difference is the caller:
+        there, one call exists to produce one image and a collection that
+        failed is the call failing. Here it is one step of a turn that has
+        others, and a pump that raised would lose the rest of the turn to
+        a picture.
+
+        The destination keeps the name the model chose — it is required to
+        be lowercase, underscored and at most three words, which is
+        already a filename — and takes the extension ``agy`` actually
+        produced, since the tool honours no requested one. ``agy``'s own
+        ``<name>_<epoch_ms>`` spelling is the fallback when that name is
+        taken, so a second image never silently overwrites the first.
+        """
+        if self._repo_root is None or not self._conversation_id:
+            return ""
+        image_name = str(params.get("ImageName") or params.get("image_name") or "")
+        source = locate_generated_image(
+            BRAIN_DIR,
+            self._conversation_id,
+            image_name,
+            # A second of slack for coarse mtime granularity, not for a
+            # previous turn — those are minutes away, not milliseconds.
+            min_mtime=self._started_at - 1.0,
+        )
+        if source is None:
+            logger.warning(
+                "agy generated an image named %r and it was not found under %s",
+                image_name,
+                BRAIN_DIR / self._conversation_id,
+            )
+            return ""
+        # `.name` because the model chose this string: the schema asks for
+        # a name, but nothing enforces that it is one, and a destination
+        # is not a place to find out.
+        stem = Path(image_name.strip()).name or source.stem
+        try:
+            destination = self._repo_root / f"{stem}{source.suffix}"
+            if destination.exists():
+                destination = self._repo_root / source.name
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, destination)
+        except OSError as exc:
+            logger.warning("agy generated %s and it could not be collected: %s", source, exc)
+            return ""
+        return str(destination)
 
     def _absorb_result(self, result: dict[str, Any]) -> list[Event]:
         self._status = str(result.get("status") or "")
@@ -393,6 +682,89 @@ class AgyTranslator:
 #: See :data:`aic_dc.antigravity.rules` for why this is not simply a
 #: ``trustedWorkspaces`` question.
 SCRATCH_DIR = Path.home() / ".gemini" / "antigravity-cli" / "scratch"
+
+#: Where ``agy`` puts an image, because the caller cannot say.
+#:
+#: **Measured on 2026-09-08**, and it falsified the question AG-16 left
+#: open — *which name does ``generate_image``'s output path carry* — by
+#: showing there is no such argument on either transport. The binary's own
+#: declaration for that tool, read back out of the conversation store, has
+#: exactly six properties (``Prompt``, ``ImageName``, ``AspectRatio``,
+#: ``ImagePaths``, ``toolAction``, ``toolSummary``) under
+#: ``additionalProperties: false``, so a path cannot even be smuggled in:
+#: the call would be rejected inside ``agy`` while declaring permissions,
+#: which is before any hook runs. The harness chooses the location,
+#: ``brain/<conversation_id>/<ImageName>_<epoch_ms>.jpg``, and the
+#: requested extension is not honoured — a request for ``.png`` produced
+#: JPEG.
+#:
+#: ``output_path`` is a **result** field, which
+#: [`sdk-surface.md`](../../../specs5/plan-ag/sdk-surface.md) recorded in
+#: the right column all along. It reads as an argument on the SDK
+#: transport only because that stream merges a tool's results back into
+#: its ``args`` at ``DONE`` (phase 3, finding 1); ``agy`` does not merge,
+#: so on this transport the path is nowhere in the machine-readable stream
+#: at all — only in the model's prose, which AG-R-3 forbids believing.
+#:
+#: So the image is **collected** rather than requested, from data the
+#: frames do carry: the conversation's own id and the name the model
+#: chose. Lives here rather than in ``consultant.py``, where it was
+#: written, because the engine needs the same collection and two copies of
+#: a path into another product's application directory is the copy that
+#: drifts.
+BRAIN_DIR = Path.home() / ".gemini" / "antigravity-cli" / "brain"
+
+
+def locate_generated_image(
+    brain_dir: Path,
+    conversation_id: str,
+    image_name: str,
+    *,
+    allow_newest: bool = False,
+    min_mtime: float = 0.0,
+) -> Path | None:
+    """The file ``agy`` wrote for this conversation, or ``None``.
+
+    Matched by the name the model chose, which is the only handle the
+    frames give. Sub-directories (``scratch``, ``.system_generated``,
+    ``.user_uploaded``) are skipped, since an image is a file.
+
+    ``allow_newest`` adds a final "anything in the directory" pass and is
+    **the consultant's option, not the engine's**. It is safe there for a
+    reason that does not survive the move: a consultation is one process
+    holding one conversation for the length of one call, so nothing else
+    ever writes into that directory. An engine conversation is long-lived
+    and resumable, so its directory accumulates every image of every turn
+    and "the newest file in it" would confidently return one from an hour
+    ago.
+
+    ``min_mtime`` is the guard that replaces it for the engine: the
+    translator is built per turn, so a file older than the turn belongs to
+    an earlier one. Without it, a resumed conversation whose model reuses
+    an ``ImageName`` would collect the previous turn's picture and report
+    success.
+    """
+    if not conversation_id:
+        return None
+    directory = brain_dir / conversation_id
+    if not directory.is_dir():
+        return None
+    stem = image_name.strip()
+    patterns = [f"{stem}_*", f"{stem}.*"] if stem else []
+    if allow_newest:
+        patterns.append("*")
+    for pattern in patterns:
+        try:
+            files = [
+                path
+                for path in directory.glob(pattern)
+                if path.is_file() and path.stat().st_mtime >= min_mtime
+            ]
+        except OSError:
+            return None
+        if files:
+            return max(files, key=lambda path: path.stat().st_mtime)
+    return None
 
 
 def _diverted_copy(params: dict[str, Any]) -> tuple[str, str] | None:

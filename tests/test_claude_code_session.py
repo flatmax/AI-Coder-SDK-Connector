@@ -38,6 +38,7 @@ from claude_agent_sdk import (
 )
 
 from aic_dc.claude_code import session as session_module
+from aic_dc.claude_code import token_refresh
 from aic_dc.claude_code.engine_config import EngineConfig
 from aic_dc.claude_code.health import CliResolution, EngineStartupError
 from aic_dc.claude_code.messages import Event
@@ -420,6 +421,100 @@ class TestConnect:
         assert session.health.cli_version == "2.1.229"
         assert session.health.cli_source == "bundled"
         assert session.health.last_error is None
+
+    async def test_connect_refreshes_the_access_token_first(self, tmp_path, monkeypatch):
+        """Before the SDK materialises a temp config dir and snapshots the
+        token into it — the copy has `refreshToken` stripped, so a token
+        captured here short is one the CLI child can never renew."""
+        calls = []
+
+        async def fake_ensure_fresh(**kwargs):
+            calls.append(kwargs)
+            return token_refresh.RefreshOutcome(ok=True, attempted=False)
+
+        monkeypatch.setattr(token_refresh, "ensure_fresh", fake_ensure_fresh)
+        session = EngineSession(tmp_path, EngineConfig())
+        await session.connect()
+        await session.disconnect()
+
+        assert len(calls) == 1
+        # The binary connect just version-checked, not whatever discovery
+        # would find a moment later.
+        assert calls[0]["cli_path"] == "/fake/claude"
+        assert calls[0]["cwd"] == tmp_path
+
+    async def test_a_failed_refresh_still_connects(self, tmp_path, monkeypatch):
+        """A pre-flight check that could refuse a session which would have
+        worked is worse than the expiry it guards against."""
+
+        async def failing(**kwargs):
+            return token_refresh.RefreshOutcome(
+                ok=False, attempted=True, detail="could not refresh"
+            )
+
+        monkeypatch.setattr(token_refresh, "ensure_fresh", failing)
+        session = EngineSession(tmp_path, EngineConfig())
+        await session.connect()
+
+        assert session.connected is True
+        assert "could not refresh" in session.health.degradations
+        await session.disconnect()
+
+    async def test_a_working_refresh_withdraws_an_earlier_failure(
+        self, tmp_path, monkeypatch
+    ):
+        """This runs on every watchdog tick as well as at connect, so the
+        banner an earlier failure left has to be able to come down. A user who
+        renews the credential in a terminal fixes the condition and tells
+        nobody; the next refresh is the only thing in a position to notice.
+
+        The outcome under test carries a detail of its own — the *refreshed*
+        sentence — which is the case a withdrawal folded into the reporting
+        branch would have missed.
+        """
+
+        async def working(**kwargs):
+            return token_refresh.RefreshOutcome(
+                ok=True, attempted=True, detail="Access token renewed."
+            )
+
+        monkeypatch.setattr(token_refresh, "ensure_fresh", working)
+        session = EngineSession(tmp_path, EngineConfig())
+        session.health.note_degradation(token_refresh.REFRESH_FAILED_DETAIL)
+        session.health.note_degradation(token_refresh.LOGIN_REQUIRED_DETAIL)
+        session.health.note_degradation("The aic-dc repo tools did not start.")
+
+        await session.connect()
+
+        assert token_refresh.REFRESH_FAILED_DETAIL not in session.health.degradations
+        assert token_refresh.LOGIN_REQUIRED_DETAIL not in session.health.degradations
+        # And nothing else was swept up with them.
+        assert session.health.degradations == ["The aic-dc repo tools did not start."]
+        await session.disconnect()
+
+    async def test_a_raising_refresh_still_connects(self, tmp_path, monkeypatch):
+        async def boom(**kwargs):
+            raise RuntimeError("credential store on fire")
+
+        monkeypatch.setattr(token_refresh, "ensure_fresh", boom)
+        session = EngineSession(tmp_path, EngineConfig())
+        await session.connect()
+
+        assert session.connected is True
+        await session.disconnect()
+
+    async def test_disconnect_stops_the_token_watchdog(self, tmp_path):
+        """It can be sitting in a refresh subprocess; a cancel it never
+        observes would leave a CLI running past the session."""
+        session = EngineSession(tmp_path, EngineConfig())
+        await session.connect()
+        watchdog = session._token_watchdog_task
+        assert watchdog is not None
+
+        await session.disconnect()
+
+        assert watchdog.done()
+        assert session._token_watchdog_task is None
 
     async def test_session_id_is_null_until_the_init_message(self, engine):
         """connect() completes the handshake; the ID comes with the turn."""
@@ -967,6 +1062,34 @@ class TestStartupDegradation:
         payload = h.to_dict()
         h.note_degradation("no hook")
         assert payload["degradations"] == ["no bridge"]
+
+    def test_a_condition_that_stops_standing_can_be_withdrawn(self):
+        """Most losses here are settled at connect and last the session. The
+        access-token refresh is re-run every watchdog tick, so a failure that
+        succeeds twenty minutes later has to be able to take its sentence
+        back — a banner nothing can clear is a stale banner."""
+        h = self.health()
+        h.note_degradation("could not refresh the token")
+        h.clear_degradation("could not refresh the token")
+        assert h.degradations == []
+
+    def test_withdrawing_touches_only_the_sentence_it_names(self):
+        """Why note and clear both key on the exact text: a caller may only
+        retire what it can name, so no clearing path can silence another
+        subsystem's loss."""
+        h = self.health()
+        h.note_degradation("no bridge")
+        h.note_degradation("could not refresh the token")
+        h.clear_degradation("could not refresh the token")
+        assert h.degradations == ["no bridge"]
+
+    def test_withdrawing_something_never_noted_is_not_an_error(self):
+        """The ordinary case: every successful refresh withdraws both of its
+        sentences, and on almost every one of them neither was ever there."""
+        h = self.health()
+        h.note_degradation("no bridge")
+        h.clear_degradation("could not refresh the token")
+        assert h.degradations == ["no bridge"]
 
 
 # ---------------------------------------------------------------------------
@@ -1846,6 +1969,27 @@ class TestBackgroundDrain:
         )
         assert result["background_tasks"] == []
         assert engine._drain is None
+
+    async def test_a_bash_task_stays_filtered_in_the_turns_after_it(self, engine):
+        """The session owns the latch, so a slow command that finishes two
+        turns later is still a shell command and not a subagent.
+
+        This is the whole path the 2026-09-08 report exercised: because the
+        engine does *not* hold the run open for a bash task (the test above),
+        its turn ends, and its ``task_notification`` is read by whichever turn
+        is current when the command exits. That turn's translator has to
+        recognise it, and it can only do that from the session's latch —
+        ``TaskNotificationMessage`` has no ``task_type`` field.
+        """
+        await self.drained(
+            engine, [task_started("b1", task_type="local_bash"), result_message()]
+        )
+        assert engine._non_subagent_tasks == {"b1"}
+
+        events, _ = await self.drained(
+            engine, [task_notification("b1"), result_message()]
+        )
+        assert [e.name for e in events if e.name == "subagentEvent"] == []
 
     async def test_a_kill_ends_the_drain_with_no_notification_at_all(self, engine):
         """`stop_task()` reports `status: "killed"` through `updated` and sends

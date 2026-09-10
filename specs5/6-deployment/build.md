@@ -161,6 +161,14 @@ build: the container populated the user config directory on first run, resolved
 matches the runner image, because a PyInstaller binary needs a glibc at least as new as the one it was
 built against and an older base would fail for a reason that is not the one under test.
 
+**It has since run on runners, and the evidence is the release list** (read 2026-09-08). Pull requests #2
+through #6 each merged into `master` carrying the commit that added this step, and each published a
+release with all three artefacts — `2026.08.29-12.26-f9d6c5ef` through `2026.09.06-05.37-ab7475c6`. The
+step lives in the `build` job and the `release` job declares `needs: build`, so an attached artefact is a
+green leg: this container check has passed on five real builds, not only on the local one above. That
+closes phase 7's exit criterion, which [`../next.md`](../next.md) § A2 (d) had read as owed for eleven
+days after it was in fact met.
+
 Two consequences worth stating rather than discovering:
 
 - **Version skew is a supported state, not an error.** A user's `PATH` CLI can be newer or older than the SDK's `__cli_version__` pin. Startup records both and warns on mismatch; it does not refuse to run. Refusing would make our release cadence a gate on theirs

@@ -346,11 +346,23 @@ def _one_shot_options(service: ClaudeCodeService, prompt: str) -> Any:
         # transcription — a diff in, a paragraph out, one turn, no choices
         # to weigh — and the CLI enables thinking by default. On a small
         # model that showed up as most of the latency and most of the
-        # output tokens for no visible gain in the message. Disabling it
-        # also detaches this call from the user's `effortLevel`, which
-        # arrives with `settings.json` below and is set for conversations
-        # rather than for this.
+        # output tokens for no visible gain in the message.
         "thinking": {"type": "disabled"},
+        # The effort this call runs at, stated rather than inherited — and
+        # the pair above is why it has to be stated.
+        #
+        # `settings.json` comes over as a file below for the provider it
+        # names, and the user's `effortLevel` rides along with it. That
+        # setting is chosen for conversations, and the top two rungs of it
+        # are not merely wasteful here: the API rejects `xhigh` and `max`
+        # outright when thinking is disabled — "output_config.effort
+        # 'xhigh' is not supported when thinking is disabled on this model"
+        # — so a user who prefers a deep-thinking conversation could not
+        # commit at all until this line existed. `low` is the floor and the
+        # right rung for a transcription; naming it also stops the two
+        # halves of this options dict from contradicting each other
+        # whatever the machine's settings say.
+        "effort": "low",
     }
     # The provider, and only the provider.
     #

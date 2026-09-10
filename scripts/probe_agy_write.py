@@ -217,11 +217,15 @@ async def run() -> int:
     install_config_dir = default_config_dir()
     state = install.status(install_config_dir)
     log(f"installed gate: {state['state']} ({state.get('path')})")
-    installed_here = False
-    if state["state"] != "current":
+    # Restore what was there, never "remove what this probe added". The
+    # two differ whenever the installed gate is *stale*: this installs a
+    # current one over it, and an unconditional uninstall then leaves the
+    # user's app with no gate at all — a worse state than the one it
+    # borrowed, and one the app cannot consult. Observed 2026-09-09.
+    restore = state["state"]
+    if restore != "current":
         log("installing the gate for the duration of this probe")
         install.install(install_config_dir)
-        installed_here = True
 
     async def broadcast(_event: Any) -> None:
         return None
@@ -254,8 +258,10 @@ async def run() -> int:
         browser.cancel()
         await session.close()
         await server.stop()
-        if installed_here:
+        if restore == "absent":
             install.uninstall()
+        elif restore != "current":
+            log(f"NOTE: the gate was {restore} before this run and is now current")
 
     after = target.read_text(encoding="utf-8")
     log(f"tools the gate decided: {[t for t, _ in server.seen]}")

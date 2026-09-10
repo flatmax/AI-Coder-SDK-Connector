@@ -1808,3 +1808,77 @@ class TestNonSubagentTasks:
         events = translator.translate(self._started("b2", "local_bash"))
         assert events == []
         assert translator.rendered_subagents() == []
+
+    def test_a_backgrounded_command_finishes_in_a_later_turn(self):
+        """The latch has to outlive the turn, because the command does.
+
+        Reported on 2026-09-08 from a screenshot: a card headed "Subagent",
+        pinned to the bottom of a turn it had nothing to do with, reading
+        *Background command "…" completed (exit code 0)*, beside a tab whose
+        feed was empty. One bug, both symptoms.
+
+        A ``Bash`` call with ``run_in_background`` returns at once, so its task
+        is never in ``tasks_in_flight``, no drain follows it, and the turn ends.
+        Minutes later the command exits and the CLI sends its
+        ``task_notification`` on whatever turn is current — a *different*
+        translator, whose latch is empty, carrying ``task_type=None`` because
+        only ``TaskStartedMessage`` has that field. So it read as a subagent:
+        a row with no description (rendered "Subagent"), no blocks to mirror
+        (the empty tab), and a ``tool_use_id`` naming a ``Bash`` card from a
+        turn that had already ended — which is what sent the row to the end of
+        `groupBlocksByScope`'s list and kept it at the bottom of the feed.
+        """
+        session_latch: set[str] = set()
+        first = TurnTranslator("req-1", non_subagent_tasks=session_latch)
+        first.translate(self._started("bo5c69b73", "local_bash", "the probe"))
+
+        later = TurnTranslator("req-2", non_subagent_tasks=session_latch)
+        events = later.translate(
+            TaskNotificationMessage(
+                subtype="task_notification",
+                data={},
+                task_id="bo5c69b73",
+                status="completed",
+                output_file=None,
+                summary='Background command "the probe" completed (exit code 0)',
+                uuid="u",
+                session_id="s",
+            )
+        )
+        assert events == []
+        assert later.rendered_subagents() == []
+
+    def test_a_subagent_finishing_in_a_later_turn_still_reports(self):
+        """The control: the shared latch drops bash tasks, not late subagents.
+
+        A background *subagent* has the same cross-turn shape, and its
+        notification must still reach the browser — mis-attributed to the
+        current turn is the known gap in
+        ``specs5/5-webapp/subagent-browser.md`` § Tab Lifetime, but dropped
+        would be a subagent that finished with nothing on screen saying so.
+        """
+        session_latch: set[str] = set()
+        first = TurnTranslator("req-1", non_subagent_tasks=session_latch)
+        first.translate(self._started("task-1", "local_agent", "find call sites"))
+
+        later = TurnTranslator("req-2", non_subagent_tasks=session_latch)
+        events = later.translate(
+            TaskNotificationMessage(
+                subtype="task_notification",
+                data={},
+                task_id="task-1",
+                status="completed",
+                output_file=None,
+                summary="found three",
+                uuid="u",
+                session_id="s",
+            )
+        )
+        assert names(events) == ["subagentEvent"]
+        assert [r["key"] for r in later.rendered_subagents()] == ["task-1"]
+
+    def test_a_translator_built_alone_keeps_its_own_latch(self, translator):
+        """The default is a private set, so one turn's tasks stay its own."""
+        translator.translate(self._started("b1", "local_bash"))
+        other = TurnTranslator("req-other")
+        assert other._non_subagent_tasks is not translator._non_subagent_tasks

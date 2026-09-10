@@ -486,6 +486,35 @@ describe('ContextUsageTab fetching', () => {
     expect(el._error).toBe('Could not read context usage.');
   });
 
+  it('says the session ended rather than blaming the refresh', async () => {
+    // The numbers on screen are real: they are the last true reading of a
+    // window that no longer exists. "Last refresh failed" sends the reader
+    // to look for a fault at the one moment there is none — the same
+    // "ordinary state painted as broken" fault as the no-breakdown branch
+    // (specs5/next.md § C11).
+    const handler = vi
+      .fn()
+      .mockImplementationOnce(() => ({
+        usage: usageFixture(),
+        fetched_at: '2026-08-15T10:30:00Z',
+      }))
+      .mockImplementationOnce(() => ({
+        error: 'The Claude Code session was lost.',
+        reason: 'no-engine',
+      }));
+    publishFakeRpc({ 'ClaudeCodeService.get_context_usage': handler });
+    const el = mountTab();
+    await settle(el);
+    await el._refresh();
+    await settle(el);
+
+    expect(el._usage.totalTokens).toBe(61500);
+    expect(el.shadowRoot.querySelector('.error')).toBeNull();
+    const footer = [...el.shadowRoot.querySelectorAll('.note')].pop();
+    expect(footer.textContent).toContain('No session to ask');
+    expect(footer.textContent).toContain('the one that ended');
+  });
+
   it('keeps the previous numbers when a later refresh fails', async () => {
     const handler = vi
       .fn()
@@ -493,7 +522,7 @@ describe('ContextUsageTab fetching', () => {
         usage: usageFixture(),
         fetched_at: '2026-08-15T10:30:00Z',
       }))
-      .mockImplementationOnce(() => ({ error: 'session lost' }));
+      .mockImplementationOnce(() => ({ error: 'gateway blew up', reason: 'failed' }));
     publishFakeRpc({ 'ClaudeCodeService.get_context_usage': handler });
     const el = mountTab();
     await settle(el);
@@ -502,7 +531,7 @@ describe('ContextUsageTab fetching', () => {
     // Prior numbers stay on screen, but the footer says they are stale.
     expect(el._usage.totalTokens).toBe(61500);
     const footer = [...el.shadowRoot.querySelectorAll('.error')].pop();
-    expect(footer.textContent).toContain('Last refresh failed: session lost');
+    expect(footer.textContent).toContain('Last refresh failed: gateway blew up');
   });
 });
 
@@ -2863,10 +2892,40 @@ describe('ContextUsageTab debug', () => {
   });
 
   it('reports a server-info failure without losing the rest', async () => {
-    const { el } = await openDebug({ info: { error: 'engine not ready' } });
+    const { el } = await openDebug({
+      info: { error: 'engine not ready', reason: 'failed' },
+    });
     expect(debugText(el)).toContain('Server info unavailable: engine not ready');
+    expect(el.shadowRoot.querySelector('.error')).not.toBeNull();
     // The health table came from a different call and is still there.
     expect(debugText(el)).toContain('/opt/aic-dc/bundled/claude');
+  });
+
+  it('does not paint a window nobody has prompted in yet as broken', async () => {
+    // The Initialize reply *is* the handshake, so having none is what a
+    // fresh window looks like — not a fault. Red here told a reader
+    // something was wrong at the one moment nothing was
+    // (specs5/next.md § C11).
+    const { el } = await openDebug({
+      info: {
+        error: 'The Claude Code engine is not connected.',
+        reason: 'no-engine',
+      },
+    });
+    expect(el.shadowRoot.querySelector('.error')).toBeNull();
+    expect(debugText(el)).toContain('No initialize reply yet');
+    // And it does not say "failed" about a call that never reached one.
+    expect(debugText(el)).not.toContain('unavailable');
+    expect(debugText(el)).toContain('/opt/aic-dc/bundled/claude');
+  });
+
+  it('keeps the error colour when the backend names no reason', async () => {
+    // A backend older than the reason field. Red on a state that turns out
+    // to be ordinary is a smaller fault than grey on a real failure, so
+    // the unlabelled case keeps the louder of the two.
+    const { el } = await openDebug({ info: { error: 'engine not ready' } });
+    expect(el.shadowRoot.querySelector('.error')).not.toBeNull();
+    expect(debugText(el)).toContain('Server info unavailable: engine not ready');
   });
 
   it('collects hook traffic before Debug is ever opened', async () => {

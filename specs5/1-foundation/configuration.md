@@ -17,8 +17,8 @@ not through anything in this spec.
 | File | Kind | Purpose |
 |---|---|---|
 | `engine.json` | User | Model, commit-message model, default permission posture, reasoning depth, thinking display, optional budget, CLI discovery override, stdout line ceiling |
-| `app.json` | Managed | Document conversion, document index, indexing debounce, permission timeouts, mirror and session-directory policy, presets |
-| `commit.md` | Managed | The commit-message request text |
+| `app.json` | Managed, **merged** | Document conversion, document index, indexing debounce, permission timeouts, mirror and session-directory policy, engine master and allowlist, consultant transport, presets |
+| `commit.md` | Managed, overwritten | The commit-message request text |
 
 Deleted by the conversion: `llm.json` (superseded by `engine.json`), `system.md`, `system_doc.md`,
 `system_extra.md`, `system_agentic_appendix.md`, `review.md`, `compaction.md`, `system_reminder.md`.
@@ -26,10 +26,26 @@ Every one of them existed to shape a prompt AIC⚡DC no longer assembles.
 
 `commit.md` survives as the system prompt for the one auxiliary model call the conversion did not
 remove: a **stateless one-shot** — its own short-lived CLI process, no tools, no settings sources, no
-thinking, one turn — that takes the staged diff and returns a commit message. It is not a user turn
-on the live session, and deliberately so: routing a whole staged diff through the conversation would
-put it in the transcript the user is reading and would queue behind a turn in flight. See
-[`../3-engine/session.md`](../3-engine/session.md).
+thinking, `low` effort, one turn — that takes the staged diff and returns a commit message. It is not
+a user turn on the live session, and deliberately so: routing a whole staged diff through the
+conversation would put it in the transcript the user is reading and would queue behind a turn in
+flight. See [`../3-engine/session.md`](../3-engine/session.md).
+
+### The one-shot states its own effort
+
+The one-shot names an effort of `low` rather than letting one be inherited, and the reason is that
+"no thinking" and "no stated effort" are not a combination the API accepts. `settings.json` is passed
+to this session as a file — it is the only place a machine says which provider to talk to, and
+`setting_sources=[]` would otherwise withhold it — so whatever `effortLevel` the user chose for their
+conversations arrives with it. The top two rungs of that setting are refused outright alongside
+disabled thinking: a user whose conversations run at `xhigh` clicked Commit (September 2026) and got
+`400 output_config.effort 'xhigh' is not supported when thinking is disabled on this model` in place
+of a message, every time, with no way to commit from the UI at all until the effort was stated here.
+
+`low` is both the floor and the honest description of the work — a diff in, a paragraph out, nothing
+to weigh — and it keeps the two halves of the option set from contradicting each other whatever the
+machine prefers. It is not configurable: a conversational reasoning depth is a preference, and this
+call is not a conversation.
 
 ## Engine Config
 
@@ -70,6 +86,8 @@ The consequences to preserve:
 - **Permissions** — `no_client_timeout_s`, the deadline armed when the *last* localhost client leaves and cancelled when one returns, and `presence_poll_s`, how often presence is re-sampled for the life of a waiting request. **There is no decision timeout, and adding one back is a decision to be argued rather than a default to be restored**: nothing accrues while a request waits — one blocked SDK control request is the whole cost — so a wall-clock limit protects no resource and does the one thing a permission dialog must not do, which is answer for the user. Stop is the escape hatch from a dialog nobody wants to answer. Whatever reads these keys must also keep the screen-reader milestones inside the window that exists; the coarse `[300, 60, 10]` list told a user they had five minutes to answer something expiring in thirty seconds. See [delivery § the timer that answered for the user](../plan/delivery.md#interlude--the-timer-that-answered-for-the-user-2026-08-17)
 - **History** — session-directory size warning threshold, and how many mirror-append failures are tolerated before the health banner escalates. The transcript now carries pasted images inline, so the threshold is reached sooner than the native engine's history did. Both thresholds are compared engine-side and the browser is told the verdict — the banner receives "this has escalated", not the number to compare against, for the same reason the disk warning arrives as a sentence: two owners of one rule can only disagree. Both are read on use rather than at construction, so an edit to `app.json` takes effect on the next turn
 - **Engines** — `engines.master`, which engine a session starts on ([plan-ag AG-1](../plan-ag/decisions.md#ag-1)). It lives here rather than in `engine.json` despite that file's name: every key in `engine.json` is a *Claude session option* read by `claude_code.engine_config`, and putting a cross-engine fact in one engine's option file would make the second engine's existence conditional on the first's config. An unrecognised name falls back to Claude with a warning — a typo should cost the user the second engine, not the ability to start the application. It is read at startup and at an explicit `switch_engine`, never mid-session, so it does not breach the rule below that nothing in `app.json` reaches a running engine's session options
+- **Enabled engines** — `engines.enabled`, an allowlist of engine names defaulting to all of them ([plan-ag AG-17](../plan-ag/decisions.md#ag-17)). A **policy** rather than a preference: some workplaces are only permitted to use Claude, and until this key existed nothing could express that — the `agy` adapter mounted on the binary being on `PATH` with no configuration consulted at all, and `engines.master` names which engine *starts* rather than which may run. Naming Claude alone removes the Antigravity adapters, removes them from the selector, makes `switch_engine` refuse with a reason naming the policy rather than a missing credential, and **removes the consultant** — `second_opinion` and `generate_image` follow the engine rather than carrying a switch of their own, because reaching Antigravity from inside a Claude turn is the same question as running it as master and two switches for one question are two things that can disagree. `claude` cannot be removed: a list omitting it has it added back with a warning, since an install with no engine is not a configuration this application can run. **A malformed value keeps every engine**, which is the deliberate direction for that mistake — a policy that will not parse says nothing about what is permitted, and reading it as a restriction would let a typo silently remove a feature, where reading it as "no policy" leaves the user where they were before they wrote it. Read once, at startup, because the adapters are constructed there; the Settings card that writes it says so rather than promising a session restart would help
+- **Consultant transport** — `engines.consultant`, which of Antigravity's two transports answers `second_opinion` and `generate_image` from inside a Claude turn ([plan-ag AG-16](../plan-ag/decisions.md#ag-16)). `auto` by default, and **auto prefers `agy`**: the SDK path authenticates with a metered Gemini key whose free tier allows twenty agent requests a day and *zero* image generations, while `agy` reaches the account holder's own subscription. A default that chose the transport which cannot generate an image would leave the second engine's own worked example broken for the reason it has always been broken. `sdk` and `agy` name one explicitly, and `sdk` is worth having rather than theoretical — a user with a *paid* key may prefer it, because the SDK consultant pins its model and an opinion whose model moved is not a second opinion. An unrecognised value falls back to `auto` with a warning, for the same reason `engines.master` falls back to Claude
 - **Presets** — the named bundles that replaced modes: a default tool hint and optionally a Claude Code skill or agent name. The snippet set that was a preset's third component went with snippets themselves — see [decisions § CC-22](../plan/decisions.md#cc-22--snippets-are-deleted-the--palette-replaces-them-user) and [§ CC-12](../plan/decisions.md#cc-12--modes-become-prompt-presets-not-engine-states)
 
 Deleted keys: `url_cache`, `history_compaction`, `cache_tiering` (including every membrane and flux
@@ -86,10 +104,61 @@ cache that no longer exists; the last gated a spawn protocol replaced by the `Ta
 
 ## Managed vs User Files
 
-- Managed files — safe to overwrite on upgrade (`app.json`, `commit.md`)
+- Managed files — the bundle owns their content (`app.json`, `commit.md`)
 - User files — never overwritten (`engine.json`)
 - Upgrade creates backup copies of overwritten managed files with a version suffix
 - Files outside either set are skipped during iteration
+
+### `app.json` is merged key by key, `commit.md` is overwritten
+
+Both are managed, and the word means something different for each. `commit.md` is prose the bundle
+owns: a user who edits it is patching a prompt, an upgrade replaces it, and the backup is how they get
+their text back. `app.json` is the file **our own Settings tab writes** — `CONFIG_TYPES` exposes `app`
+for editing, `engines.master` moves when a session switches engines, and `engines.enabled` is an
+organisation's *policy*. Overwriting it reverted all of that on a version bump, which meant a
+Claude-only deployment came back two-provider without anybody being told
+([plan-ag AG-R-13](../plan-ag/risks.md#ag-r-13)).
+
+So it is merged, and the merge needs three legs rather than two: a user's copy of this file *is* a copy
+of the bundle, taken at install, so comparing it against the new bundle cannot tell "I chose this" from
+"this was the default". A hidden `.pristine/` directory inside the user config dir holds each merged
+managed file as the bundle last shipped it, and the pass is the familiar three-way one, per key:
+
+| On disk | Ancestor | Bundle | Result |
+|---|---|---|---|
+| absent | — | present | the bundled value — this is how a key a release *adds* arrives |
+| equals the ancestor | present | changed | the bundled value — nobody touched it, so a changed default lands |
+| differs from the ancestor | present | anything | the value on disk — an upgrade does not overrule an edit |
+| anything | **no record** | anything | the value on disk — with no ancestor there is no evidence the value came from us |
+| present | — | absent | the value on disk, left unread, exactly as a retired *file* is |
+
+Nested objects recurse, so `engines.enabled` survives a release that changes `engines.master`'s
+default. Lists compare whole: a user who edits `doc_convert.extensions` owns the list, and there is no
+per-element ancestry to merge against. The pristine copy is refreshed on every upgrade, so release *n+1*
+compares against what release *n* shipped rather than against the original install. The merged file is
+re-serialised — key order follows the file on disk with bundled additions appended, and the bundle's
+hand-wrapped arrays come back expanded; JSON carries no comments, so there is nothing else to lose. A
+file that will not parse is **left for the user to fix** rather than replaced: overwriting swaps text we
+cannot read for text they did not write, and every accessor already falls back to its own default, so
+the application starts either way.
+
+The merge is also why the accessors' in-code defaults matter. Every key in this file has its default
+in Python as well (`doc_convert_config`, `doc_index_config`, `_DISK_WARNING_BYTES`, `master` → Claude,
+`enabled` → every engine), which is what makes the file *documentation of what can be set* rather than
+the source of the values. Promoting it to a user file instead would have been one line, and would have
+frozen every install-time literal in place forever, unreachable by any later default.
+
+### One unwritable file does not cost the others their upgrade
+
+Each file is upgraded inside its own error handling, and the version marker is written even when one of
+them could not be. A workplace that pins the policy by shipping `app.json` read-only used to get the
+opposite: the `OSError` aborted the whole pass, the marker was never written, so **every subsequent
+start retried it** — a fresh backup each time, and `commit.md` never upgraded at all. The pass now
+reports the file it left as found, names the marker to delete to retry, and moves on. A backup taken
+for a write that then failed is removed again, because a copy of a file we did not change is litter.
+
+The wrapper around the whole pass stays as a backstop, for the case where the user config *directory*
+cannot be created at all — there the fallback is reading the bundle directly.
 
 ### Retired files are ignored, not deleted
 
@@ -111,14 +180,16 @@ notices the file, reports it once in the health banner as ignored, and does not 
 
 - On startup, compare the bundled version against the installed version marker
 - Matching versions — no action (fast path)
-- Differing versions — new files copied, managed files backed up and overwritten, user files preserved
-- Version marker updated to current
+- Differing versions — new files copied, `app.json` merged, `commit.md` backed up and overwritten, user files preserved
+- Version marker updated to current, including when a file had to be left as found
 
 ## Backup Naming
 
 - Timestamped with UTC
 - Version SHA appended when known
 - Allows users to recover customizations made directly to managed files
+- Taken only when the upgrade actually replaces something: a merge that changes nothing leaves no
+  backup, since a directory of identical copies is noise rather than a recovery path
 
 ## Loading and Caching
 
@@ -179,4 +250,5 @@ the native engine is ignored rather than read.
 - App-config hot-reload takes effect without a server restart and without disturbing the engine session
 - The whitelist rejects unknown config type names
 - A setting that cannot take effect until a new session is labelled as such in the UI
+- The commit-message one-shot inherits the provider from `settings.json` and nothing else from it: every option that shapes the turn — thinking, effort, permission mode, tools, turn count — is stated outright, so a preference set for conversations can neither reshape nor refuse that call
 - Which engine is master is read from configuration, never inferred from what happens to be installed. An engine that is configured but not mountable falls back with a warning rather than starting silently on something else

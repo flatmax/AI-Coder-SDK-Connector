@@ -26,6 +26,7 @@
 // flat.
 
 import { html } from 'lit';
+import { SURFACE, supports } from '../engine-capabilities.js';
 import { withRpcTimeout } from '../rpc.js';
 import { _AGENT_LABEL_MAX_LENGTH } from './helpers.js';
 import { restoreMessage } from './restore.js';
@@ -674,6 +675,18 @@ function _unreadableTranscript(reason) {
  * caller's job is to put a tab in the strip either way.
  */
 async function _loadSubagentTranscript(panel, agentId, sessionId) {
+  // Its own surface, and not the strip's. An engine can announce a subagent
+  // and be unable to say what it did — that is the SDK Antigravity
+  // transport today — and asking anyway renders the router's refusal as the
+  // tab's contents, which is the phase-5 defect the history browser already
+  // learned ("a surface newly enabled exposing an unguarded call to
+  // another"). The sentence below is about the record rather than about the
+  // wiring, which is what the user can actually act on.
+  if (!supports(SURFACE.SUBAGENT_TRANSCRIPTS)) {
+    return _unreadableTranscript(
+      'This engine cannot read back what a subagent did',
+    );
+  }
   let result;
   try {
     result = await withRpcTimeout(
@@ -704,6 +717,69 @@ async function _loadSubagentTranscript(panel, agentId, sessionId) {
   // backend renderer's output, so a subagent's tool cards must survive the
   // trip the way the main transcript's do.
   return result.map(restoreMessage);
+}
+
+/**
+ * Fill a settled subagent tab that mirrored no blocks, from its transcript.
+ *
+ * A live tab's feed is normally the parent turn's blocks filtered to this
+ * subagent's `agent_id`, mirrored by reference — the invariant in
+ * ``specs5/5-webapp/subagent-browser.md``, and the reason § Refresh and
+ * Reconnect says a live tab "needs no read at all". That holds while the
+ * subagent's blocks arrive on the turn the tab belongs to. A **background**
+ * subagent outlives its turn, so the rest of its output is translated against
+ * whichever turn is current when it lands (§ Tab Lifetime, *Known gap*) — and
+ * a tab whose blocks went to another turn has nothing to mirror. The tab is
+ * then a label over an empty feed, which reads as "this subagent did nothing"
+ * rather than "its record is elsewhere".
+ *
+ * So: read the transcript, but only when nothing else can fill the tab.
+ *
+ * - **Settled only.** A live subagent's blocks may still be coming, and the
+ *   spec's empty state for one that has not written yet is the description
+ *   plus a working indicator — not a transcript read that finds nothing and
+ *   reports it as unreadable.
+ * - **Empty only.** A tab with mirrored blocks already has the better view:
+ *   live records the transcript on disk has not caught up with.
+ * - **Once.** `transcriptRead` latches before the await, so re-activating the
+ *   tab while the read is in flight does not start a second one, and a read
+ *   that came back with an explanation is not retried into a second copy of it.
+ * - **With an `agent_id`.** `get_subagent_transcript` reads by it, and it is
+ *   the tab identity the spec's invariants name. A row that only ever reported
+ *   a `task_id` cannot be read, and is left with its seed line rather than
+ *   guessed at from the listing — "the panel never invents a tab" applies just
+ *   as much to a tab's contents.
+ *
+ * Deliberately not eager: the same "twelve subagents should not cost twelve
+ * transcript reads" rule the historical tabs follow. Callers are the two
+ * moments where an empty tab becomes something the user is looking at — the
+ * active-tab setter, and settling a tab that is already active.
+ *
+ * @returns {Promise<boolean>} whether the tab gained messages.
+ */
+export async function loadSubagentFeedIfEmpty(panel, tabId) {
+  const tab = panel?._tabs?.get(tabId);
+  const sub = tab?.subagent;
+  if (!sub || sub.transcriptRead || !sub.settled) return false;
+  if ((tab.turnBlocks?.blocks?.length || 0) > 0) return false;
+  const agentId = typeof sub.agent_id === 'string' ? sub.agent_id : '';
+  if (!agentId) return false;
+
+  sub.transcriptRead = true;
+  const messages = await _loadSubagentTranscript(
+    panel,
+    agentId,
+    panel._sessionInfo?.session_id || null,
+  );
+  // The strip moved on while the read was out — a new turn cleared the
+  // subagent tabs, or a session change replaced the state object under this
+  // key. Identity, not presence: a tab that was deleted and recreated is a
+  // different subagent's.
+  if (panel._tabs.get(tabId) !== tab) return false;
+  // After the seed line, which says what the subagent was asked to do.
+  tab.messages = [...tab.messages, ...messages];
+  panel.requestUpdate();
+  return true;
 }
 
 /**

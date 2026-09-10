@@ -79,6 +79,35 @@ A subagent tab's life is bounded by the subagent, not by the session:
 - **New session / session resume** — the strip drops to Main alone. Nothing is torn down on the server, because AIC⚡DC owns no subagent state to tear down.
 - **Server shutdown** — in-memory tab state is lost; transcripts on disk survive.
 
+### A backgrounded shell command is not a subagent, in any turn
+
+The CLI models a slow `Bash` command as a task of its own — `task_type="local_bash"`, announced through
+the same four `Task*` messages a subagent uses — so `messages.py` drops those before they can become a
+row or a tab. Only `TaskStartedMessage` carries `task_type`, which is why the filter latches the task id.
+
+**The latch belongs to the session, not the turn.** A command run with `run_in_background` returns
+immediately, so its task is never in `tasks_in_flight`, no drain follows it, and the turn that launched
+it ends. Minutes later the command exits and the CLI sends its `task_notification` on whatever turn is
+current. Against a per-turn latch that translator has never heard of the task and the notification says
+nothing about what it is, so the shell command arrives as a subagent.
+
+Reported on 2026-09-08 from a screenshot: a card headed **Subagent**, reading *Background command "…"
+completed (exit code 0)*, sitting at the bottom of a turn it had nothing to do with, beside a tab whose
+feed was empty. One phantom, both symptoms, and both follow from what the row is missing:
+
+- It has no `description` — a `notification` carries none — so the row falls back to the bare noun and the tab to the bare task id (`🤖 bo5c69b73`).
+- It has no blocks to mirror. A shell command produces none carrying an `agent_id`, which is what an empty feed means and what `local_agent/has-blocks: 4, local_bash/empty: 17` measured when the filter was first written.
+- Its `tool_use_id` names a `Bash` card in a turn that has already ended, so nothing in the current turn matches it. `groupBlocksByScope` sends an unmatched row to the end of the list, which on a streaming turn is the bottom of the feed — the row appeared *pinned* there, re-rendering below each new block as the turn grew.
+
+Rows with no matching card still land at the end rather than being dropped, for the reason that rule was
+written: a running subagent the user cannot see is worse than one in the wrong place. What changed is
+that a shell command no longer becomes one of them.
+
+What this does not cover: a server restarted, or a session resumed from disk, mid-command. The latch is
+in memory, so a notification arriving after that has nothing to recognise it by and the phantom returns
+once. Persisting it would mean writing task ids to the session directory to suppress a row, which costs
+more than the row does.
+
 The old spec's `new_session`-dismisses-the-team rule, its asymmetry argument about main's
 `ContextManager` surviving while agents' were freed, and the whole `close_agent_context` /
 `agentClosed` protocol are gone with the registry they managed.
@@ -154,6 +183,52 @@ reason the honest-sounding amber state was the most misleading thing on screen.
 LED lifetime tracks its tab's lifetime exactly. There is no acknowledgement gesture, no auto-fade, no
 "seen" state; the LED reflects current state until the tab leaves the strip.
 
+### Amber Is Measured Now, And The Engine Answers Twice
+
+**Verified live 2026-09-09** — [`scripts/subagent_stop_probe.py`](../../scripts/subagent_stop_probe.py),
+17 checks, against a real CLI in a real browser. One turn was asked to delegate twice; the ⏹ on the first
+subagent's tab was clicked, and every reading below came out of the DOM rather than out of a hand-built
+payload. This closes [`../next.md`](../next.md) § D1, and it had to be the webapp's own ⏹: the cheap
+substitute — an agent calling `TaskStop` on a live background subagent — killed it with the CLI emitting
+**no terminal task message at all**, leaving engine and browser reading `status: null, terminal: false`
+and the LED cyan. The two paths are not interchangeable, and that reading was not a defect in this
+surface.
+
+**The engine answers a stop twice, with two different words.** `stop_task`'s docstring said the CLI
+replies with a `task_notification` of `stopped` *or* a `task_updated` patch of `killed` "with no
+notification at all". Both arrived, in this order:
+
+```
+subagent-event updated      task=ad3e70… status='killed'  terminal=True  type=None desc=''
+subagent-event notification task=ad3e70… status='stopped' terminal=True  type=None desc=''
+```
+
+So the last one wins the tooltip, and **which word the user reads is decided by arrival order** — the
+tab settled at `stopped`. That is unobservable rather than lucky: `_TERMINAL_LED` maps `killed` and
+`stopped` to the same amber, so the intermediate patch cannot flash a different colour on its way to the
+notification. A table with only one of the two words in it would have been green-then-amber, or amber
+with a `status unknown` tooltip. **The default the table's comment is proud of is not the only thing
+earning its keep — having both synonyms is.**
+
+Note what those two events do *not* carry: `type=None` and `desc=''`. The row is the accumulation of
+every event for a task and the label fields are carried across the wholesale replace
+(`labelDescription`, `labelType` in `subagent-tabs.js`), so a terminal patch that names nothing does not
+blank the tab it settles — the tooltip still read `general-purpose — read every note: stopped`. A
+terminal event is a *status*, not a description of the thing whose status it is.
+
+**Two controls, because a stop is an absence and an absence needs both.** The ⏹ was clicked first with
+its `window.confirm` **refused**: exactly one confirmation was recorded for the one click, its text was
+`Stop read every note? It cannot be resumed.`, and the subagent was still streaming with no terminal
+event — so the confirmed click is what ended it, not the click. And the sibling subagent settled
+**green** (`completed (1 tool, 10,055 tokens)`) beside the amber one in the same strip, so amber is a
+distinction the LED draws and not a colour it was going to show regardless.
+
+The rest of the settled tab was measured in the same run: ⏹ **gone** (a Stop button on something already
+over offers to end it again), the feed still holding its 1,159 characters, the read-only note still
+present with no composer, and the parent turn completing normally afterwards
+(`is_error=False num_turns=3`) with the stopped tab **still amber at turn end** rather than re-read as
+unknown or completed by settling.
+
 ### Click and hover
 
 - Clicking a LED activates that subagent's tab — the same effect as clicking the tab itself, but the LED row is more compact and sits where the user's eyes already are. The tab strip also scrolls to reveal the target tab's button if it was offscreen, so the LED row works as a navigation primitive when many subagents have pushed the active tab beyond the visible window. Already-visible tabs do not jiggle — the scroll is a no-op when the button is on-screen.
@@ -210,6 +285,28 @@ ways at once, and both are correct:
 - Into the subagent's own tab, in arrival order
 
 The same card object drives both renderings; there is no duplication of state, only of placement.
+
+### A tab that mirrored nothing reads its transcript
+
+Mirroring is the whole of a live tab's feed, and it works because the subagent's blocks arrive on the
+turn the tab belongs to. A **background** subagent breaks that: it outlives its turn, and the rest of its
+output is translated against whichever turn is current when it lands (the *Known gap* in § Tab Lifetime).
+The tab it left behind then has nothing to claim — a label and a seed line over an empty feed, which a
+reader takes to mean the subagent did nothing rather than that its record is somewhere else.
+
+So a subagent tab whose feed is empty fills from `get_subagent_transcript(agent_id)` — the same read the
+historical tabs use, under four conditions that keep it from firing where mirroring already works:
+
+- **Settled only.** A live subagent's blocks may still be coming, and § Empty States already says what a tab with no content yet shows. Reading then would find a transcript the CLI has not written and report it as unreadable.
+- **Empty only.** Mirrored blocks are the better view — live records that the transcript on disk has not caught up with.
+- **Once per tab.** The latch is set before the read goes out, so re-opening the tab mid-read starts no second one and an explanation is never appended twice.
+- **On demand.** The read fires when the tab is activated, and when a tab the user is *already reading* settles empty. Never for a background tab: the same "twelve subagents should not cost twelve transcript reads" rule § Refresh and Reconnect states for reconnects.
+
+A row that only ever reported a `task_id` cannot be read — `get_subagent_transcript` reads by `agent_id`,
+and live runs have been observed reporting `agent_id: null` on every event, keying the tab on the task id
+instead. Such a tab keeps its seed line. The agent id is not guessed at from the session's transcript
+listing: *the panel never invents a tab* applies to a tab's contents as much as to its existence, and a
+transcript matched by description would be a claim about which subagent wrote it.
 
 ## Historical Transcripts
 
@@ -272,6 +369,8 @@ records carry.
 - Tab identity is the SDK `agent_id`, verbatim. No positional index appears in a tab key, a transcript path, or a record.
 - Tab creation is idempotent; a repeated `started` event for a known `agent_id` updates the tab rather than adding one.
 - The panel never invents a tab. Live tabs come from `subagentEvent` or from the `get_current_state` snapshot; a transcript tab comes from an `agent_id` the panel was handed — a row on a turn from this run, or the history browser's listing — never from one it composed.
+- A task the engine typed as something other than a subagent stays that way for the rest of the session. The latch outlives the turn, because the backgrounded command it describes does.
+- A subagent tab reads its transcript only when the feed it would replace can no longer fill: settled, empty, once, and on the user's gesture rather than eagerly.
 - A transcript tab is keyed on the `agent_id` under a prefix that marks it as read from disk, so it can never collide with the same subagent's live tab.
 - The strip holds one click's worth of transcripts. A fresh click, and a session change, clear the ones before it.
 - A tab settles on terminal status from either `updated` or `notification`, whichever arrives, and never waits for both.

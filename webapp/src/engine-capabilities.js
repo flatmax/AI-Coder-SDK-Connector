@@ -62,7 +62,16 @@ export const SURFACE = Object.freeze({
   TRANSCRIPT_HISTORY: 'transcript_history',
   SESSION_FORK: 'session_fork',
   RATE_LIMIT_EVENTS: 'rate_limit_events',
-  SUBAGENT_TABS: 'subagent_tabs',
+  // Three keys, split twice for the same reason: one key was answering
+  // questions the transports answer differently, so it had to be wrong
+  // about one of them. SUBAGENT_ROWS (2026-09-09) is the live strip, fed by
+  // the pump and gating no RPC. SUBAGENT_TRANSCRIPTS and SUBAGENT_STOP
+  // (2026-09-10) are what the router gates: reading what a subagent did,
+  // and ending its run. `agy` can do the first and not the second, so the
+  // Stop button and the transcript button on one row read different keys.
+  SUBAGENT_ROWS: 'subagent_rows',
+  SUBAGENT_TRANSCRIPTS: 'subagent_transcripts',
+  SUBAGENT_STOP: 'subagent_stop',
   AGENT_QUESTIONS: 'agent_questions',
   FILE_CHECKPOINTING: 'file_checkpointing',
   IMAGE_GENERATION: 'image_generation',

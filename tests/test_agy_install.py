@@ -105,11 +105,135 @@ class TestDetection:
         assert "/somewhere/else/python" in report["command"]
         assert report["expected"] != report["command"]
 
+    def test_one_interpreter_spelled_two_ways_is_not_stale(
+        self, hooks, cfg, tmp_path
+    ):
+        """The probe of 2026-09-09 read a working gate as ``stale``.
+
+        ``.venv/bin/python3`` in the file and ``.venv/bin/python`` from
+        ``sys.executable`` are one program, and calling them two refuses to
+        start the engine: ``connect`` answers ``gate_not_installed`` and the
+        consultant reports itself unavailable.
+        """
+        venv = tmp_path / "venv" / "bin"
+        venv.mkdir(parents=True)
+        real = venv / "python3"
+        real.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        real.chmod(0o755)
+        alias = venv / "python"
+        alias.symlink_to(real)
+
+        _write_entry(hooks, install.hook_command(cfg, str(real)))
+        assert install.status(cfg, path=hooks, python=str(alias))["state"] == "current"
+
+    def test_two_virtualenvs_are_stale_even_sharing_one_binary(
+        self, hooks, cfg, tmp_path
+    ):
+        """Which is why the resolved target is not the test.
+
+        A venv's ``bin/python`` is usually a symlink to the system
+        interpreter, so following the link would call two checkouts' gates
+        equal and report somebody else's install as ours. The comparison is
+        *same directory, same file within it* — one interpreter spelled two
+        ways, and nothing wider.
+        """
+        system = tmp_path / "python3"
+        system.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        system.chmod(0o755)
+        ours, theirs = tmp_path / "a" / "bin", tmp_path / "b" / "bin"
+        for where in (ours, theirs):
+            where.mkdir(parents=True)
+            (where / "python").symlink_to(system)
+
+        _write_entry(hooks, install.hook_command(cfg, str(theirs / "python")))
+        report = install.status(cfg, path=hooks, python=str(ours / "python"))
+        assert report["state"] == "stale"
+
+    def test_a_different_config_directory_is_still_stale(self, hooks, cfg, tmp_path):
+        """Only the interpreter is compared loosely; every other token is not.
+
+        The command names the config dir the hook must read the registry
+        from, and an entry naming another one would gate a different
+        registry — the same interpreter is not the same install.
+        """
+        _write_entry(hooks, install.hook_command(tmp_path / "other-cfg"))
+        assert install.status(cfg, path=hooks)["state"] == "stale"
+
+    def test_an_unbalanced_quote_reads_as_stale(self, hooks, cfg):
+        """Hand-edited and unparseable, so it is not claimed as ours."""
+        _write_entry(hooks, "'/usr/bin/python -m aic_dc.agy.hook /cfg")
+        assert install.status(cfg, path=hooks)["state"] == "stale"
+
     def test_unreadable_is_reported_rather_than_guessed(self, hooks, cfg):
         hooks.write_text("{ this is not json", encoding="utf-8")
         report = install.status(cfg, path=hooks)
         assert report["state"] == "unreadable"
         assert "not valid JSON" in report["detail"]
+
+
+class TestOneInterpreterWithTwoNames:
+    """A venv's ``python`` and ``python3`` are one program, and ``status``
+    used to call them two installs.
+
+    Found 2026-09-10 by ``probe_agy_cgroup_identity.py``'s setup, which
+    reported the gate ``stale`` on a machine where it was working: the
+    entry had been written by a process started as ``.venv/bin/python3``
+    and the probe asked as ``.venv/bin/python``. A ``stale`` reading makes
+    ``AgySession`` refuse to start, so an install that works presents as a
+    broken one — and the cause is nothing but which name resolved the
+    interpreter. See ``specs5/plan-ag/risks.md`` AG-R-14.
+
+    The second test is the one that keeps the first honest. Forgiving the
+    spelling by resolving both paths would resolve *every* venv's python to
+    the system interpreter and call two checkouts the same install, which
+    is precisely what ``stale`` exists to report.
+    """
+
+    def _venv(self, root, name="venv"):
+        """A ``bin`` directory with ``python`` and ``python3`` in it.
+
+        Shaped like the real thing: ``python3`` is a symlink to ``python``,
+        which is itself a symlink to the interpreter running these tests.
+        """
+        binaries = root / name / "bin"
+        binaries.mkdir(parents=True)
+        (binaries / "python").symlink_to(sys.executable)
+        (binaries / "python3").symlink_to(binaries / "python")
+        return binaries
+
+    def test_the_other_spelling_of_one_interpreter_is_current(
+        self, hooks, cfg, tmp_path
+    ):
+        binaries = self._venv(tmp_path)
+        _write_entry(hooks, install.hook_command(cfg, str(binaries / "python3")))
+        report = install.status(cfg, path=hooks, python=str(binaries / "python"))
+        assert report["state"] == "current"
+
+    def test_a_second_checkout_is_still_stale(self, hooks, cfg, tmp_path):
+        ours = self._venv(tmp_path, "ours")
+        theirs = self._venv(tmp_path, "theirs")
+        _write_entry(hooks, install.hook_command(cfg, str(theirs / "python")))
+        report = install.status(cfg, path=hooks, python=str(ours / "python"))
+        assert report["state"] == "stale"
+
+    def test_only_the_interpreter_is_forgiven_not_the_arguments(
+        self, hooks, cfg, tmp_path
+    ):
+        binaries = self._venv(tmp_path)
+        _write_entry(
+            hooks,
+            install.hook_command(tmp_path / "another-config", str(binaries / "python3")),
+        )
+        report = install.status(cfg, path=hooks, python=str(binaries / "python"))
+        assert report["state"] == "stale"
+
+    def test_an_interpreter_that_is_gone_is_stale_rather_than_an_error(
+        self, hooks, cfg, tmp_path
+    ):
+        binaries = self._venv(tmp_path)
+        _write_entry(hooks, install.hook_command(cfg, str(binaries / "python9")))
+        report = install.status(cfg, path=hooks, python=str(binaries / "python"))
+        assert report["state"] == "stale"
 
 
 class TestItRespectsSomebodyElsesFile:

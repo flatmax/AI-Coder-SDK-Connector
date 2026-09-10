@@ -6,7 +6,7 @@ rather than from documentation, blog posts or recollection. Verified **2026-08-3
 | What | Version | Where it was read |
 |---|---|---|
 | `google-antigravity` | **0.1.15** when this was written; **0.1.16** installed since 2026-09-03 — *Development Status :: 3 - Alpha*, Apache-2.0 | `.venv/lib/python3.14/site-packages/google/antigravity/`, `google_antigravity-0.1.15.dist-info/METADATA` |
-| `agy` CLI | **1.1.22** (`agy --version`; released 2026-08-27), 208,429,312 bytes, stripped ELF. **Re-probed at 1.1.25 on 2026-09-03** for its hook surface — see [§ The `agy` hook surface](#the-agy-hook-surface--measured-2026-09-03). **1.1.26 installed since 2026-09-05**, which is what phase 8's live gate, write and isolation runs were driven against; nothing in this file was contradicted by that bump except as noted under the write-diversion amendment below | `~/.local/bin/agy` |
+| `agy` CLI | **1.1.22** (`agy --version`; released 2026-08-27), 208,429,312 bytes, stripped ELF. **Re-probed at 1.1.25 on 2026-09-03** for its hook surface — see [§ The `agy` hook surface](#the-agy-hook-surface--measured-2026-09-03). **1.1.26 installed since 2026-09-05**, which is what phase 8's live gate, write and isolation runs were driven against; nothing in this file was contradicted by that bump except as noted under the write-diversion amendment below. **1.2.0 installed 2026-09-10** — 212,304,128 bytes, self-updated at 17:26 local, *after* that day's subagent-transcript and registry work was measured — and **nothing in this file has been re-read against it.** Its flag surface has grown four options and two subcommands this file has never covered: `--sandbox`, `--effort`, `--mode`, `--json-schema`, `mic-serve`, and `remote-control`, which is the flag [§ *Not an entry point*](#not-an-entry-point---remote-control) describes now promoted to a subcommand. [AG-R-2](risks.md#ag-r-2) is written about the wheel and applies to the binary in the same words — an alpha breaks by renaming, not by erroring — and this transport has no `unclassified` bucket to fire when it does | `~/.local/bin/agy` |
 | `claude-agent-sdk` (for comparison) | 0.2.137 | `.venv/lib/python3.14/site-packages/claude_agent_sdk/` |
 
 > **Do not re-derive this by guessing.** The SDK is at 0.1.x and alpha; it will move faster than
@@ -460,6 +460,48 @@ A per-transport name map is therefore a requirement of phase 8, not a refinement
 needing no such map is the genuine convenience; the tool names are the thing that looks like it
 transfers and does not.
 
+### `generate_image` takes a name, not a path — measured 2026-09-08
+
+The exception to the paragraph above, and it cost phase 10 a run to find. `agy`'s `generate_image`
+carries **`ImageName` and `Prompt`, and no path at all**:
+
+```json
+{"tool_name": "generate_image", "state": "DONE",
+ "tool_info": {"name": "generate_image",
+               "parameters": {"ImageName": "probe_icon",
+                              "Prompt": "A simple flat-colour icon of a padlock…"}}}
+```
+
+The binary's own schema for that field reads `jsonschema:"required,minLength=1"`,
+`jsonschema_description:"Short descriptive name for the saved file."` — a name, and the harness picks
+the location: `~/.gemini/antigravity-cli/brain/<conversation_id>/<ImageName>_<epoch_ms>.jpg`. The
+requested extension is not honoured either; a request for `.png` produced JPEG.
+
+**The same is true of the SDK, and this document already said so.** The step-stream table above lists
+`generate_image`'s inputs as `prompt`, `image_name`, `aspect_ratio` and `output_path` among its
+*outputs*. AIC⚡DC nonetheless read `output_path` as an argument for a year, and it worked on the SDK
+transport for the reason finding 1 gives: that stream merges a tool's results back into `args` at
+`DONE`, so a result field is readable as an argument there. `agy` does not merge, so on this
+transport the path is **nowhere in the machine-readable stream** — only in the model's prose, which
+AG-R-3 forbids believing.
+
+Two consequences, both structural rather than cosmetic:
+
+- **`files_written_by` cannot answer for this tool**, on any transport. It is a table of tools to
+  their *path arguments*, and this tool has none. Its `("output_path", "OutputPath")` entry describes
+  a result. Adding `ImageName` to it would be worse than leaving it: a name is not a path and no file
+  exists at it.
+- **An image has to be collected, not requested.** The location is derivable from what the frame does
+  carry — the conversation's own id and the name the model chose — so it can be found by `stat` and
+  copied into the repository, which is what `agy/consultant.py` does. Telling the model to write it
+  inside the repository instead is asking for something the tool cannot do, and the first live run
+  showed what the model does when asked anyway: it reached for `run_command` to move the file, and the
+  static policy denied it.
+
+This is AG-2's original disqualifying finding — *tool content is not on the wire* — in its narrowest
+surviving form. It does not re-open AG-14: a path that can be derived and `stat`-ed is not a diff that
+does not exist.
+
 ### Two limits that remain
 
 - **Discovery.** Hooks load from `~/.gemini/config/hooks.json`. In 1.1.25 a workspace-local
@@ -490,6 +532,12 @@ fields and names them in `truncated_fields`; **the second never truncates**. Rec
 (`USER_INPUT`, `PLANNER_RESPONSE`, `CODE_ACTION`, `GENERIC`, `SEARCH_WEB`, `CHECKPOINT`), and a
 completed edit carries a real unified diff:
 
+> **Corrected 2026-09-10.** That type list is a sample of the conversations this machine held on
+> 2026-09-03, and the tool-named members of it (`CODE_ACTION`, `SEARCH_WEB`) are a **format `agy` no
+> longer writes** — read as the current vocabulary it sends a reader looking for the wrong thing. The
+> full set is sixteen types across two eras; see [§ The `agy` transcript store, read
+> whole](#the-agy-transcript-store-read-whole--measured-2026-09-10).
+
 ```
 [diff_block_start]
 @@ -1,2 +1,2 @@
@@ -511,6 +559,206 @@ IPC: the symbols are WebRTC — `PeerSession`, ICE candidates, SCTP framing, `pe
 pairing. A running `agy` listens only on two ephemeral localhost ports for its internal language
 server, which answer `400`/`404` to anything else. **There is no way to attach to an already-running
 session**, and that is architectural rather than a missing flag.
+
+---
+
+## When a subagent is announced, and what the two frames carry — 2026-09-10
+
+`sdk-surface.md` recorded that `agy` announces a delegation with a `conversation_id` of its own, which
+is what made `subagent_rows` and `subagent_transcripts` buildable. **What it did not record is
+when**, and the answer decides whether anything can be *done* to a subagent while it runs.
+
+One turn, captured with `stream_frames` so nothing is filtered by the translator:
+
+| Step | `state` | What it carries |
+|---|---|---|
+| `tool`, `tool_name: invoke_subagent` | `ACTIVE` | `tool_info.parameters.Subagents: [{Model, Prompt, Role, TypeName, Workspace}]` — **no conversation id** |
+| `subagent`, `tool_name: invoke_subagent` | `DONE` | `subagent_info.subagents[]`: `conversation_id`, `log_uri`, `role`, `type_name`, `initial_prompt`, `workspace_uris` |
+
+**The `subagent` step is emitted once, and at `DONE`.** There is no `ACTIVE` announcement, so:
+
+- a subagent's row arrives **already terminal** — the pump has nothing to spin, and the `live` in
+  `subagent_rows`' title overstates this transport;
+- the identity anything would be keyed on — a Stop button, a live tab, a per-subagent action — first
+  exists at the moment the row ends. This is [AG-R-14](risks.md#ag-r-14) residue 1 read a second way:
+  the child does not exist when the spawn is approved, so nothing about it can be named until it
+  reports.
+
+**And `DONE` on that step is not "the subagent has finished".** In the run that measured ⏹, the child
+made two more tool calls *after* the `DONE` frame — both reached the gate, both were denied by the
+aimed refusal. So the step's state describes the *spawn*, and a row settled from it reports an end the
+subagent has not reached.
+
+## The `agy` process, measured rather than reasoned about — 2026-09-10
+
+Three facts about the process rather than the protocol, each of which a piece of shipped code
+depends on and none of which had been checked. `scripts/probe_agy_orphan.py` is the instrument; the
+consequences are in [`risks.md` AG-R-14](risks.md#ag-r-14).
+
+- **`systemd-run --user --scope` execs, so the pid is preserved.** `AgySession` records
+  `self._proc.pid`, and under [AG-18](decisions.md#ag-18) the program it spawns is `systemd-run`.
+  Measured: the recorded pid's `comm` is **`agy`** and its cgroup is
+  `/user.slice/user-1000.slice/user@1000.service/app.slice/aic-dc-<hex>.scope`. So one process enters
+  the scope and becomes `agy` — the registry's `agy_pid` names the agent, and the hook's
+  `/proc/self/cgroup` read has something to match.
+- **`agy` exits on stdin EOF, in ~0.3 s.** Closing the pipe with the host still alive ended the
+  process in **0.30 s**. This is what makes `AgySession.close()` cheap and it is why an abandoned
+  `agy` does not linger.
+- **It outlives a SIGKILLed host by under a second.** Three runs: alive and reparented to the user's
+  `systemd` 200 ms after the kill, gone at **0.60 s, 0.80 s, 0.80 s**. The orphan is real — which is
+  the case the two-pid rule exists for — and the 38-second figure this had been cited against is the
+  *Claude* CLI's, measured in `main.py`. Two different programs, two different reactions to a closed
+  pipe.
+
+### The tool inventory at 1.2.0 — read off the `init` frame, 2026-09-10
+
+Driving a real turn on 1.2.0 raised a permission dialog for **`schedule`** and for
+**`send_message`**, neither of which was in `src/aic_dc/agy/tools.py`'s `TOOL_CLASSES`. Reading the
+whole list rather than patching those two names is what showed the size of it: the `init` frame
+advertises **57 tools and the table classified 14**. An unclassified name falls to
+`GATED_BY_DEFAULT.get(None, True)`, so nothing was ungated — but the seam that enumerates *what can
+change the tree* did not know most of the ways to.
+
+The inventory is **free to read**: `init` arrives before any prompt is sent, so
+`scripts/probe_agy_tool_inventory.py` takes no model turn. Still 57 tools, as at 1.1.2x, and the
+composition has moved — nineteen `browser_*` entries, four spellings of spawning, and `sed_file`.
+
+**`sed_file` is the entry that matters.** [AG-R-11](risks.md#ag-r-11) was raised because an agent
+refused an `edit_file` reached for `sed -i` through `run_command`; on 1.2.0 that is a tool of its own.
+It is in the write seam now, with `delete_knowledge`, `execute_browser_javascript`,
+`notebook_execution`, `send_command_input`, `call_mcp_tool`, `define_subagent`, `manage_subagents` and
+`browser_subagent`.
+
+**Nothing was classified in the loosening direction**, because this frame carries bare names — no
+descriptions, no schemas — and `read` is the only class that *removes* a dialog. The other 33 are
+declared in `SEEN_UNCLASSIFIED`, which changes nothing about how a call is treated and lets the probe's
+bucket be empty by declaration. What stays open is the dialog they raise: `wait`, `schedule` and
+`command_status` each stop a turn for a human, which is phase 4's modal defect for the names its fix
+could not know.
+
+**One name in the table is no longer on the binary:** `codebase_search`. Left rather than pruned —
+gating a tool nobody has costs nothing — and reported by the probe so a *rename* is never mistaken for
+a removal.
+
+**The reader's trap, paid for once.** The table the gate consults is
+`antigravity/permissions.py::TOOL_CLASSES`, which folds the SDK's vocabulary in underneath `agy`'s. A
+first cut of the probe asked `agy/tools.py` alone and reported `finish` as unclassified when it has
+been `read` all along. Ask the merged table.
+
+## The `agy` transcript store, read whole — measured 2026-09-10
+
+Phase 5 read one capture. `subagent_transcripts` had to *render* every one of them, so this is the
+same store read exhaustively: **121 `transcript_full.jsonl` files, 1,895 records**, every conversation
+`agy` has ever written on this machine (127 directories; 6 hold no transcript at all). The reader is
+`aic_dc.agy.subagents`, and the numbers below are the ones its inferences were checked against —
+several of them by being contradicted.
+
+### The vocabulary is sixteen types across two eras
+
+| | types present |
+|---|---|
+| 9 conversations, 2026-08-03 → 08-16 | all sixteen |
+| 112 conversations, 2026-08-29 → 09-09 | `USER_INPUT`, `PLANNER_RESPONSE`, `GENERIC`, `SYSTEM_MESSAGE`, `CHECKPOINT` |
+
+The sixteen: `USER_INPUT` (175), `PLANNER_RESPONSE` (935), `SYSTEM_MESSAGE` (44), `CHECKPOINT` (11),
+`CONVERSATION_HISTORY` (10), and eleven that carry a **tool result** — `GENERIC` (577), `SEARCH_WEB`
+(47), `RUN_COMMAND` (28), `CODE_ACTION` (25), `VIEW_FILE` (16), `LIST_DIRECTORY` (9),
+`GENERATE_IMAGE` (7), `READ_URL_CONTENT` (5), `ERROR_MESSAGE` (3), `GREP_SEARCH` (2),
+`INVOKE_SUBAGENT` (1).
+
+**The era boundary is the finding, and it cuts both ways.** The tool-named result types are the older
+format: in all 112 conversations since 2026-08-29 the only result type is `GENERIC` (573 of 573). So a
+reader keyed to the current spelling alone is correct on everything the user is likely to open and
+turns *every* record of the older era into an unrendered blob with its tool card stuck pending — a
+whole era rendered wrongly rather than a feature missing. Both sets are read, and the ten stale
+spellings cost one `frozenset`.
+
+`source` is one of `MODEL` (1,652), `USER_EXPLICIT` (175), `SYSTEM` (68). It does not partition by
+type the way it looks like it should: `ERROR_MESSAGE` carries `source: SYSTEM` and is nonetheless a
+tool's result, so a reader that routes on `source` puts a failed call's output in a system notice.
+
+### A result names its call by arithmetic, and the arithmetic has a hole
+
+A result's `step_index` is **its call's index, plus one, plus the call's position within that step**.
+A response making three calls is followed by up to three consecutive results, and *up to* is the whole
+point:
+
+> **A tool call our permission dialog refuses is written nowhere.** No result record, no error
+> record, no status — the index simply skips. Across the 121 transcripts, **58 calls have no result
+> record at all**: 39 mid-conversation holes, and 19 at the file's last response, which is a turn
+> still running or cut short.
+
+The plausible reader pairs each result with the oldest call still open, and it is wrong in a way no
+green log would show. Simulated over the same 121 files, **302 of the 720 result records attach to a
+call that is not theirs, across 24 conversations**, because one hole knocks every later card in the
+conversation one call out of step. Twelve of those mispairings hand a result to a *write* call, and
+`files_written_by` then credits a file to a call that never ran — the worst available failure, since
+that list is what the browsed turn reports as changed.
+
+Under the arithmetic all 720 results attach to their own call and **none is left unattributable**. The
+two things a reader must additionally get right, both measured:
+
+- **A new `PLANNER_RESPONSE` supersedes the previous one's open calls**, whether or not it makes any
+  of its own. A refused call seen from here is a card whose response was followed by another
+  response; left open it collects the *next* call's output.
+- **A result whose call cannot be named is shown as a fenced blob**, not dropped and not folded into
+  the prose. Dropped leaves a hole; folded in attributes the harness's own words to the model.
+
+The gate probe's own subagent transcript is the specimen: `scripts/probe_agy_subagent_gate.py` denies
+everything but the delegation, and steps 4, 10 and 14 of the subagent's conversation have no result
+record. The measurement that broke the queue rule was possible only because that probe had already
+written the one transcript on the machine where a denial is the *normal* case.
+
+### Two statuses, and a failure is a type rather than a status
+
+`status` is `DONE` (1,852) or `RUNNING` (43). **There is no `ERROR` status on any record**, so a
+reader testing for one has a dead failure branch and renders every failure as a success. Failure is
+the `ERROR_MESSAGE` *type* — and only in the older format. A current-format call that ran and failed
+says so **in prose only**, which `subagents.py` deliberately does not sniff:
+`specs5/5-webapp/chat.md` § *Card Anatomy* makes the status flag the only thing a card's failure
+styling may read, and a card that guessed from the body would be a card that lies at some point.
+
+`RUNNING` is a backgrounded tool — a dev server, a watcher. It is **never the last record of a
+file** (0 of 121), so it is not "the transcript stopped mid-call"; the harness comes back. The card
+belongs pending with no duration, because nothing has finished.
+
+### Every result opens with the harness's own two stamps
+
+All 720 result records begin `Created At: …`, and 674 carry `Completed At: …` on the second line. That
+pair is **the tool's own duration**, which is not the same quantity as the gap between two records'
+`created_at` — the record is written when the harness gets round to it. Left in place they are also
+two lines of plumbing at the top of every card, so the header is stripped and used.
+
+### Append order is the order, and `step_index` is not an ordering
+
+On 120 of the 121 files the two agree, which is exactly why sorting by `step_index` looks safe. **One
+file interleaves two concurrent turns and uses five indices twice**, so sorting moves its records away
+from what the harness wrote. The index answers *"which call is this the result of"*; it does not
+answer *"what happened next"*.
+
+### The two files disagree about tool arguments, and the obvious filename is the wrong one
+
+Both exist in every conversation. `transcript.jsonl` **double-encodes each tool argument as a JSON
+string**, so a card built from it renders `"\"/tmp/x\""` for every path; `transcript_full.jsonl` holds
+the values. A reader taking the file with the obvious name looks correct in a listing and is wrong in
+every tool card. The lesser file is still read when it is the only one — a release that stopped
+writing the full file should degrade to a shabby card, not to an empty tab.
+
+### A delegation announces its children in prose, spelled unlike the stream
+
+`invoke_subagent`'s result is a `GENERIC` record whose content is English with JSON embedded in it:
+`conversationId`, `logAbsoluteUri`, `workspaceUris` — camelCase, where the same facts on the
+stream-json protocol are `conversation_id` and `log_uri`. Nothing in the record links a returned id to
+the `Subagents` argument that asked for it except **position**, and the call's own record carries no id
+for the result to reference. A count mismatch is therefore dropped rather than paired anyway: a row
+whose id belongs to a different subagent opens the wrong transcript under the right label.
+
+Two framings sit on top of the content and both are the harness talking, not a person:
+`<USER_REQUEST>` … `<ADDITIONAL_METADATA>` around a subagent's own first prompt, and a
+`<SYSTEM_MESSAGE>` block around a child's reply to its parent. The second carries a trap worth
+recording — the record *opens with a preamble that mentions the tag*, `The following is a
+<SYSTEM_MESSAGE> not actually sent by the user`, so a non-greedy match finds prose about the frame
+instead of the frame and renders the disclaimer, a stray opening tag and the body as one message.
 
 ---
 

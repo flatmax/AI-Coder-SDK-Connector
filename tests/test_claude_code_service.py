@@ -2246,6 +2246,32 @@ class TestLiveControls:
         service.session.get_server_info = lambda: _none()
         assert await service.get_server_info() == {}
 
+    @pytest.mark.parametrize(
+        ("exc", "reason"),
+        [
+            (EngineNotReadyError("The engine is not connected."), "no-engine"),
+            (SessionLostError("The session was lost."), "no-engine"),
+            (RuntimeError("transport exploded"), "failed"),
+        ],
+    )
+    async def test_server_info_names_which_failure_it_was(self, service, exc, reason):
+        """``reason``, because the viewer cannot tell these apart otherwise.
+
+        There is no engine yet and a request to a live engine failed arrive
+        as one error string and have opposite answers — wait, or try again.
+        Without this key the Debug tab painted the ordinary pre-first-turn
+        state in the error colour and told its reader a call had *failed*
+        when none had ever been made (specs5/next.md § C11).
+        """
+
+        async def _boom():
+            raise exc
+
+        service.session.get_server_info = _boom
+        result = await service.get_server_info()
+        assert result["reason"] == reason
+        assert result["error"]
+
     async def test_sdk_surface_reports_static_and_live_halves(self, service):
         report = await service.get_sdk_surface()
         assert report["sdk_available"] is True

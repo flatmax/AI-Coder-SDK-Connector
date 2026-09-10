@@ -3,6 +3,32 @@
 **Status:** the implementation queue. Current as of **2026-09-03**, HEAD `a698fdb`. The tree is clean at
 that SHA, so every claim here is about a committed state and nothing is owed to a working copy.
 
+**Four entries post-date that survey, all on 2026-09-08:** § D2 and § D3 closed, § B1's layout residue
+closed with D2's harness, and § A2 (d)'s "never on a runner" was corrected from the remote. Everything
+else was last checked at the SHA above, and closing those re-checked nothing else.
+
+**Then § D emptied on 2026-09-09**, with D1 and D4 verified against a live engine in a real browser. **So
+the only thing left in §§ A–D is C9, whose exit criterion is an event rather than a commit** — see the
+summary under § *Start here*, which had this wrong once already.
+
+**Two things landed in this period without ever appearing in this file**, and they are recorded where their
+reasoning lives rather than added here as closed items. `32d04ce7` stopped a backgrounded shell command
+arriving as a subagent row on an unrelated turn ([`impl-history/work-log.md`](impl-history/work-log.md)
+§ *Landed since*), and `2cbb61a1` closed the `agy` engine's image gap — a `generate_image` in an ordinary
+turn wrote outside the repository and was invisible to the file tree
+([`plan-ag/delivery.md`](plan-ag/delivery.md) § *What this does not do*, where it had been listed as
+unbuilt). **Both were found by driving the app** — the source the table below still has no row for, named
+once for C10 on 2026-08-29 and responsible for every commit of the week of 2026-09-03. Neither would have
+been noticed by an audit of the tree, which is what the table's three rolling records are.
+
+**The inbox refilled and drained again on 2026-09-10**, which is worth a line only because this file
+claims all three of its rolling sources are empty and for one day that was false.
+[`known-issues.md`](known-issues.md) took a live-session report — the refresh ladder telling a user their
+login was broken when the token was fine — and it was fixed the same day without passing through § C,
+because the report arrived carrying its own measurement. Recorded in
+[`impl-history/work-log.md`](impl-history/work-log.md) § *Landed since*, not here: it is closed, and the
+third defect found underneath it (a degradation with no way to be withdrawn) is the part worth reading.
+
 **This file covers the Claude engine and the app around it. It does not cover the second engine.**
 [`plan-ag/`](plan-ag/) is a separate plan of record with its own decisions (`AG-n`), risks (`AG-R-n`)
 and [`delivery.md`](plan-ag/delivery.md), and it moved a long way between 2026-08-30 and 2026-09-03
@@ -58,9 +84,17 @@ runner and **R-7's option 2 is proven on the matrix, not just inherited from `uv
 **What that run does not cover is the commit that verifies it.** It built `0e46991` at 04:21 UTC;
 `1986d45` — `--check-engine`, the `ubuntu:24.04` clean-container step, the wheel-carries-webapp assertion
 — landed at 06:40 UTC and is the one commit `master` does not have. So the published binary was built
-*before* the tripwire existed, and phase 7's stated exit criterion has still never run on a runner.
+*before* the tripwire existed, and phase 7's stated exit criterion had not yet run on a runner.
 **Nothing in this file is finished by a green matrix**, and this matrix was green without the check that
 would make it mean what § A2 (d) wants it to mean.
+
+**Phase 7 is finished, and has been since 2026-08-29** — read 2026-09-08, eleven days after the fact.
+Five further pull requests (#2–#6) merged into `master`, every one of them carrying `1986d45`, and every
+one published a three-artefact release. The verification steps live in the `build` job that the `release`
+job declares `needs:` on, so three attached artefacts *are* three green legs including the clean-container
+`--check-engine`. § A2 (d) has the evidence and the reason the paragraph above stayed stale for a
+fortnight: `gh`'s token expired, and a broken tool was allowed to stand for an unanswerable question when
+the repository is public and the release list is one unauthenticated request away.
 
 That gap closes on the next real pull request into `master` and by no other route: **manual runs are
 declined by decision** (2026-08-28), and `workflow_dispatch` has been removed from the workflow so the
@@ -119,7 +153,8 @@ rather than only when something cites it. Both of the other rolling records empt
 work-log's § *Specified but not yet built* closed on B4's decline, and the inbox closed on B6's finding.
 **So all three sources that feed this queue are empty, and §§ A–C hold nothing open but C9, whose exit
 criterion is an event.** What is left is § D — **of this file**, which as of 2026-09-03 is a narrower
-claim than it reads: the second engine's queue is [`plan-ag/`](plan-ag/)'s and is not empty. **Then § C reopened and closed again on 2026-08-29 with C10** — `/usage` opening onto a tab that did
+claim than it reads: the second engine's queue is [`plan-ag/`](plan-ag/)'s and is not empty.
+(**§ D emptied on 2026-09-09**; that sentence is left as the reading it was on the day.) **Then § C reopened and closed again on 2026-08-29 with C10** — `/usage` opening onto a tab that did
 not contain what the command's own reply said it did — **and that one arrived from a source none of the
 three rolling records covers: a user comparing this app against the CLI it wraps.** It is worth naming
 as a fourth source, because no audit in this file would have found it. A routed slash command tells the
@@ -158,6 +193,29 @@ the newest one — a permission dialog with 570px of empty editor for a one-line
 single frame with no resizing, which is the cheapest a screenshot harness will ever be to justify.
 C11 is a small companion to it. C9 still waits on an event.
 
+**Both landed 2026-09-08, and the pairing paid for itself.** The harness was built *before* the dialog was
+fixed, and the run that witnessed the 520px editor is what makes the fix a regression test rather than an
+edit. It also settled the argument in D's favour a third time: 17 of the 19 checks passed on unfixed code,
+so what the browser bought was not a pile of findings but a *measurement* of three behaviours that had
+only ever been read by eye. ~~The remaining queue is C9 (waiting on an event), D4, and § E's declined~~ —
+and **that sentence was wrong when it was written: it dropped D1**, which § D still carried open two
+sections below. The paragraph was composed from the sitting that had just closed D2 and D3, so it listed
+what that sitting could see. **A summary of a queue is not a reading of it**, and the cheap guard is to
+write the sentence from the section rather than from memory of the day.
+
+**§ D closed on 2026-09-09** — D1 and D4 together, in one sitting, for the reason both had waited: each
+needs the *whole app* live, and the launch cost is shared once two probes want it. So the remaining queue
+is **C9 (waiting on an event) and § E's declined**, plus [`plan-ag/README.md`](plan-ag/README.md), which
+needs a machine that can run `agy`.
+
+**And the residue it left closed the same week (2026-09-08, later).** D2's own last clause said B1's
+question — five HUD sections and their heads in 300px — was "now a function rather than a project", and it
+was: a third scene, 34 more checks, 53 in total. The prediction held, which is the useful part of it — the
+second and third scenes cost a fraction of the first, so the launch cost D2 waited on since phase 3 was
+almost all fixed cost. Two findings came back, and one of them goes the *unwelcome* way: a claim in a
+source comment turned out to be weaker than the ceiling it justifies (§ D2 below, and
+[`5-webapp/viewers-hud.md`](5-webapp/viewers-hud.md) § *Five Sections In 300px Is Measured Now*).
+
 **§ C3 closed 2026-08-28**, and with it § C: everything left in this file is § D's verification debt or
 § E's declined. The convergence went the way the item guessed, onto the client-side rule, and the item
 turned out to be **three deletions rather than one** — the server-side `relPath` enrichment it named, plus
@@ -188,14 +246,19 @@ the immediate exit, because `add_signal_handler` is not available there to run a
 
 ## A. The two phases the plan has not shipped
 
+**Both have, now.** A1 closed 2026-08-28 and A2's last clause closed 2026-09-08; the section is kept for
+the reasoning under it, and the heading is left standing rather than rewritten because what it named was
+true for the fortnight it took.
+
 **A1 — Phase 8, index freshness after `Bash`.** ✅ *Built 2026-08-28 — leaves this queue.* Above for
 what shipped and what was accepted; [`plan/decisions.md#cc-18`](plan/decisions.md) holds the reasoning
 and the fifth option that closed it. The work-log's § *Landed since* carries the record.
 
-**A2 — Phase 7, packaging and the release path.** *(a)–(d) all landed 2026-08-27, and (a)–(c) are now
-confirmed on a runner: a green three-platform build and a published release, read from the Actions tab
-2026-08-28. What remains is (d) alone — the verification steps postdate the run that would have exercised
-them, and only the next PR into `master` can close that.*
+**A2 — Phase 7, packaging and the release path.** ✅ *(a)–(d) all landed 2026-08-27 and all four are now
+confirmed on a runner — **the whole item leaves this queue** (closed 2026-09-08).* (a)–(c) had a green
+three-platform build and a published release from 2026-08-28; (d) was the last thing owed, and five more
+merges have since carried it. Six releases exist, one per pull request #1–#6, each with all three
+artefacts attached — see (d) for why that is proof rather than circumstance.
 
 **(a) The build command described a deleted engine.** ✅ *Fixed.* `.github/workflows/release.yml` predated
 the conversion, and its PyInstaller step named, as things to bundle, packages phase 3 removed from
@@ -300,8 +363,8 @@ comment were all corrected:
 Users who want their own CLI keep `engine.json`'s `cli_path`, which bypasses discovery entirely
 (`claude_code/health.py:259`).
 
-**(d) The exit criterion is a fresh machine, not a green build.** ✅ *Built 2026-08-27; verified locally,
-not yet on a runner.* Phase 7's own wording: "a fresh machine can install and run without a manual
+**(d) The exit criterion is a fresh machine, not a green build.** ✅ *Built 2026-08-27; **confirmed on a
+runner 2026-09-08**, five times over, after a fortnight of reading as owed.* Phase 7's own wording: "a fresh machine can install and run without a manual
 `npm i -g @anthropic-ai/claude-code`". The build-time half was the archive assertion and `--version`; the
 runtime half is now `aic-dc --check-engine`, which resolves the binary the SDK would spawn, runs it, and
 exits 1 when nothing resolves or 2 when something resolved and would not run. The Linux leg runs it inside
@@ -320,12 +383,29 @@ the wheel now carries `webapp/dist` at `aic_dc/webapp_dist` — the third entry 
 priority list, which until now had no producer. The include is conditional, because the declarative form
 fails a dev checkout that has not run Vite; CI asserts on the built wheel instead of trusting step order.
 
-**What is still owed here** is a run on a runner — and as of 2026-08-28 that is the *only* thing owed in
-phase 7, because (a)–(c) have one. The three verification steps were committed after the green run, so
-they have executed locally and nowhere else. They will run on the next pull request merged into `master`
-and, by decision, on no earlier occasion; a manual dispatch is not available and is not wanted (§ E).
-Two platforms stay weaker even then: Windows and macOS get the resolve-and-run check but no
-clean-environment guarantee, because a Linux container cannot speak for them.
+~~**What is still owed here** is a run on a runner.~~ **It has had five, and this paragraph was stale for
+eleven days** (corrected 2026-09-08). The steps were committed as `1986d45` on 2026-08-27, after the run
+that published the first release — that much was true. Since then five more pull requests have merged into
+`master` (#2 `f9d6c5e` through #6 `ab7475c`), `1986d45` is an ancestor of every one of them, and each
+published a release with all three artefacts attached: `2026.08.29-12.26-f9d6c5ef` onward, the newest
+`2026.09.06-05.37-ab7475c6` at 248.2 / 223.7 / 236.9 MB. **A release is proof and not circumstance**
+because the verification steps live in the `build` job and `release` declares `needs: build` — three
+attached artefacts mean three green matrix legs, so the archive assertion, `--version`, `--check-engine`
+and the fresh-`ubuntu:24.04` container step all passed on a runner, on every one of those merges. The
+sanctioned substitute in § E worked exactly as designed: the next real PR carried it, and nobody had to
+spend a dispatch.
+
+**Windows and macOS stay weaker, as predicted**, and that part of the paragraph survives: they get the
+resolve-and-run check but no clean-environment guarantee, because a Linux container cannot speak for them.
+
+**How this went unnoticed is the finding, and it is § A2 (b)'s lesson from the other side.** That item's
+rule is *check the remote before writing a plan that turns on its state*; the reason it was learnt there
+is that `gh` had been authenticated the whole time while the plan reasoned from a local `git log`. Here
+`gh`'s keyring token has since gone invalid (`gh auth status`: "The token in keyring is invalid"), so the
+tool the lesson was written about is the one that no longer works — and the check was still possible,
+because the repository is public and its release list is an unauthenticated `GET` away. **One broken tool
+is not evidence that a claim is unverifiable**, which is the same shape as the lesson above and the more
+expensive half of it: a stale "owed" reads as work remaining and quietly keeps a phase open.
 
 Spec homes: [`6-deployment/packaging.md`](6-deployment/packaging.md),
 [`6-deployment/build.md`](6-deployment/build.md).
@@ -775,13 +855,23 @@ it before planning a sitting rather than only when it is cited.
 *(It refilled and emptied again: a stale-reference-twin entry noticed 2026-08-28 was cleared 2026-08-29,
 and clearing it produced § B6. The advice above earned itself in one day.)*
 
-**C11 — The Debug section still paints "no engine yet" red.** ✳ *Open, small.* The Usage and Session
-sections were corrected on 2026-09-03 — a `no-engine` headline renders in secondary grey, because a
-window nobody has prompted in yet is not a fault — but the Debug section's *"Server info unavailable"*
-and *"Last refresh failed"* still use the error colour for the same pre-session state, and *"failed"*
-is the wrong word for a call that never had an engine to reach. Defensible where it sits, since Debug
-is where raw facts belong; recorded because the two halves of one tab now disagree about what red
-means. Reasoning in [`5-webapp/viewers-hud.md`](5-webapp/viewers-hud.md) § *When the breakdown fails*.
+~~**C11 — The Debug section still paints "no engine yet" red.**~~ **Built 2026-09-08 — leaves this
+queue.** The Usage and Session sections were corrected on 2026-09-03 — a `no-engine` headline renders in
+secondary grey, because a window nobody has prompted in yet is not a fault — but the Debug section's
+*"Server info unavailable"* and *"Last refresh failed"* still used the error colour for the same
+pre-session state, and *"failed"* is the wrong word for a call that never had an engine to reach.
+Defensible where it sat, since Debug is where raw facts belong; recorded because the two halves of one
+tab disagreed about what red meant. Reasoning in
+[`5-webapp/viewers-hud.md`](5-webapp/viewers-hud.md) § *When the breakdown fails*.
+
+**It was not a colour bug, which is why it was worth taking rather than patching.** `get_server_info`
+sent no `reason` at all, so the browser could not tell "no engine yet" from "a request failed" *even in
+principle* — a `class=${...}` ternary would have had to guess from the error string, which is what the
+breakdown's own note stopped doing on 2026-09-03. The fix is a service-side `_control_failure()` naming
+the reason for `get_server_info` and `get_context_usage` alike, replacing the two hand-written pairs:
+**a vocabulary the viewer branches on, spelled out separately at each site, is a vocabulary that grows a
+third spelling** — and this item is what that looks like from the far end, five days after the first
+spelling was corrected alone.
 
 **C10 — `/usage` opened onto a tab that did not hold what its reply named.** ✅ *Built 2026-08-29 —
 leaves this queue.* Reported by a user against the CLI's own `/usage` panel: "I don't see that level of
@@ -887,25 +977,81 @@ numbers have met a live CLI and lost — the argument for this section is
 [`0-overview/implementation-guide.md`](0-overview/implementation-guide.md) § *Verifying UI Work Against
 a Running Engine*.
 
-**D1 — ⏹ Stop and the amber LED on a subagent tab.** `stop_task` is its own control subtype
-(`SDKControlStopTaskRequest`) answered with a `task_notification` of status `stopped` in the message
-stream. The cheap substitute was tried and **failed**: an agent's own `TaskStop` against a live
-background subagent killed it with the CLI emitting no terminal task message at all, leaving engine
-and browser both reading `status: null, terminal: false` and the LED cyan. So the two paths are not
-interchangeable and **the webapp's own ⏹ is the only thing that can verify itself.**
-[`plan/README.md`](plan/README.md) open item 9, last clause.
+**This section is empty as of 2026-09-09.** All four items closed — D2 and D3 on 2026-09-08, D1 and D4 on
+2026-09-09 — and the entries stay below with what each one found, because **the record of what a
+verification cost and what it turned up is the only durable part of it**. The section itself stays too: it
+is not a list that got finished, it is where the next unwatched claim goes. Two harnesses now sit under it
+so the next entry costs a scenario rather than a project — `scripts/_live_app_probe.py` for anything
+needing a live engine, `webapp/src/layout-harness.js` for anything needing pixels.
 
-**B1's own residue is D2's, not this section's.** The HUD's collapse behaviour is asserted from the
-DOM — a collapsed section's body is absent and its headline is not — which jsdom answers honestly
-because it is presence, not layout. What jsdom cannot answer is whether five sections and their heads
-fit 300px on a real screen, which is the same distance from a pixel that § D2 already records.
+~~**D1 — ⏹ Stop and the amber LED on a subagent tab.**~~ **Verified 2026-09-09 — leaves this queue, and
+empties this section.** `stop_task` is its own control subtype (`SDKControlStopTaskRequest`) answered with
+a `task_notification` of status `stopped` in the message stream. The cheap substitute was tried and
+**failed**: an agent's own `TaskStop` against a live background subagent killed it with the CLI emitting
+no terminal task message at all, leaving engine and browser both reading `status: null, terminal: false`
+and the LED cyan. So the two paths are not interchangeable and **the webapp's own ⏹ is the only thing that
+can verify itself.** [`plan/README.md`](plan/README.md) open item 9, last clause.
 
-**D2 — Two rendering behaviours cannot be tested from jsdom.** ~~The `Bash` summary's three-row clamp is
-layout,~~ and the permission dialog's Monaco style-clone tests assert that the rules *arrive*, not that
-the editor lays out. A screenshot-based regression harness is the only thing that would catch a
-re-break, and it **must write files rather than return images inline** — raising the buffer ceiling
-made one inline screenshot survivable, and a ceiling is not a budget.
-[`plan/README.md`](plan/README.md) open item 6.
+**It verified itself in 17 checks** ([`scripts/subagent_stop_probe.py`](../scripts/subagent_stop_probe.py),
+findings in [`5-webapp/subagent-browser.md`](5-webapp/subagent-browser.md) § *Amber Is Measured Now, And
+The Engine Answers Twice*), and **that last sentence was the item's real content.** One ⏹ produced *two*
+terminal events with two different words — a `task_updated` patch of `killed`, then a `task_notification`
+of `stopped` — where the engine's own docstring said "or" and had been read as exclusive. So the cyan LED
+the substitute left behind was never a defect in this surface, which is a conclusion only the expensive
+route could reach. The stopped tab went amber with the outcome in its tooltip, ⏹ left it, its feed kept
+1,159 characters, and the sibling subagent settled **green** in the same strip — a distinction the LED
+draws rather than a colour it was going to show anyway.
+
+~~**B1's own residue is D2's, not this section's.**~~ **Closed 2026-09-08 with D2's harness — leaves this
+queue.** The HUD's collapse behaviour was asserted from the DOM — a collapsed section's body is absent and
+its headline is not — which jsdom answers honestly because it is presence, not layout. What jsdom could
+not answer is whether five sections and their heads fit 300px on a real screen. A `usage-hud` scene now
+measures it: 34 checks in
+[`scripts/layout_probe.py`](../scripts/layout_probe.py) [5]–[7], recorded in
+[`5-webapp/viewers-hud.md`](5-webapp/viewers-hud.md) § *Five Sections In 300px Is Measured Now*.
+
+~~**D2 — Two rendering behaviours cannot be tested from jsdom.**~~ **Built 2026-09-08 — leaves this
+queue.** ~~The `Bash` summary's three-row clamp is layout,~~ and the permission dialog's Monaco
+style-clone tests assert that the rules *arrive*, not that the editor lays out. A screenshot-based
+regression harness is the only thing that would catch a re-break, and it **must write files rather than
+return images inline** — raising the buffer ceiling made one inline screenshot survivable, and a ceiling
+is not a budget. [`plan/README.md`](plan/README.md) open item 6. What landed is
+`scripts/layout_probe.py` over `webapp/src/layout-harness.js`, 19 checks across all three cases — 53
+after B1's residue joined it later the same day; the recipe and the eleven traps it cost are in
+[`0-overview/implementation-guide.md`](0-overview/implementation-guide.md)
+§ *Measuring Layout in a Real Browser*, and the account is in the work-log's § *Landed since*.
+
+**The item's framing was half wrong, and the harness is what showed it.** It asked for a *screenshot*
+harness; what earns a browser is that it **measures**. Every check asserts on numbers read out of a real
+layout engine and the PNGs are evidence for a human reading a failure, never the assertion — which
+satisfies the write-files-not-inline requirement as a consequence rather than as a rule, and skips the
+golden-image maintenance burden a screenshot-comparison harness would have brought. The one requirement
+the item was exactly right about is the positive control, and it was needed: an implementation making
+every editor 90px tall passes "the editor is content-driven", so a 200-line diff must be at the ceiling
+and must scroll.
+
+**Its first run found the defect it was built for and 17 things that were already right**, which is worth
+as much: the Monaco style clone and the tool-card grid are now *measured* correct at 520, 400 and 300px,
+and the container query is doing more than the spec recorded — the summary gets 282px at a 300px card
+against the 164px of the rail-at-300px layout it replaced. The dialog's empty editor is fixed under it
+(§ *`write` — the diff is the feature* in
+[`5-webapp/permission-dialog.md`](5-webapp/permission-dialog.md)): 116px of box for a 38px diff where it
+was 520px, with five unit tests on the height writer that fail without it.
+
+~~**Residue, and it is not this item's.**~~ **Taken 2026-09-08, later the same day, and the estimate held.**
+B1's clause above — whether five HUD sections and their heads fit 300px on a real screen — was a scene
+nobody had written; adding one was a function rather than a project, and it came to 34 checks over one
+scene and three builds of it. D4 below is not a layout question and did not belong here.
+
+**Two findings, and the second is why measuring beats asserting in both directions.** The token-row
+ellipsis rule (`.token-value { flex: none }` against a model name that clips) is real and was verified by
+mutation — but no ordinary model id is long enough to trip it at 300px, and it takes a full Bedrock
+cross-region inference-profile ARN as a `turn_model_usage` key to clip anything, so the check carries one
+as a positive control. And `usage-hud.js` justifies its `max-height: 80vh` by saying forty files "runs off
+the bottom of the screen": with the ceiling removed the overlay reached 1085px of an 1100px window and
+stayed on screen. The ceiling is right and the reason given for it needs a ~900px viewport before it is
+true. **A harness that only ever confirms comments is not reading them** — that one is now recorded as
+viewport-dependent rather than repeated.
 
 **A third case joined it on 2026-09-03, from the first live Antigravity turn.** The permission dialog
 renders roughly 570px of empty editor for a one-line diff — a +1 −0 change filling the viewport,
@@ -922,16 +1068,48 @@ guards now in `block-render.test.js` say the rules exist — which is the same d
 the Monaco clone tests are. Widths were read at 520, 400 and 300px by hand, twice, and neither reading
 is repeatable by anything in the suite.
 
-**D3 — The question-preview `--without` A/B is not automated.** `scripts/question_preview_smoke.py`
-supports it and the specs record its result, but nothing re-runs it when the CLI ships a new build —
-and what it measures is exactly the kind of detail a version bump moves.
-[`plan/README.md`](plan/README.md) open item 8.
+~~**D3 — The question-preview `--without` A/B is not automated.**~~ **Built 2026-09-08, and the item was
+blocked by its own framing.** It asked for the A/B to re-run on a CLI upgrade; everything the A/B
+measured is a *string literal in the CLI binary*, so the check is a static scan that runs offline on
+every suite run — `claude_code/cli_surface.py` with `test_claude_code_cli_surface.py`. The live script
+keeps the two halves no static read can reach (that the block reaches the model, that the CLI accepts
+our answer), and `--ab` makes that half one command with its expected outcome stated. Reasoning in
+[`impl-history/work-log.md`](impl-history/work-log.md) § *Landed since*.
 
-**D4 — The cost chip's two exceptional renderings are unobserved.** "Nothing extra" and "cost unknown"
-hold in 60 tests and no ordinary turn causes either. Phase 6's entry says so in its exit criterion;
-provoking them needs a contrived turn, and the rule that came out of that phase applies — **two turns
-minimum when checking anything per-turn**, since a session's first turn has `turn_cost_usd` equal to
-`total_cost_usd` and cannot tell a difference from a running total.
+~~**D4 — The cost chip's two exceptional renderings are unobserved.**~~ **Observed 2026-09-09 — leaves
+this queue.** "Nothing extra" and "cost unknown" hold in 60 tests and no ordinary turn causes either.
+Phase 6's entry says so in its exit criterion; provoking them needs a contrived turn, and the rule that
+came out of that phase applies — **two turns minimum when checking anything per-turn**, since a session's
+first turn has `turn_cost_usd` equal to `total_cost_usd` and cannot tell a difference from a running total.
+
+**Both were provoked in one session, 19 checks** ([`scripts/turn_cost_probe.py`](../scripts/turn_cost_probe.py),
+figures in [`5-webapp/viewers-hud.md`](5-webapp/viewers-hud.md) § *Three Of The Four Rows Are Measured
+Now*). A forwarded `/help` — 4ms, `num_turns: 0`, total unmoved — is where a *genuine* measured zero comes
+from, and it read `nothing extra` twice with the session total byte-identical either side. `SIGKILL` on the
+CLI child six seconds into a stream made the turn fail late, so the footer was ours: `unpriced`, chip `cost
+unknown`. The two-turns rule shaped the run rather than annotating it — turn A necessarily reported
+`turn == total`, and the delta was proved by a fourth turn pricing `0.0126215` against a total that went
+`0.0623465 → 0.074968`. The fourth basis, `reset`, is **unreachable from the app** (`SLASH_ROUTES` takes
+`/clear` before the CLI sees it; a resume calls `CostLedger.reset()`) and is skipped out loud rather than
+left as a silent gap.
+
+**The probe's first version predicted the wrong basis, and the correction is kept in its docstring.** It
+expected `/help` to return `total_cost_usd: 0` and trip `reset`, on the strength of a smoke run whose
+`/help` reported a zero total — but `/help` was that session's *only* turn, so the zero meant nothing had
+been spent yet. **A zero read from a single-turn session is not evidence about what that turn did**, which
+is the same shape as the two-turns rule the item already carried, arriving from the other direction.
+
+**§ D is empty. Every item in it was closed by driving the app, and all four turned up something their own
+entry had not predicted** — D2 that a source comment's justification was weaker than the ceiling it
+defends, D3 that the check it asked for was a static scan and needed no run at all, D1 that the engine
+answers a stop twice, and D4 that phase 6's guess at how to provoke both renderings ("an immediate Stop")
+was wrong in both directions. **That is the yield an unwatched claim actually has**, and none of it is the
+finding the entry was written to expect. The recipe those four paid for is
+[`0-overview/implementation-guide.md`](0-overview/implementation-guide.md) §§ *Verifying UI Work Against a
+Running Engine* and *Measuring Layout in a Real Browser*, and the launch cost is now shared support rather
+than a per-item project: `scripts/_live_app_probe.py` for a live engine,
+`webapp/src/layout-harness.js` for pixels. **The next entry in a section like this one is cheap to check,
+which is the point of having spent the four.**
 
 ---
 

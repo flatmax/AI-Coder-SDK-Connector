@@ -1852,6 +1852,18 @@ fact on disk and the decision is a question over a socket, and each fails safely
 | Payload unparseable, we own nothing | **allow** | Cannot be ours, and refusing would break a stranger's session on a bug of ours. |
 | Payload unparseable, we own something | **deny** | Might be ours. |
 
+**Amended 2026-09-10 — the third row was two situations wearing one description.** "Host unreachable"
+covered a host that is *running and not answering* and a host that **no longer exists**, and only the
+first is ours to deny. The rows now read:
+
+| Situation | Answer | Why |
+|---|---|---|
+| Entry present, host process gone, its `agy` gone too | **allow** | A corpse entry. Nothing from that session is left to gate, so the only thing it can still do is intercept a conversation the *user* resumes. Swept at the next `AgyGateServer.start`. |
+| Entry present, host process gone, its `agy` alive | **deny** | An orphaned agent — our child outliving us. This is the row that makes "stale means allow" wrong. |
+| Payload unparseable, every entry we hold is a corpse | **allow** | We own nothing that is running, so it cannot be ours. Before this, one unclean exit made the row below permanent. |
+
+See [§ The pid that was written and never read](#the-pid-that-was-written-and-never-read-2026-09-10).
+
 **The live tripwire passed, and its first version passed for the wrong reason.** The gate denied
 *everything*, so the model gave up before proposing a write — leaving "the file is unchanged" true and
 meaningless. That is the same shape as the AG-R-12 error two entries up, caught this time before it
@@ -3852,3 +3864,1326 @@ on the posture selector does nothing at all. That is the **gesture latch** worki
 requires a pointer or key event before it honours a change, so a browser restoring form state cannot
 arm a destructive posture. It has to be driven with a real gesture, which is a fact about testing
 this control rather than a fault in it.
+
+---
+
+## AG-16 — the consultant learns the transport that can pay for it (2026-09-06)
+
+Built in one sitting after the queue review that found it. The user's framing is the whole of the
+reasoning: *"using the agy subscription, there is no longer a blocker."*
+
+**What was blocked.** Two items in this directory had sat open since phase 1 with "not a code
+problem" beside them — `generate_image` had never returned an image, and no *successful* consultation
+had been watched streaming into its tab. Both were the free tier: every Gemini image model reports
+`limit: 0` on such a key, which is an allowance of zero rather than a throttle, and what is left is
+capped at 20 agent requests per model per day and queued behind paid traffic. The recorded fix was to
+enable billing on the key's Cloud project ([AG-12](decisions.md#ag-12)), and nobody had.
+
+**What was already sitting there.** `agy` is the same product reached over a pipe, authenticated by
+OAuth against the owner's *subscription*, and its `init` frame advertises `generate_image` among its
+57 tools. Phase 8 had already built the process, the stream reader, the registry claim and the gate.
+So the second implementation of the consultant is the first one that can run, and it is composition
+rather than new machinery.
+
+### The sentence that was true when it was written and wrong when it was read
+
+`claude_code/service.py`'s own log line said *"There is no agy equivalent — the CLI has no one-shot
+consultation mode."* It was written in phase 1, when nothing in the tree drove `agy` at all. By
+2026-09-05 it was wrong twice over — `agy` runs headlessly per prompt, and phase 8 had built every
+piece a consultation needs — and it was still being printed to users as the reason they had no
+consultant.
+
+**This is the fourth time this file has recorded the same shape** (`EngineHealth.mcp`, the read tools'
+`ARG_ALIASES`, the terminal HUD's four specifications) and the first where the stale claim was
+*addressed to the user*. A field with no reader is invisible until an audit; a **diagnostic** with no
+reader is worse, because it is read exactly when somebody is trying to fix something and it sends
+them to the wrong place.
+
+### Containment, which is where the two transports genuinely differ
+
+The SDK consultant contains itself by *enabling* only `FINISH` and, for an image, `GENERATE_IMAGE`.
+That is not available here: `agy`'s tool set belongs to the binary, its headless posture auto-denies
+rather than asking, and AIC⚡DC therefore runs it with `--dangerously-skip-permissions` and answers
+the hook itself. A consultation cannot subtract a tool; it can only answer for one.
+
+So `AgyGateServer` grew a second posture — `StaticPolicy`, a fixed allowlist with **no dialog** —
+beside the broker it already had. Exactly one of the two must be given, checked at construction rather
+than at the first tool call, because a gate server with neither would fail closed in a way that reads
+as an unhelpful model rather than as a defect.
+
+**A consultation must not raise a dialog, and the second reason is the structural one.** It was
+already answered — the `mcp__aic-dc-antigravity__*` call reached the dialog by the ordinary path
+before any of this ran. And the Claude turn that asked is *blocked on the tool result*, so a dialog
+raised mid-consultation interrupts a turn to ask about a call the user never made and cannot
+evaluate. Denials carry prose instead, which is [AG-R-11](risks.md#ag-r-11)'s mechanism used the
+useful way round: a refused agent that is told *"answer from what you were given"* answers, where one
+told nothing goes looking for another route.
+
+**It refuses to run without the gate installed.** An unclaimed conversation is passed through by the
+hook — correctly, that is how the user's own sessions stay untouched — so an unclaimed *consultation*
+is an agent with 57 tools and the repository as its cwd. `available` is false without a `current`
+gate, and a `stale` one (another checkout's hook) does not count.
+
+### The turn it must not end
+
+`AgySession.stream_turn` finishes by emitting `streamComplete`, which carries a request id and tells
+the browser a turn is over — and the open turn is the *Claude* one holding this tool call. A
+consultation that used it would settle the user's turn from inside a tool.
+
+So the session was split: `stream_frames` is the reader with no rendering in it, and `stream_turn` is
+that plus a translator and the close. One reader, two callers, and a test asserts no `streamComplete`
+reaches the tab.
+
+**Splitting it broke something a test caught immediately, and the failure is worth keeping.** An async
+generator's `finally` runs when it is closed, and closing the *outer* generator does not close the
+inner one — it is left suspended until garbage collection. So ⏹ on a turn (which closes the outer
+generator) stopped clearing the turn latch, and the next `stream_turn` was refused with
+`TurnInProgressError` on a session with no turn running. Before the split there was one generator and
+no inner one to forget. `stream_turn` now closes it explicitly, in a `finally`.
+
+### Three things reused rather than rebuilt, and one field name that is still a guess
+
+`files_written_by` already maps `generate_image` to its path argument under *both* Antigravity
+spellings, so the image path is read through the shared table rather than a fourth vocabulary.
+`verify_image_write` was lifted out of the SDK consultant unchanged and is now the one rule for
+believing a write: `stat` at the absolute path, containment against the repo root, non-zero bytes.
+`AgyTranslator` gained the `agent_id` its SDK counterpart has carried since the consultation tab was
+built — three hardcoded `None`s — which is the whole of what puts a consultation's blocks in its own
+tab.
+
+**What is not settled is which name `agy` gives that path.** Both spellings in the table come from the
+SDK's vocabulary; the CLI's `generate_image` arguments have never been captured. The offline tests
+feed the shape they assume, so they cannot find this — it is phase 4's `PATH (none named)` trap
+exactly, a table that looks right and is never exercised. `scripts/probe_agy_consultant.py` prints the
+tool frame verbatim on failure so one run settles it.
+
+### A limit found by a test, in the place least likely to be reasoned about
+
+The consultation's gate socket was first placed under `config_dir`, beside the engine's. A test whose
+`tmp_path` was long failed with **`AF_UNIX path too long`** — `sockaddr_un` bounds a socket path at
+about 107 bytes, and `config_dir` is configurable while the engine's short path is merely a
+coincidence of `~/.config/aic-dc` being short. Consultation sockets now live in the system temp
+directory under a short name; the registry entry carries the path to the hook, so where it lives is
+immaterial.
+
+### What is proven and what is not
+
+Thirty-two new tests, and the suite is 4,547 green. What they prove is the shape: the policy denies
+what it should, the claim is released, no `streamComplete` reaches the tab, every block is attributed
+to the consultation, a diverted image fails loudly, and an explicit `engines.consultant` never
+silently uses the other transport.
+
+**What they cannot prove is that any of it generates an image**, and that is the exit criterion.
+`scripts/probe_agy_consultant.py` is two real turns on the paid subscription: a second opinion allowed
+*nothing*, and an image verified on disk with the gate's own decision log showing `generate_image` as
+the only allow. Until it runs, this entry describes a build and not a result — which is the
+distinction phase 7's two inert checks and phase 3's three live-only bugs were all about.
+
+## Phase 11 — the engine policy, and what a fresh server said about it (2026-09-07)
+
+[AG-17](decisions.md#ag-17) was built on 2026-09-06 with 20 tests and no delivery entry, and its exit
+criterion was explicitly not met: *"not met until a fresh server has been started on a Claude-only
+`app.json`, since everything above tests the pieces rather than the startup that assembles them."*
+This is that sitting. `scripts/probe_engine_policy.py` is the artefact, **18 checks green across two
+servers**, and the criterion is met. It also cost two findings, both in the config layer rather than
+in phase 11's code, and both about whether `engines.enabled` is a policy an organisation can rely on
+rather than a preference one machine happens to hold.
+
+### The check that would have passed for the wrong reason
+
+**This machine has no `agy` binary and no Gemini key.** So `mountable == ["claude"]` was *already
+true* before any policy existed, and a probe that started one server on a Claude-only `app.json`
+would have gone green while proving nothing — it cannot tell "the policy removed the second engine"
+from "there was never a second engine here". That is the same shape as `probe_agy_gate.py`'s deny
+tripwire resting on write diversion, and the same shape as phase 9's note that an absent dialog is
+also what a turn that never got that far looks like. This suite has now learned it three times, which
+is the argument for the probe carrying its own control rather than for another paragraph.
+
+So the probe runs **two servers on the same machine in the same environment**, and the first one is
+the point:
+
+| | `app.json` | `mountable` | Claude session's MCP servers |
+|---|---|---|---|
+| **A. control** | no `engines.enabled` | `agy`, `antigravity`, `claude` | `aic-dc`, **`aic-dc-antigravity`**, `chrome-devtools` |
+| **B. criterion** | `enabled: ["claude"]` | `claude` | `aic-dc`, `chrome-devtools` |
+
+Run A is what makes run B a measurement. Both Antigravity engines mount, the consultant's server is
+in the session, and then the *only* thing that changes is one key in one file.
+
+**What the probe supplies and what it does not.** Nothing in the startup path authenticates either
+transport — the SDK engine mounts on a credential *resolving* plus the wheel importing, and `agy`
+mounts on `shutil.which("agy")` — so the probe puts a `GEMINI_API_KEY` in the child's environment and
+an executable named `agy` on its `PATH`, and reports that it did. Both are substitutes for a **mount
+condition**, never for a working transport, and no turn is taken through either. The stub records
+every invocation of itself and there were none, so "startup only asked whether it existed" is
+measured rather than assumed.
+
+**Assertion 3 reads the engine's own answer.** `get_mcp_status()` is a control request to the `claude`
+CLI asking which MCP servers *it* connected — the criterion's "asserted against the mounted server
+list, never against the log line, because a log line saying it was skipped is what a build that
+mounted it anyway would also print". An answer with no `aic-dc` in it is treated as **uninterpretable
+rather than as a pass**, since a session that mounted nothing of ours also mounted no
+`aic-dc-antigravity`.
+
+### Two instrument defects, and the first one is the finding
+
+The first run reported **10 of 16 checks failed**, and neither failure was in the product.
+
+**1. The scratch config directory was a fresh install, not an edited one.** `app.json` is a *managed*
+file (`config.py` § `_MANAGED_FILES`), and a directory with no `.bundled_version` is the largest
+possible version mismatch, so `_run_upgrade` backed the probe's `app.json` up and overwrote it from
+the bundle **before anything read it**. Run B mounted everything and its `engines.enabled` was on disk
+the whole time, read by nobody. The probe now seeds the directory as an established install — bundled
+config, current marker, the policy merged in — which is what a file a user has edited looks like.
+That the upgrade discards the key at all is finding 1 below, and it is recorded rather than worked
+around.
+
+**2. The MCP instrument broke on the first non-empty list.** Servers are dialled asynchronously, and
+the first answer was `['chrome-devtools']` — a server inherited from the user's own `~/.claude.json`,
+arriving before ours, read as "the session mounted nothing of ours". It now waits for `aic-dc`, the
+one server that must be present on both runs; only once it is there does the presence or absence of
+`aic-dc-antigravity` beside it mean anything. **The docstring had already named this trap** ("an empty
+list means *not yet* rather than *none*") and the loop below it broke on non-empty anyway, which is
+worth recording because the gap between a stated principle and the code under it is invisible to a
+green run.
+
+One ordering change came out of it: assertion 3 now runs **before** assertion 2, against the
+criterion's own numbering. A `switch_engine` that succeeded when it should not would change which
+engine the session assertion is about, and a missing `aic-dc-antigravity` would then be explained by
+the master no longer being Claude rather than by the policy.
+
+### Finding 1: an upgrade silently reverts the policy
+
+`app.json` is managed, so on **any** version change the user's copy is backed up and replaced from the
+bundle. Measured directly, one server, marker set to a stale version:
+
+```
+app.json before      : engines={'master': 'claude', 'enabled': ['claude']}
+app.json after       : engines={'master': 'claude'}
+list_engines.enabled : ['claude', 'antigravity', 'agy']
+backups              : ['app.json.2026.09.07-04.19-0.0.1-old']
+```
+
+The first start after an upgrade is a **two-provider install again**, with both Antigravity engines
+mountable and the consultant's tools back inside every Claude turn. Nothing is lost — the value is in
+the timestamped backup — but nothing is *in effect* either, and no warning says so, because from the
+config layer's point of view this is a routine managed-file refresh. This is
+[AG-R-13](risks.md#ag-r-13) recurring through a door that entry did not look at: the risk register
+reasons about mount *conditions*, and this is the mount conditions being right and the policy being
+gone.
+
+It bears directly on AG-17's premise. That entry answers "a control the user can switch off is a
+control the user can switch back on" by making the *file* the thing an organisation manages — and the
+file is the one artefact in this system that an upgrade rewrites.
+
+### Finding 2: read-only `app.json` holds, and repeats an aborted upgrade forever
+
+AG-17's own recommendation is that "a workplace that needs enforcement ships `app.json` read-only or
+writes it from configuration management". The read-only half was measured and it **works**: the policy
+survives, `list_engines().enabled` is `['claude']`, and startup does not fail, because
+`ConfigManager.__init__` catches `OSError` around the upgrade pass and logs a warning naming the file.
+
+What it also does is never advance the marker, so the upgrade pass re-runs on **every start**. Two
+consecutive starts on the same read-only directory:
+
+```
+start 1 enabled: ['claude']   backups: ['app.json.…-04.20-0.0.1-old']
+start 2 enabled: ['claude']   backups: ['app.json.…-04.20-0.0.1-old', 'app.json.…-04.21-0.0.1-old']
+```
+
+A fresh backup per start, unbounded. And because `app.json` sorts first among the managed files, the
+`PermissionError` aborts the loop before `commit.md` is reached, so the *other* managed file is never
+upgraded on such an install — a second consequence of a single broad `except OSError` around the whole
+pass.
+
+**Neither finding is fixed in the phase-11 work above.** Both are decisions about the config layer
+rather than about this phase: making `app.json` merge rather than overwrite changes the upgrade contract
+for every key in it (`../1-foundation/configuration.md`), and per-file error handling in `_run_upgrade`
+changes what a partial failure means. They were recorded with their measurements so the choice could be
+made once, in daylight, by the person who owns the enforcement story — **and both were then taken, the
+same day: see § The two findings, fixed below.**
+
+### What is now true
+
+Phase 11's criterion is met, in full and on a fresh server: `mountable` is exactly `["claude"]`, the
+selector is offered nothing else, both `switch_engine` calls are refused with `engine_disabled` and a
+reason naming `app.json`'s `engines.enabled` rather than a missing binary, Claude is still master
+afterwards, and the Claude session's own MCP server list contains `aic-dc` and not
+`aic-dc-antigravity`. The static half — the tripwire asserting that the set of Antigravity mount
+points is exactly the set consulting the allowlist — is run by the same command and reported beside
+the live checks, so one invocation answers the whole entry.
+
+What is *not* proven is anything about the transports themselves, and the probe says so in its own
+output: a stub binary and a placeholder key prove that the mount conditions were satisfied and then
+overruled, which is precisely what the criterion asks and no more.
+
+### The two findings, fixed — `app.json` is merged, not overwritten (2026-09-07)
+
+Both findings above were put to the person who owns the enforcement story, with their measurements, and
+both were taken. What follows is what changed and what was measured after it.
+
+**The finding is wider than the policy, which is what settled the design.** `app.json` was in
+`_MANAGED_FILES`, *and* it is the file the application's own Settings tab writes — `CONFIG_TYPES`
+exposes `app` for editing, `engines.master` moves when a session switches engines, and AG-16's
+`engines.consultant` lives there too. So the upgrade did not only revert AG-17's policy: it reverted
+every value a user had ever set through our own UI. The policy is just the case where reverting it
+changes what the software is *permitted* to do, which is why that is the case that got noticed.
+
+**Three ways to fix it, and the cheap two are worse than they look.**
+
+| | What it costs |
+|---|---|
+| Preserve the `engines` block across the overwrite | Fixes the policy and nothing else. The Settings tab's other writes keep reverting, and the rule needs a paragraph of its own explaining why one section of one file is special |
+| Move `app.json` to `_USER_FILES` | One line. But a user's copy of this file is a *copy of the bundle taken at install*, so every literal in it would outlive every future change to that default — the code default becomes permanently unreachable for existing installs, and nothing tells anybody |
+| **Merge it key by key** | Chosen. Needs a third leg: a pristine copy of the bundle to compare against |
+
+The third leg is the whole design. Without an ancestor, "the user's file differs from the new bundle"
+cannot distinguish *I chose this* from *this was the default in the release I installed*. A hidden
+`.pristine/` directory in the user config dir holds each merged managed file exactly as the bundle last
+shipped it, refreshed on every upgrade, and the pass is then the familiar three-way one: value absent
+from disk → take the bundle's (this is how a key a release adds arrives); on disk and equal to the
+ancestor → take the bundle's (nobody touched it, so a changed default lands); on disk and different →
+keep it (an upgrade does not overrule an edit); **no ancestor recorded → keep it**, which is the safe
+direction and is what every install existing today gets on its first upgrade after this change. A key
+the bundle dropped stays on disk unread, for the same reason a retired *file* does. Nested objects
+recurse, which is what lets `engines.enabled` survive a release that changes `engines.master`'s default
+— measured, not assumed.
+
+`commit.md` is still overwritten, and the distinction is not an inconsistency: it is prose the bundle
+owns, a user who edits it is patching a prompt, and the backup is how they get their text back.
+
+**The second finding needed no policy argument, only per-file scope.** Each file is now upgraded inside
+its own error handling, and the marker is written even when one of them could not be — deliberately, and
+stated in the code: the alternative is what was measured, a pass that repeats on every start, drops a
+backup each time, and never upgrades the files it *could* write. The pass names the file it left as
+found and the marker to delete to retry. A backup taken for a write that then failed is removed again,
+because a copy of a file we did not change is exactly the litter the old behaviour produced. The
+try/except around the whole pass stays as a backstop for the case it was really for: the user config
+*directory* being uncreatable, where the fallback is reading the bundle directly.
+
+**What was measured after the change**, in the order it was run:
+
+- **57 tests** in `tests/test_config.py`, 15 of them new, including the two findings as regression
+  tests by name: `test_an_upgrade_keeps_the_engine_policy` and
+  `test_a_read_only_app_json_holds_and_does_not_repeat`. The rest pin the parts a merge gets wrong when
+  it is written in a hurry — a changed default reaching an install that never touched it, a user edit
+  outranking that same default, a key a release introduces, the nested case, a dropped key surviving, an
+  install with no ancestor keeping everything, the pristine copy tracking *this* release so a third one
+  lands, no backup when the merge changes nothing, a backup holding the pre-merge text when it does, and
+  an unparseable file left for the user to fix rather than replaced. Two unit tests cover `_merge_json`
+  directly: a recorded `null` ancestor is not the same as no ancestor (`.get()` cannot tell them apart
+  and they mean opposite things), and the merge does not mutate its inputs.
+- **The whole suite: 4,581 passed, 1 skipped.**
+- **The durability measurement, re-run.** Same script, same two scenarios, against the new code:
+
+  ```
+  --- upgrade (stale_marker=True, read_only=False) ---
+    app.json before    : engines={'master': 'claude', 'enabled': ['claude']}
+    app.json after     : engines={'master': 'claude', 'enabled': ['claude']}
+    list_engines.enabled: ['claude']
+    backups            : []
+
+  --- readonly (stale_marker=True, read_only=True) ---
+    app.json before    : engines={'master': 'claude', 'enabled': ['claude']}
+    app.json after     : engines={'master': 'claude', 'enabled': ['claude']}
+    list_engines.enabled: ['claude']
+    backups            : []
+  ```
+
+  Before the change the first block's `after` line read
+  `engines={'master': 'claude'}` with `list_engines.enabled` back to all three. The read-only run's
+  empty backup list is the second finding gone: the merge finds nothing to change, so there is no write
+  to fail and nothing to back up.
+- **`scripts/probe_engine_policy.py` re-run end to end: `PASS — 18 checks, both servers`.** The
+  criterion still holds through a changed config layer, which is the point of having run it against a
+  fresh server rather than against the pieces.
+
+**A red test the re-run surfaced, unrelated to any of this.**
+`tests/test_agy_service.py::TestItWillNotRunUngated` had two tests asserting `gate_not_installed` that
+could only reach the gate check on a machine with an `agy` binary on `PATH`; on this one they hit the
+*missing-binary* refusal first and asserted the wrong error. Red at `HEAD` before this work, in a file
+whose own docstring says "Offline. No `agy`" — and one branch below a comment warning about exactly this
+machine-dependence, "which is how it went green for a day and then red the moment one was". Fixed with a
+`gated_service` helper whose executable is a name that always resolves; `connect_engine` only asks
+whether the name resolves and refuses long before launching anything, so nothing is executed.
+
+**What this does not do.** It does not make `app.json` a user file, so the bundle still owns any key
+nobody has touched — which is the intent, and is why the pristine copy is refreshed rather than written
+once. It does not preserve formatting: the merged file is re-serialised, so key order follows the file
+on disk with bundled additions appended and the bundle's hand-wrapped arrays come back expanded. And it
+does not give a user any *notice* that a merge happened beyond the log line and the backup; a Settings
+surface for that would be a new decision, not a completion of this one.
+
+---
+
+## Phase 10 — the consultant on the paid transport, and the argument that does not exist (2026-09-08)
+
+**Exit criterion:** *"A real `generate_image` writes a picture inside the repository on the
+subscription, verified by `stat` and containment rather than by the tool's own report (AG-R-3), with
+the gate's log showing `generate_image` as the only allow; and a real `second_opinion` returns prose
+having been allowed nothing at all, with no `streamComplete` reaching the tab."* **Met.**
+
+`scripts/probe_agy_consultant.py`, two real turns on the account holder's subscription. This was the
+last open item in this directory, and [AG-16](decisions.md#ag-16) had said what it was for: *"until it
+runs, this entry describes a build and not a result."* It ran, it failed, and the failure was the
+point — the build was wrong in the exact place AG-16 had flagged as unmeasurable offline, and one
+layer deeper than it had guessed.
+
+### The half that passed first time
+
+**A second opinion, allowed nothing.** A real answer on the subscription, every block attributed to
+the consultation's own tab, and no `streamComplete` reaching the browser. The gate's log for that turn
+is `allowed []` — not even `finish` was asked for. That is the whole of AG-16's containment claim,
+measured: an agent running under `--dangerously-skip-permissions` with the binary's 57 tools
+available, restrained to prose by a `StaticPolicy` and a registry claim.
+
+### The half that failed, and what it was
+
+`generate_image` **worked** — for the first time since phase 1. A 1024×1024 JPEG, 269,874 bytes, on
+the subscription that has an allowance where the free-tier key reports `limit: 0` for every image
+model. AG-1's worked example, four weeks after it was specified.
+
+Then the probe refused it, correctly. The picture was at
+`~/.gemini/antigravity-cli/brain/<conversation_id>/probe_icon_1788851691210.jpg` — outside the
+repository, invisible to the file tree and the viewer, and unverifiable from the frame. The frame is
+the finding:
+
+```json
+"parameters": {"ImageName": "probe_icon", "Prompt": "A simple flat-colour icon of a padlock…"}
+```
+
+**There is no output-path argument, and not on either transport.** AG-16 left open *"which name does
+`agy` give that path"*, expecting a spelling. The answer is that the tool does not take one: its
+schema declares `ImageName`, *"Short descriptive name for the saved file"*, and the harness picks the
+location. The requested `.png` came back as `.jpg` for the same reason — the caller was never choosing.
+
+**`sdk-surface.md` had recorded this correctly and nobody had read the column headings.** Its
+step-stream table lists `generate_image`'s inputs as `prompt`, `image_name`, `aspect_ratio`, with
+`output_path` among the **outputs**. `files_written_by` — a table of tools to their *path arguments* —
+has held `("output_path", "OutputPath")` throughout, and it worked on the SDK transport for the reason
+phase 3's finding 1 gives: that stream merges a tool's results back into `args` at `DONE`, so a result
+field is readable as an argument there. `agy` does not merge. On this transport the path is nowhere in
+the machine-readable stream at all, only in the model's prose, which is precisely what AG-R-3 forbids
+believing.
+
+So this is a **fourth** instance of the shape this log keeps recording — a table that looks right,
+is never exercised, and degrades quietly — and the first where the table was not merely unexercised
+but was answering a question its subject does not accept.
+
+### The fix: collected, not requested
+
+The image is copied out of `brain/<conversation_id>/` into the repository, and the location is derived
+from what the frame *does* carry — the conversation's own id and the name the model chose — rather
+than parsed out of prose. A consultation holds one conversation for the length of one call, so that
+directory belongs to this call and nothing else writes into it; "the newest file in it" is either this
+image or nothing.
+
+Three details are decisions rather than mechanics:
+
+- **The produced extension wins.** Asking for `icon.png` and receiving JPEG bytes yields `icon.jpg`. A
+  `.png` holding a JPEG is a second lie told to make the first one tidy.
+- **The prompt no longer asks the model to place the file.** It used to say *"write it inside `<repo>`
+  and report the absolute path"*, and the first run showed exactly what a model does when asked for
+  something its tools cannot do: it reached for `run_command` to move the file. The policy denied it,
+  which is AG-R-11 contained — and the denial was avoidable, because we had asked for it.
+- **"Could not be found" is worded apart from "generated no image".** The first means the collector or
+  the write location is wrong; the second means prose claimed a picture nobody made. The old code
+  said the second in both cases, so the first live failure reported *"Antigravity generated no image
+  file"* about an image sitting on disk.
+
+`files_written_by` is left alone. Adding `ImageName` to it would encode the wrong belief — a name is
+not a path and no file exists at it — and `test_the_shared_table_cannot_answer_this_and_that_is_the_finding`
+pins the emptiness so a future reader finds the reason rather than the gap.
+
+### What the closing run measured
+
+`PASS`, both turns, exit 0: a second opinion allowed nothing, and `probe-icon.jpg`, 322,638 bytes,
+inside the probe's own directory, with `generate_image` the only allow. One line of it is the
+instruction change reporting on itself — **`denied along the way: []`**, where the first run had
+denied a `run_command`. The model no longer tries to move the file, because it is no longer asked to.
+
+Offline: 4,608 tests, five of them new, including the fake `agy` corrected to emit the shape that was
+measured rather than the shape the code assumed. That fake had been feeding `OutputPath` — AG-16
+predicted this in as many words (*"the offline tests feed the shape they assume, so they cannot find
+this"*), and the prediction is worth more than the bug, because it is the argument for the probe
+existing at all.
+
+### What this does not do
+
+- ~~**The engine has the same gap.**~~ **Closed 2026-09-08, `2cbb61a1`.** A user asking the `agy`
+  engine — rather than the consultant — for an image got a file in `brain/` that the file tree could
+  not see: produced correctly, then invisible to the tree, the viewer and the user. The collector had
+  lived in the consultant because that is where the criterion was, and "the same reasoning applies one
+  level up" is what the fix is. `BRAIN_DIR` and the locator moved into `steps.py` where both callers
+  reach them; the translator collects after a successful call and reports the landed path in
+  `files_modified`, so the tree reloads. The service supplies the repo root and the conversation id,
+  because neither appears in the turn's own frames.
+
+  **The locator grew two options rather than one, and the reason is the difference between the
+  callers.** A consultation is one process holding one conversation for one call, so *newest file in
+  the directory* is safe there and stays behind `allow_newest`. An engine conversation is long-lived
+  and resumable, so its directory accumulates every turn's images and a reused `ImageName` would
+  collect an **earlier** picture and report it as this turn's — `min_mtime` bounds the search to the
+  turn. A locator is only as safe as the lifetime of the thing it searches.
+
+  It also dropped the `OutputPath` alias from `generate_image` in `tools.py`. It is a result field on
+  the SDK transport and never an argument, so it matched no real call and its only effect was claiming
+  the permission dialog could show a PATH it cannot — the same falsified-argument finding as above,
+  one place it had been left behind.
+- **Nothing renders the collected image.** It lands in the repository, so the file tree and the
+  viewer find it by the ordinary path, but no consultation tab shows a thumbnail.
+- **The `.jpg` is not converted.** What the harness produced is what lands, which is the honest thing
+  to store and means a caller asking for a specific format does not get one.
+
+---
+
+## The subagent that was never gated (2026-09-09)
+
+Found while building subagent tabs, and it stopped that work: the tabs are cosmetic and this is not.
+[AG-R-14](risks.md#ag-r-14) carries the risk; this is what happened.
+
+### How it was found, which was not by looking for it
+
+`AgySession.cancel()` stops a turn by starving it — `gate.refuse_all`, because there is no halt frame
+on this transport — so settling whether ⏹ could stop *one* subagent meant reading how the gate scopes
+a call. It scopes by conversation id, and passes through every conversation nobody has claimed. A
+subagent has a conversation of its own. The question "can we stop one subagent" turned into "have we
+ever been gating one", and the answer was no.
+
+**Measured rather than argued**, because a security claim reasoned from a code read is a hypothesis.
+`scripts/probe_agy_subagent_gate.py` allows the delegation and denies everything else, so the
+assertion is a file rather than a log line: gate consulted → the write is refused → the bytes are
+unchanged; gate bypassed → the write runs. The first run:
+
+    conversations the gate was asked about: ['5c1a3e72-… (parent)']
+    tools the gate decided:                 ['invoke_subagent']
+    target.txt after the turn:              'SUBAGENT_WAS_HERE'
+
+The user approved *the spawn*, and the subagent then edited a file with no review of any kind.
+
+### The fix, and the false start that is the more useful half
+
+`AgyGateServer` holds a **set** of claims rather than one id, and `AgySession._gate_subagents` claims
+each announced subagent's conversation as the frame arrives — before it is yielded and before the
+translator runs, which is the earliest instant this process controls. `stop()` releases all of them,
+including a subagent still running at teardown, because a registry entry is a file that outlives the
+process and a claim left behind would intercept a later session of the user's own.
+
+**The first cut read `state` the obvious way and failed live, identically to the unfixed code.**
+Claim on `ACTIVE`, release on `DONE` — except that `DONE` on a `subagent` step means **the launch
+finished**, not the subagent. Measured at `duration_seconds: 0.10` on a delegation whose work then ran
+six seconds longer, over frames in which the parent polled it through a `manage_subagents` call. And
+the run that exposed it never emitted `ACTIVE` at all, so the release fired on a claim that had never
+been made. This is [§ Phase 9's](#phase-9--always-allow-on-antigravity-2026-09-05) lesson and D1's
+arriving together: **a state word means what the engine does with it, not what it says.** Now it
+claims on any announcement and releases only at session close — holding a claim costs one registry
+file, dropping one early costs the review.
+
+    conversations the gate was asked about: ['240bcbd2-… (subagent)', '4009ccc4-… (parent)']
+    tools the gate decided: ['invoke_subagent', 'view_file', 'replace_file_content', 'send_message']
+    target.txt after the turn: 'ORIGINAL_TEXT'
+
+The consultant is covered by the same change without knowing about it, because it drives
+`stream_frames` too (AG-16).
+
+### What this does not do
+
+The three residues are in [AG-R-14](risks.md#ag-r-14) rather than repeated here: the spawn-to-announce
+race, nested delegation announcing a grandchild to nobody, and a stale claim now orphaning one entry
+per subagent rather than one per session. Two of the three were named by **the consultant**, asked for
+an adversarial review of this fix on the day it landed — the first time `second_opinion` has been
+pointed at this repository's own work, and the argument for [AG-13](decisions.md#ag-13) arriving from
+a direction that decision did not anticipate.
+
+### The tests, and the one that is about a refactor rather than a behaviour
+
+Twelve, offline: the gate server holding several claims at once, releasing one and keeping the rest,
+`stop` releasing all, a blank id claiming nothing; the session claiming on announcement, claiming
+rather than releasing on `DONE`, claiming every subagent in one step, and logging rather than dying
+when a claim fails. The twelfth reads the source of `stream_frames` and asserts that
+`_gate_subagents` appears before `yield frame`. That is the residue's size pinned as a test: the race
+window is a frame read, and a refactor that moved the claim into the translator or after the yield
+would widen it to the subagent's whole life without failing anything else.
+
+---
+
+## Identity by cgroup, not by claim (2026-09-10)
+
+Two of the three residues above are closed, and not by claiming faster. [AG-18](decisions.md#ag-18)
+holds the decision and [AG-R-14](risks.md#ag-r-14) the risk; this is what was built and what it was
+measured against.
+
+### The two residues were one premise
+
+The spawn-to-announce race and the nested-delegation blind spot read as separate bugs and are the
+same one. [AG-14](decisions.md#ag-14)'s gate decides ownership by looking up a **conversation id**
+somebody wrote down in advance, and both residues are cases where nobody could: `agy` starts a child
+before the frame naming it arrives, and a subagent's own frames never reach this host at all, so a
+grandchild is announced to nobody. Every fix aimed at the claim is a fix aimed at how *fast* it lands,
+and one of the two cases has no claim to be late with.
+
+So the premise went instead. **A container can be registered before it contains anything.** `agy` is
+launched inside a systemd user scope, and the hook asks the kernel which group it is in.
+
+### What landed
+
+`src/aic_dc/agy/scope.py` is the new module and it is four functions: `available()`, `unit_name()`,
+`wrap()` and `current_cgroup()`. Around it:
+
+- `AgyGateServer` names its unit **at construction** (`scope.unit_name() if scope.available()`) and
+  publishes `registry.claim_scope(unit, socket)` inside `start()`, *before* `AgySession` spawns
+  anything. That ordering is the fix rather than an implementation detail: a conversation claim can be
+  late because the conversation exists before we are told its id, and a scope claim cannot, because
+  the scope does not exist until we create it.
+- `registry` gains `claim_scope`, `release_scope` and `scope_owner`, under a `scope-` filename prefix
+  so `lookup` and `owns_anything` cannot confuse a unit we chose with an id `agy` chose.
+- `hook.decide` consults `registry.scope_owner(scope.current_cgroup())` **only when the conversation
+  lookup misses**. Second, not first, because it is the fallback: a machine with no systemd never
+  leaves the old branch, which is what makes this additive rather than a rewrite of a shipped gate.
+- `AgySession._argv` ends with `scope.wrap(argv, self._gate.scope_unit)`, and returns argv untouched
+  where the unit is `None`.
+
+**`available()` runs a scope rather than testing for the binary.** `systemd-run` exists in containers
+and on machines with no running user manager, where it is present and fails — and a capability
+asserted rather than exercised is how this directory has been wrong before. It is `lru_cache`d,
+because it is a property of the machine and it costs a subprocess in the path of starting a session.
+
+**Matching is against the units this host registered, never against the name's shape.** A prefix test
+on `aic-dc-` would let anything in a scope a stranger happened to name that way route into our dialog.
+`scope_owner` walks the entries we wrote, and matches `f"{unit}.scope" in cgroup` rather than the bare
+name, so a longer unit that merely starts with ours does not match either. [AG-R-12](risks.md#ag-r-12)
+survives on a stronger footing than it had: the user's own session sits in their terminal's spawn
+scope and simply is not in the directory.
+
+### The measurement, and then the falsification
+
+`scripts/probe_agy_cgroup_identity.py` ran two real turns on 2026-09-09 and answered the four
+questions the design needed — `agy` runs normally inside a scope, the hook subprocess (which `agy`
+spawns, not us) inherits it, **a subagent's own calls carry it**, and a turn taken outside the scope
+reported the terminal's `ptyxis-spawn-…` cgroup instead. The last row is the control: a matcher that
+answered yes to everything would have passed the other three.
+
+That establishes the mechanism works. It does not establish it is **load-bearing**, because the
+registry was still running underneath it and a claim that happened to land in time would produce the
+same log. So `probe_agy_subagent_gate.py` was re-run with `AgyGateServer.claim` replaced by a no-op
+for *both* the parent and the subagent. All eight tool calls still reached the dialog — the subagent's
+seven included — and the deny still left the target file byte-identical. Conversation claims were
+inert and cgroup identity carried the whole load.
+
+`run_command` and `find_by_name` are in that list, which is [AG-R-11](risks.md#ag-r-11) looking for
+another way out of a refused write and being gated on each attempt.
+
+### The defect the change caused, found before it shipped
+
+Under a scope, the program `exec` resolves is `systemd-run`, which exists. So a missing `agy` stopped
+raising `FileNotFoundError` and would have surfaced as *"exited before sending its init frame"* — the
+opaque diagnostic that `AgyNotInstalledError` was written to replace. `start()` now checks
+`shutil.which(self._executable)` before spawning. The `except FileNotFoundError` stays, for the
+unscoped path and for a `systemd-run` that goes missing between the availability probe and the spawn.
+
+This is the shape of thing a wrapper does: it moves the identity of the process being launched, and
+every error keyed off that identity moves with it.
+
+### What this does not do
+
+**It is Linux-and-systemd, and the packaging is not.** Where `available()` says no, everything
+degrades to the conversation-id routing that shipped before, with both residues intact — so on the
+macOS and Windows artefacts phase 7 publishes, AG-R-14 is unfixed. That is stated in `scope.py`'s own
+module docstring rather than left to be discovered, and the choice for those platforms — the
+capability-reducing deny, or an unclosed residue — is open. See [AG-18](decisions.md#ag-18)
+§ *What it costs on the platforms that cannot*.
+
+**The third residue was untouched when this entry was first written** and is closed below.
+
+### The incidental finding, which was a working gate reporting itself broken
+
+The probe's own setup reported the installed gate as `stale` on a machine where it was live.
+`install.status` compared command **strings**, and one venv ships `python`, `python3` and
+`python3.13` in one directory pointing at one program — so an entry written by a process started as
+`.venv/bin/python3` did not match a status call from `.venv/bin/python`. `AgySession` refuses to start
+on a stale reading, so the whole transport was one entry point away from presenting as broken for a
+reason that is not a fault.
+
+Fixed the same day, and **the interesting part is the fix that was rejected**. Resolving both paths
+and comparing the targets forgives the spelling — and forgives far too much, because every venv's
+`python` resolves to the *system* interpreter, so two different checkouts would compare equal and
+`status` would report `current` for an install belonging to someone else. That is the exact condition
+`stale` was written to report. So the parent directories are compared first, through `realpath` so a
+checkout reached by a symlink is still itself, and only then the interpreters. String equality still
+answers first and touches no filesystem, because it is the answer almost every time.
+
+Four tests, and the second is the one that keeps the first honest: the other spelling is `current`, a
+second checkout is still `stale`, a different `config_dir` with the same interpreter is still `stale`
+— only the interpreter is forgiven, never the arguments — and a deleted interpreter is `stale` rather
+than an `OSError` raised at a Settings caller.
+
+### The tests
+
+Seventeen, offline, in `tests/test_agy_scope.py`, and the ones that matter are the negatives. A scope
+we registered is ours; a terminal's own scope is not; **a unit named like ours but never registered is
+not**, which is the imitation attack; a longer unit sharing our prefix is not; a released scope stops
+being ours; a scope entry is not a conversation. Then the hook's four: an unclaimed conversation
+inside our scope is gated (the residues' case), a stranger in their own scope is still passed through
+(AG-R-12), a claimed conversation still wins, and **no scope means no change at all** — the tripwire
+that says this is additive to the shipped gate rather than a replacement of it. Plus publish-before-
+spawn, release-on-stop, and argv wrapped and unwrapped.
+
+---
+
+## What a subagent did, read off `agy`'s own disk — and the pairing rule 121 transcripts overturned (2026-09-10)
+
+`subagent_rows` landed on 2026-09-09: the live strip now shows a delegation on this transport, because
+`agy` announces one with a conversation id of its own. A row you cannot open is a worse offer than no
+row, so this is the other half — clicking one, and getting the subagent's work.
+
+### One capability key was answering two questions the transports answer differently
+
+`subagent_tabs` bundled *"can this engine show what a subagent did"* with *"can it stop one"*, and on
+`agy` those have opposite answers. **There is no halt frame on this transport.** ⏹ is starvation —
+`AgyGateServer.refuse_all` denies every pending call for the rest of the turn — which is turn-wide and
+unscoped by construction, so there is nothing to aim at a single subagent. Meanwhile the transcript is
+sitting on disk, complete, in a format the history browser's renderer already understands.
+
+So the key split: `subagent_transcripts` is **SUPPORTED** on `agy` and `subagent_stop` is **UNBUILT**
+on both transports. Two consequences worth stating because they are the sort of thing a later reading
+gets backwards:
+
+- **`UNBUILT` on the surface does not make `ConsultantBridge.cancel` decorative.** A consultation *is*
+  stopped, by the bridge, without the request ever reaching the CLI. What is unbuilt is stopping a
+  subagent **`agy` itself** spawned. The docstrings on both `bridge.cancel` and
+  `ClaudeCodeService.stop_task` now say which of the two keys they mean.
+- **No row carries a `task_id`.** `task_id` is what `stop_task` takes, so a value there would be a
+  handle onto a method that would refuse it — and this transport's transcript carries no call id to
+  put in one anyway. `tests/test_agy_subagents.py` asserts the key's *absence*.
+
+### The RPC pair, and the two gates that keep it from being a hole
+
+`AgyService.list_subagent_transcripts` and `.get_subagent_transcript`, both synchronous file work on
+the executor like every other history read here.
+
+`agent_id` is a conversation id in `agy`'s own store, and that store holds **every conversation the
+user has ever had with this CLI** — including the ones they had with the IDE, in other repositories,
+that AIC⚡DC never ran and has no business showing. An unchecked read is therefore not "the wrong tab
+opens"; it is *open any Antigravity conversation on this machine by id*. Two gates, because either
+alone leaks:
+
+1. **`_mirrors_session`** — the session has to be one this repository's mirror holds. It asks the
+   store's own `list_sessions` rather than `history.list_sessions`, which parses every transcript to
+   count its messages: a session-list page's worth of work to answer a yes/no.
+2. **`subagents.descendants`** — the agent has to be reachable *by announcement* from that session.
+   It walks deeper than the one-level listing needs, deliberately: a containment check that has to be
+   widened later is one that gets widened wrongly. The session is never its own descendant, a
+   self-announcement does not open that door either, cycles terminate, and the walk limit is logged
+   rather than silently narrowing — a check that quietly stopped looking would refuse a transcript the
+   user is entitled to, and it would read as *"the record is gone"*.
+
+Under both, a refusal reads as an **unreadable transcript rather than a permission error**: the
+browser renders the reason inside the tab, and "not this session's subagent" is a sentence about the
+request. A failed ownership check refuses; it never allows. And `_safe_id` in the reader is the third
+line, present even though `descendants` is the real containment, because the cost of being wrong there
+is reading the user's home directory rather than showing an empty tab.
+
+### The reader, and the one shape two engines owe the renderer
+
+`src/aic_dc/agy/subagents.py`: find the file, read the records, pair a call with its result, render
+messages the chat panel can draw. `agy`'s stream carries no trajectory or depth field, so a subagent's
+work is invisible to the live pump — `steps.py` now says so, and says where it *is* read instead.
+
+One renderer draws both engines' tabs, so this reader owes `claude_code.history` one message shape.
+That is asserted against `history._text_block` rather than against a literal list of keys: a field
+added there and not here is exactly the drift the test is for, and a literal would go stale without
+failing. The card conventions follow the sibling reader too — an unanswered call is `pending` with
+`result: None`, no turn claims a clean finish on no evidence, and **usage is absent rather than zero**,
+because a zero renders as a turn that cost nothing.
+
+### The defect a test caught before the measurement did
+
+A child's reply reaches its parent as a `<SYSTEM_MESSAGE>` block, and the record **opens with a
+preamble that mentions the tag** — `The following is a <SYSTEM_MESSAGE> not actually sent by the user`.
+A non-greedy match therefore finds prose *about* the frame instead of the frame, and renders the
+disclaimer, a stray opening tag and the body as one message. The assertion failed when it was written,
+which is why it is its own test rather than a line in the one above it.
+
+### The central inference was wrong, and 121 transcripts is what said so
+
+Every inference in this reader came from **one** capture, and each had a plausible wrong answer
+available. So before writing it up it was run against every `transcript_full.jsonl` on this machine:
+**121 files, 1,895 records, 720 tool results**. The full vocabulary is in
+[`sdk-surface.md` § The `agy` transcript store, read whole](sdk-surface.md#the-agy-transcript-store-read-whole--measured-2026-09-10);
+what the run *overturned* is here.
+
+No record type carries a tool result and no id links a result to its call, so the reader paired each
+result with the oldest call still open. The arithmetic is the truth instead: a result's `step_index` is
+its call's index, **plus one, plus the call's position within that step**. The difference only shows up
+where a call has no result — and:
+
+> **A tool call our own permission dialog refuses is written nowhere.** No result record, no error
+> record, no status: the index just skips.
+
+That is 58 calls across the 121 files — 39 mid-conversation holes and 19 at a file's last response
+(a turn still running, or cut short). One hole knocks every later card in the conversation one call out
+of step, and simulated over the same files the queue rule attaches **302 of the 720 results to a call
+that is not theirs, in 24 conversations**. Twelve of those hand a *write* call someone else's result,
+at which point `files_written_by` credits a file to a call that never ran — the worst failure
+available, since that list is what the browsed turn reports as changed. Under the arithmetic all 720
+attach to their own call and none is left unattributable.
+
+**The specimen was already on disk because of last week's work.** `probe_agy_subagent_gate.py` denies
+everything but the delegation, so steps 4, 10 and 14 of its subagent's conversation have no result
+record. The only transcript on this machine where a denial is the *normal* case is the one AG-R-14's
+probe wrote, and it is what made the hole visible.
+
+Three more corrections came out of the same run, none of which a green test suite would have raised:
+
+- **`KNOWN_TYPES` had 4 of the 16 real types.** Ten of them name a result after its tool
+  (`VIEW_FILE`, `CODE_ACTION`, `RUN_COMMAND`, …) and are the format of the 9 conversations from
+  2026-08-03 to 08-16; all 112 since 08-29 use `GENERIC` alone. Reading only the current spelling is
+  correct on everything a user is likely to open and turns a whole era into unrendered blobs with
+  their cards stuck pending. `sdk-surface.md`'s 2026-09-03 reading had listed the older set *as* the
+  current one; that paragraph now carries a correction.
+- **There is no `ERROR` status**, so `failed = status == "ERROR"` was a dead branch and every failure
+  rendered as a success. Failure is the `ERROR_MESSAGE` **type**, and a current-format runtime failure
+  says so in prose this deliberately does not sniff — `specs5/5-webapp/chat.md` § *Card Anatomy* makes
+  the status flag the only thing a card's failure styling may read.
+- **`RUNNING` is a backgrounded tool**, 43 records, never the last line of a file. Rendered `ok` it
+  was a card claiming a tool had finished with whatever output the harness had printed so far; it is
+  `pending`, `done: false`, no duration.
+
+And one inference was replaced by its opposite: `read_records` sorted by `step_index`, which agrees
+with append order on 120 of the 121 files — and the 121st **interleaves two concurrent turns and uses
+five indices twice**, so sorting moved its records away from what the harness wrote. The index answers
+*which call is this the result of*; it does not answer *what happened next*.
+
+### Two guards in the browser, and neither names an engine
+
+[AG-R-4](risks.md#ag-r-4) again: the browser must never branch on an engine name.
+`tabs.js::_loadSubagentTranscript` checks `supports(SURFACE.SUBAGENT_TRANSCRIPTS)` **before the RPC**
+and renders an unreadable-transcript notice — *"This engine cannot read back what a subagent did"* —
+rather than letting the call fail at the router and reporting it as an error. `block-render.js` draws
+Stop only on `live && row.task_id && supports(SURFACE.SUBAGENT_STOP)`, which is three conditions
+because they fail in three different ways: a browsed row has nothing to stop, a row without a task id
+has no handle, and a transport without the surface would refuse the call.
+
+`engine-capabilities.js::supports` reads an **unknown key as supported** — the deliberate opposite of
+the server's rule, so that a browser running against an older server does not hide working features.
+It also means a new guard is untested unless its fixture sets the key explicitly, which is what the
+new webapp tests do.
+
+### The tests
+
+Sixty-six, offline, in `tests/test_agy_subagents.py`, against a `tmp_path` store with no `agy` and no
+network. They are written as falsifications of the plausible reader rather than as coverage: the one
+that trusts the tool's name (`invoke_subagent` here, `start_subagent` on the SDK — a reader keyed to a
+name is one rename away from listing nothing, silently, because a name matching nothing looks exactly
+like a turn that delegated nothing); the one that reads `transcript.jsonl` because it has the obvious
+name (it double-encodes every tool argument, so each card would render `"\"/tmp/x\""`); the one that
+hands out any conversation whose id looked like a UUID.
+
+Four of them exist only because of the measurement, and the sharpest is
+`test_a_call_our_dialog_refused_does_not_take_the_next_calls_output` — a refused write, no result
+record, then a `list_directory` whose output must land in its own card while the write stays pending
+and attributes no file. Its sibling puts the same hole *inside* one step, where the queue rule gets
+both cards wrong from one missing record. 4,804 Python and 4,484 webapp tests green.
+
+### Does the pair answer in the app? The id chain, followed rather than assumed
+
+Both methods take the session the browser is showing and hand it to `subagents.rows()` and
+`subagents.descendants()` as an `agy` **conversation id**. Nothing says those are the same string, and
+if they were not, **every test would still pass** — a fixture builds its store around whichever id it
+hands in — while the tab stayed empty in the app for good. That is the shape of failure this plan has
+already paid for four times, so the chain was followed link by link on this machine rather than read
+as obvious:
+
+- `agy/session.py` takes `_conversation_id` off the `init` frame and returns it as the session's
+  identity; `service.py` hands that same value to the translator and to the mirror.
+- `mirror.py::attach` files entries under it — refusing a non-UUID, because the reader validates —
+  keyed by `project_key_for_directory(repo_root)`, and `RepoSessionStore._list_sessions_sync` reports
+  each row's `session_id` as the file's stem. `_mirrors_session` asks for the same project key and
+  compares the same field, so the ownership gate closes on one string rather than on two spellings of
+  one.
+- And the id `agy` mints is the directory name in its own store: all **8** entries in the gate
+  registry — `~/.config/aic-dc/agy-sessions/<conversation_id>.json`, each written by a live turn — are
+  directories under `~/.gemini/antigravity-cli/brain`. (Two roots share that leaf name and are never
+  the same directory: `MIRROR_DIR` hangs off the repo's `.aic-dc/`, the registry off the user's config
+  dir. Worth knowing before grepping for one and finding the other.)
+
+Then the reader over the store as it stands: **127** conversations, **121** with a
+`transcript_full.jsonl`, **7** holding subagent rows, 8 rows between them. `load()` on one returns five
+messages in the shape `restore.js::restoreMessage` accepts — `role`, `content`, `blocks` of tool cards,
+`system_event`, `timestamp` — which is the shape the Claude reader emits, and has to be, because one
+normalizer serves both engines' tabs.
+
+The containment gate was checked against the real store too, not only in a fixture: `descendants()` on
+the two-subagent conversation returns exactly its two children, and **another real conversation on this
+machine** — readable, its own `transcript_full.jsonl` sitting there — is refused by id. That is the
+case the gate exists for, and it can only be demonstrated because the store holds conversations that
+have nothing to do with this repository.
+
+**Still owed:** nobody has opened the tab in a browser on a live `agy` turn. The guards and the gates
+are asserted in tests, the reader is measured against the real store, and the id chain above is read
+off disk — but the round trip has not been watched: a delegation announced, its row clicked, the
+transcript arriving through the RPC and rendering. Until then this is a read that demonstrably works
+and a wire that is only argued to.
+
+---
+
+## The pid that was written and never read (2026-09-10)
+
+[AG-R-14](risks.md#ag-r-14) residue 3, and the one the consultant said had to land first: `claim`
+recorded a `pid` since AG-14 and `lookup` had never read it, so an entry left behind by a host that no
+longer exists was indistinguishable from a live claim. AG-18, earlier the same day, doubled the kinds
+of entry carrying an unread handle without changing what the handle was for.
+
+### What a stale entry actually costs, which is not what the residue said
+
+The residue was written as a tidiness problem — "it orphans one entry per subagent". Reading the two
+callers says otherwise, and both costs land on **the user's own work** rather than on ours:
+
+- `owns_anything` counts *files*, and it is the tie-breaker for a payload the hook cannot parse. One
+  unclean exit of ours therefore made "we own something" permanently true, and from then on every
+  unparseable payload from *the user's own* `agy` was denied. The function's docstring says it "fails
+  toward the user's work rather than toward silence"; with a corpse in the directory it did the
+  opposite, for good.
+- `AgyGateServer.release`'s docstring already named the other one: a claim left behind "would make this
+  host intercept a *later* session of the user's own that happened to resume that conversation" — the
+  interception `probe_agy_isolation.py` exists to hold. That was written about a claim we forgot to
+  release. A host that is killed cannot release anything, so the same breakage arrives by a route no
+  amount of care in `stop()` can close.
+
+### The recommendation in the register was wrong as written, and finding that out was the work
+
+The entry said to *"treat an entry whose process is gone as absent rather than as ours"*. Read that as
+a change to what the **gate answers**, because that is what it is: absent means the hook passes the
+call through. And `registry.py`'s own module header has argued the opposite since AG-14 — *a dead host
+makes our sessions un-runnable rather than un-gated* — with the reasoning spelled out, which is why
+the contradiction was visible before anything was built rather than after.
+
+The case that settles it is the one AG-18 created. A host killed mid-turn can leave an `agy` **still
+running inside a scope of ours**: same unit, so `scope_owner` still matches, and the process is under
+`--dangerously-skip-permissions` with our hook as the only thing between it and the tree. Passing its
+calls through because our socket stopped answering hands it an unreviewed repository.
+
+So the residue was misdiagnosed rather than merely unfixed — and so was the diagnosis. It is not "the
+hook denies on stale entries", and it is not "stale means allow" either. It is that *stale* was one
+word for two states, and the fix is telling them apart.
+
+### Liveness is two pids, because "stale" and "dead" are different questions
+
+`agy` is a **child** of this host, and a child outlives a killed parent. A dead host whose `agy` is
+still running is an **orphaned agent**, and allowing there would produce exactly the unreviewed write
+this transport has no second check for.
+
+So `claim` now records the conversation's `agy_pid` alongside the host `pid`, and `entry_is_live` is an
+**or**: either process alive, the entry stands and the hook goes on denying calls it cannot get an
+answer for. Only when both are gone is the file a corpse — and a corpse reads as *not ours*, which it
+can do safely because no process from that session is left to be un-gated. `lookup` returns `None` for
+one, `owns_anything` does not count one, and `reap_stale` deletes one.
+
+**The sweep runs from `AgyGateServer.start`, beside the stale-socket unlink that has the same cause.**
+Keyed on liveness rather than on ownership, deliberately: "remove entries that are not mine" would
+delete the live claims of a second host sharing the directory and un-gate its session.
+
+### The scope entry, which cannot name its own agent yet
+
+The risk entry, written earlier the same day, ranked a stale scope entry above a stale conversation
+entry because "a unit name is something systemd can hand to a later process". `scope.unit_name()` is
+`aic-dc-` plus twelve hex characters of `uuid4`, so a recurrence is not a case worth designing
+against, and that sentence is withdrawn rather than left to be inherited. **The scope entry's real
+exposure is the orphaned `agy`** — still inside the unit, still matching — which makes it the entry
+where reaping on the host pid alone would have cost the most, and it is also the entry that cannot
+answer the second question when it is written. AG-18 publishes a scope claim *before* `agy` exists, on
+purpose, so that nothing can beat it onto disk; an entry describing a container and no process has no
+agent pid to record.
+
+`AgyGateServer.claim` therefore rewrites it once, with the pid the session just spawned — the one place
+that both knows the pid and runs after the child exists. Until then the entry reads as alive, which is
+the same "cannot tell, so leave it standing" the conversation entries use, arrived at by design rather
+than by age. Every subagent claims with the same pid, because they all run inside the session's one
+`agy`, so the rewrite happens once per session and not once per delegation.
+
+### Three things stated rather than solved
+
+- **There is no liveness probe on Windows.** `os.kill(pid, 0)` there is `TerminateProcess` for any
+  signal that is not a console event, so a probe would kill the process it asked about — worse than
+  the bug. Where the question cannot be asked the answer is "alive", so that platform keeps the
+  pre-2026-09-10 behaviour. Same shape as `next.md` § C8's POSIX-only teardown.
+- **A recycled pid reads as alive**, so a corpse can present as an orphan until something reaps it.
+  That is the direction that keeps our own tree gated. Closing it means comparing process start times,
+  which is `/proc`-shaped and would put a second Linux-only mechanism in this file.
+- **An entry with no `agy_pid`** — written by any earlier version, or a scope claim not yet rewritten —
+  is never a corpse. The upgrade path is "keep the old behaviour", not "guess".
+
+### What was not measured, and why
+
+**Whether a real `agy` survives its host being SIGKILLed is still a citation, not a measurement.**
+`main.py` measured the shape on the other engine — a Claude CLI reparented to init and still running 38
+seconds later — and the same argument is made here for `agy`. It was not confirmed: `agy` is installed
+on this machine but **not authenticated** (`Error: authentication required. Run 'agy' to log in`), so a
+session never reaches its `init` frame from here and there is no child to orphan. The specific unknown
+is whether `agy` exits promptly when its stdin pipe closes.
+
+**Corrected the same day, later: this machine can run `agy` after all.** The paragraph above reads the authentication error as a standing property of the machine, and it is not one — on 1.2.0, `agy models` fetched the live model list and `agy -p` returned its answer and exited 0 from a throwaway directory. What the error *was* a property of is unknown and is not guessed at here; the binary self-updated at 17:26 local, which is a candidate and not a measurement. **The consequence is scheduling rather than correctness.** The two-pid rule still does not depend on the answer, but the distribution this section wants — how long an orphan lives, and the sibling window [AG-R-14](risks.md#ag-r-14) residue 1 wants — is no longer blocked on hardware or credentials. Nothing in that direction has been run: what changed is only that it can be.
+
+**The two-pid rule does not depend on the answer**, which is the reason this is a residue rather than a
+blocker: if `agy` exits on EOF the entry becomes a corpse and the next sweep collects it, and if it
+lingers the entry stands and its calls are denied. Both branches are the intended behaviour. What an
+authenticated machine would add is the *distribution* — how long an orphan lives — which is the same
+measurement residue 1 wants for the race window.
+
+### The tests
+
+Twenty-eight offline — 24 in `tests/test_agy_gate.py`, two in `tests/test_agy_gate_server.py`, one in
+`tests/test_agy_session.py`, one in `tests/test_agy_scope.py` — and the pid in them is real: a
+subprocess run and reaped, so the probe is exercised rather than monkeypatched. The decision table —
+corpse is not ours, orphan still denies, live host with a dead `agy` still owns it, no `agy_pid` keeps
+the old behaviour — plus `owns_anything` no longer counting a corpse and still counting a half-written
+entry (a claim in flight is a session starting, not a corpse), the sweep sparing another host's live
+claim and an unreadable file, the same three-way table over a *scope* entry with `scope_owner` as the
+observable, and the wiring: `AgyGateServer.claim` records what it is given, rewrites the scope entry
+once, and `AgySession` gives it the pid it spawned.
+
+One is about the platform rather than a behaviour: it monkeypatches `os.name` to `nt`, replaces
+`os.kill` with something that raises, and asserts the answer is still "alive". A liveness check that
+kills what it asks about would pass every other test in the file. 4,829 Python green.
+
+### And the incidental finding beside it, which was not incidental
+
+The same risk entry recorded the cgroup probe reading the installed gate as `stale` on a machine where
+it worked, filed as a wrong label. It is not a label: **`AgyService.connect` returns
+`gate_not_installed` on a stale state and `AgyConsultant.available` goes false**, so the whole engine
+refuses to start and `second_opinion` disappears — because `.venv/bin/python3` in the file and
+`.venv/bin/python` from `sys.executable` are two spellings of one interpreter.
+
+`_same_command` compares the arguments exactly and the interpreter as a file, cutting the command on
+the invocation `hook_command` itself writes rather than guessing at word boundaries. **The near-miss is
+the part worth keeping:** the obvious fix is to resolve both paths and compare targets, and that is
+wrong. A venv's `bin/python` is usually a symlink to the system interpreter, so `.venv-a/bin/python`
+and `.venv-b/bin/python` resolve to the same file while selecting different environments — a virtualenv
+is chosen by the path used to invoke it, `pyvenv.cfg` beside that path. Resolving would have reported
+another checkout's gate as ours, which is the failure this whole module exists to prevent, arrived at
+by fixing a cosmetic bug. The test is *same directory, same file within it*.
+
+Measured with the pair that caused it, on this machine: `.venv/bin/python3` and `.venv/bin/python` read
+`current`, `/usr/bin/python3` still reads `stale`. Eight tests, including the two-venvs-one-binary case
+and an unbalanced quote in a hand-edited entry reading `stale` rather than raising.
+---
+
+## The round trip, watched — and what the browser and the kernel each corrected (2026-09-10, later)
+
+Two things this directory was carrying as owed, taken in one sitting because both need a live `agy`
+and the day's other work had just established that this machine has one. The first was named in the
+entry above it: *"nobody has opened the tab in a browser on a live `agy` turn."* The second was
+[§ What was not measured, and why](#what-was-not-measured-and-why) — whether a real `agy` outlives a
+SIGKILLed host, which had been argued from the other engine rather than measured here.
+
+**Both are now measured, and neither came back the way it was written.** The tab works end to end and
+the round trip is watched. The orphan exists — and lives for **under a second**, where the citation
+it was borrowed from was 38.
+
+### The tab, in a browser, on a live turn
+
+`scripts/probe_agy_subagent_tab.py`, ten checks, all passing on one delegation against the paid
+subscription. It starts a real server on a throwaway repository inside a trusted workspace, switches
+the engine through `switch_engine` the way the notice does, sends a prompt asking for a delegation,
+answers the dialogs it raises, and then **clicks the subagent's tab** and reads what arrives.
+
+The chain it closes is the one the entry above could not: the session id the browser holds being the
+conversation id `agy` names its own store by. That was followed link by link off disk and is now
+followed through the wire — the tab drew **three tool cards** (`view_file`, `view_file`,
+`send_message`), each marked *gated*, over the subagent's own prompt and closing sentence, from a
+store the browser never touches. Screenshot in `.aic-dc/live-probe/agy-subagent-tab.png`.
+
+Two of the checks are the guards `bb9846a1` shipped, and this is the first time either has been seen
+rendering rather than asserted:
+
+- The descriptor **as the browser reads it** answers `subagent_transcripts: supported` and
+  `subagent_stop: unbuilt` on this engine, read over the same RPC `engine-capabilities.js` uses.
+- The row in Main carries **no Stop button**. `agy` has no halt frame, so a button there would send a
+  call the router refuses.
+
+**The negative control is the containment gate, over the wire.** A real conversation on this machine
+that this session never announced is refused — *"01dab20c… is not a subagent of this conversation, so
+there is no transcript here to read"* — while the session's own subagent answers two messages, from
+the same browser, one line apart. In-process that pair was shown on the day the reader was built;
+what it had not been shown through is the RPC, which is the only route a request shaped like an
+attack would take.
+
+**What it does not cover.** Headless Chrome, so this is layout and script rather than a human's
+screen; one turn, one subagent, one delegation depth. The `⏹` half stays unbuilt and unmeasured, and
+a *nested* delegation — a subagent's own subagent — was not asked for.
+
+### The orphan is real, and it is sub-second
+
+`scripts/probe_agy_orphan.py` starts a host in a child process, brings a real `AgySession` to its
+`init` frame, SIGKILLs the host, and watches. Three runs, plus a fourth scenario that isolates the
+mechanism. It takes no model turn: it reaches `init` and stops.
+
+| What was asked | What was measured |
+|---|---|
+| Is the registry's `agy_pid` really `agy`'s? | **Yes.** `comm` is `agy` and the cgroup is `/user.slice/…/app.slice/aic-dc-<hex>.scope`, so `systemd-run --user --scope` **execs** rather than staying as a parent: the pid is preserved and the scope really applied. The two-pid rule is about `agy` because that pid *is* `agy`. |
+| Does `agy` survive its host being SIGKILLed? | **Yes**, all three runs. Reparented to the user's `systemd` at ppid 6583, still alive 200 ms later, with the registry reading the entry live — which is the orphan the rule exists to keep denying. |
+| For how long? | **0.60 s, 0.80 s, 0.80 s.** |
+| Why does it go? | **Its stdin closes.** With the host *alive*, closing the pipe alone ended `agy` in **0.30 s** — so the kill case is the same path plus the time to notice. |
+| Does the decision table hold on real dead pids? | **Yes.** live → orphan → corpse, and `reap_stale` then collected both the conversation entry and its scope entry, in each run. |
+
+**The citation it replaces was two orders of magnitude out.** `main.py` measured a Claude CLI
+reparented to init and still running 38 seconds later, and the same argument was made here. The
+*direction* transfers — our child does outlive a killed parent — and the *number* does not, because
+these are different programs with different reactions to EOF. An `agy` orphan is a sub-second window,
+not a condition a user would ever sit in.
+
+That is worth stating precisely, because it is the answer to "how long does a killed server leave a
+stale gate behind": **on Linux with a scope, under a second**, and then the next sweep collects it.
+
+### The finding underneath it, which is the same defect this rule was written to end
+
+Reading the registry on this machine after the runs: **eight entries, every one naming a host that is
+dead, every one reading `live`, and `owns_anything()` permanently `True`.**
+
+They are all pre-`f598638e` entries, so none carries an `agy_pid`, and
+[§ The pid that was written and never read](#the-pid-that-was-written-and-never-read-2026-09-10)
+states the rule that keeps them: *"An entry with no `agy_pid` … is never a corpse. The upgrade path is
+'keep the old behaviour', not 'guess'."* `process_alive(None)` answers `True` because the question
+cannot be asked, so `entry_is_live` is `True` for ever.
+
+**That is the intended behaviour producing exactly the defect the commit was written to fix.** Its own
+account of the cost: *"One unclean exit of ours therefore made 'we own something' permanently true,
+and from then on every unparseable payload from the user's own `agy` was denied."* The fix ended that
+for entries written after it and grandfathered the entire population that already had it — which, on
+the machine this was developed on, is all of them.
+
+**And today's measurement retires the caution that made the grandfather clause look safe.** It was
+written not to guess about an `agy` that might still be running under a host we can no longer ask
+about. That agent's lifetime is now known: it is under a second past its host. An entry whose host is
+gone, and which was written by a version that predates this file, describes a process that ended long
+ago by any measure this system can take. Recorded rather than fixed here, with the recommendation, in
+[`risks.md` AG-R-14](risks.md#ag-r-14) — the change touches what the gate answers, which is not a
+thing to slip into a verification sitting.
+
+### Two more, found by driving the app rather than by reading it
+
+**`schedule` and `send_message` raise a permission dialog on an ordinary `agy` turn.** Neither is in
+`agy/tools.py`'s `TOOL_CLASSES`, so `GATED_BY_DEFAULT.get(None, True)` gates them, and the user meets
+a modal for a planning step that touches nothing and for a subagent reporting back to its parent.
+This is phase 4's second defect — *"every read-only call raises a modal"* — arriving again through the
+half of its fix that is a table: `pre_verdict` consults a classification, and a classification only
+covers the names somebody wrote down. `agy` is at **1.2.0** here and the table was built against
+1.1.2x, which is [AG-R-2](risks.md#ag-r-2) in the transport rather than in the wheel.
+
+**The usage HUD titles an Antigravity session *"Claude Code"*.** `usage-hud.js::_modelLabel` falls
+back to that literal string when there are no turn models and no context model, and on this engine
+there are neither — both are `absent` in the descriptor, by decision. So every Antigravity session
+names the wrong product in its own HUD. It is not [AG-R-4](risks.md#ag-r-4) — nothing branches on an
+engine name — it is the shape underneath it: a default written when there was one engine, which now
+asserts which engine is answering. Visible in one frame of the screenshot above, invisible to 4,829
+green tests, and pinned by one of them (`usage-hud.test.js:840`).
+
+### The two instrument defects the sitting cost, and both are the same lesson
+
+**The deny button does not deny.** `answer_permission` clicked `button[data-decision="deny"]` and
+moved on; that button calls `_openDeny`, which opens the reason row, and the request is only answered
+by *Send denial* beside the field. So the first run clicked Deny, saw the same request still on
+screen, and clicked again — **26,417 times**, which read in the log exactly like an agent retrying a
+refused tool in a loop. It was not the agent. The harness now performs both halves of the gesture and
+then **waits for the request's own `permission_id` to leave the dialog**, so "the click did nothing"
+is a named failure rather than a spin.
+
+**A zombie reads as alive, and it inverted the first orphan reading.** The probe SIGKILLed a host it
+had spawned and never called `wait` on it, so the host stayed in `/proc` as a zombie; `os.kill(pid, 0)`
+succeeds on one. The registry then reported a live claim over two dead processes, and — worse — the
+30-second wait for the host to disappear ran to its ceiling, so the sample labelled *"200 ms after the
+kill"* was taken **thirty seconds** after it and reported `agy` as already gone. Both conclusions were
+wrong and the second was wrong in the interesting direction: it said there is no orphan, which is what
+the sitting was there to find out. Reaping the host inverts it, and the numbers above are from the
+reaped runs. `registry.process_alive` documents the zombie case and calls it a delay that "never
+inverts" a reap — true of that function, and not true of a caller that waits on the same pid.
+
+Both are the rule this directory keeps relearning: **assert on the thing, not on the gesture.**
+AG-R-11's *"assert on the file, not on the hook having fired"* is the same sentence about a different
+noun, and it is now recorded three times because it has been learned three times.
+---
+
+## Three findings, closed — and the one that was wrong before it shipped (2026-09-10, latest)
+
+The entry above found three things and fixed none of them, deliberately: a verification sitting that
+starts changing what the gate answers stops being one. Taken here in the order of what they cost a
+user.
+
+### 1. The registry's grandfather clause, closed by the measurement that made it unnecessary
+
+`entry_is_live` now asks **which kind of entry** it is holding when there is no `agy_pid` to ask
+about, because the two kinds get there for opposite reasons:
+
+- A **conversation** entry is written when the `init` frame names the conversation, by which time the
+  host has a child to name. So a missing `agy_pid` *dates* the file rather than describing it. With
+  the host also gone it is a corpse — the agent it would have named outlives its host by under a
+  second, and these files are hours old.
+- A **scope** entry is written *before* `agy` exists, on purpose ([AG-18](decisions.md#ag-18)). An
+  absent pid there is the normal state of a session that is **starting**, and reaping it would release
+  the unit an orphaned agent is still sitting in under `--dangerously-skip-permissions`. It keeps the
+  old answer.
+
+That asymmetry is the whole change, and it is why "age" is an argument that must not be generalised:
+it is available for the entry kind that cannot legitimately lack a pid, and unavailable for the one
+that can.
+
+**Measured on the machine it was found on.** The eight entries that read `live` for ever now read as
+corpses, and `owns_anything()` is `False` — the tripwire [AG-R-14](risks.md#ag-r-14) states. They will
+be swept at the next `AgyGateServer.start`, beside the stale-socket unlink that has the same cause.
+
+Three tests replace the one that pinned the old behaviour, and they are the decision table rather than
+the change: a legacy conversation entry with a dead host is reaped, one whose host is **alive** is
+untouched (age is only ever the second question), and a scope entry with no `agy_pid` is never a
+corpse.
+
+### 2. The tool table was four releases behind the binary, and nobody could have known
+
+`agy` 1.2.0 advertises **57 tools**. `agy/tools.py` classified **14** of them. The rest fell to
+`GATED_BY_DEFAULT.get(None, True)`, which is why nothing was ungated — but the seam that is supposed
+to enumerate *what can change the tree* did not know most of the ways to.
+
+**`sed_file` is the one to read twice.** [AG-R-11](risks.md#ag-r-11) exists because an agent refused
+an `edit_file` went after the same change with `sed -i` through `run_command`, unprompted, on both
+probe runs. On 1.2.0 that is a **first-class tool**. It still asked — everything unknown asks — but it
+asked as an unclassified call: no diff, no path chip, no `acceptEdits` reasoning, and no shape for the
+`always allow` control to take. Ten names went into the write seam, including three more spellings of
+spawning (`define_subagent`, `manage_subagents`, `browser_subagent`) on AG-5's own reasoning that a
+child inherits the tool set, and `call_mcp_tool`, which is arbitrary tool use by proxy.
+
+**Nothing was classified in the other direction, and that is the decision rather than the omission.**
+The `init` frame carries bare names — no descriptions, no schemas — so the only evidence available is
+the spelling. `read` is the single class that *removes* a dialog, and this directory does not spend
+that on a guess. The remaining **33** are declared in `SEEN_UNCLASSIFIED`, which changes nothing about
+how a call is treated and everything about whether the next reader can tell "seen and left" from "never
+looked". `derive_rules` returns nothing for an unrecognised class, so a user cannot grant one of them a
+standing permission either — checked rather than assumed, because an over-broad always-allow on
+`sed_file` would have been the real hole.
+
+**`scripts/probe_agy_tool_inventory.py` is the tripwire [AG-R-2](risks.md#ag-r-2) has always specified
+and never had here.** That risk's mitigation is a probe whose `unclassified` bucket is empty *by
+declaration*; one exists for the wheel and the binary — the transport that reaches the paid
+subscription — had none. It reads the inventory off the `init` frame, so it costs no model turn, and
+it reports a second bucket the wheel's probe does not need: names in our table that the binary no
+longer offers. Today that is `codebase_search`, one name, left rather than pruned on the reasoning that
+gating a tool nobody has costs nothing.
+
+**What is still open, and it is the half a user feels.** Thirty-three tools raise a dialog that says
+nothing — `wait`, `schedule`, `command_status`. That is phase 4's *"every read-only call raises a
+modal"* for the names its fix could not know, and closing it needs the binary's own account of what
+each tool does, which is not on this channel. Dialog fatigue is not cosmetic on a transport whose only
+containment is a human reading dialogs.
+
+### 3. The HUD named the wrong product
+
+`usage-hud.js::_modelLabel` fell back to the literal `'Claude Code'`, written when there was one
+engine and the only way to have no model was a HUD that had not loaded yet. This engine reports
+*neither* source — per-model usage and the context read-back are both `absent` by decision — so every
+Antigravity session carried the wrong vendor's name in the one place a user looks to see what is
+answering. The label is now empty and the tooltip says why. **The engine's name is not the fix**:
+`get_engine_capabilities` deliberately carries no engine identity ([AG-R-4](risks.md#ag-r-4)), and the
+panel that does name the engine is already on screen saying so.
+
+### The correction, which arrived from a test rather than from a reviewer
+
+The first cut of (2) declared `finish` unclassified and said in as many words that a user meets a modal
+for it. A new invariant test — *every declared name is unclassified in the table that decides* —
+refuted both halves at once: `finish` is `read` in the **SDK** half of
+`antigravity/permissions.py::TOOL_CLASSES`, which folds the two vocabularies into the table the gate
+actually reads. The probe had been asking `agy/tools.py` alone, so it reported a name as unclassified
+that has never reached a dialog.
+
+The number moved with it — 43 unclassified became 33 declared plus ten classified, against a merged
+table of 31 rather than an `agy` table of 24 — and the shape of the mistake is the one worth keeping:
+**a probe that asks a narrower question than the code does will report differences that are not there,
+and the false positives are the polite failure mode.** The same asymmetry could have hidden a real one,
+had a name been classified in only the `agy` table while the merged read happened elsewhere.
+
+4,840 Python and 4,485 webapp tests green.
+---
+
+## ⏹ on one subagent: the mechanism works and the handle arrives too late (2026-09-10, latest)
+
+`subagent_stop` was the last unbuilt surface of the subagent trio, and the only one whose design was
+already written out — `capabilities.py` said what to build, named two limits in advance, and named one
+unmeasured thing. It was built. It is still UNBUILT, **for a reason the row did not have**, and
+finding that out is the entry.
+
+### What was built, and it holds
+
+`AgyGateServer.refuse_conversation` aims the starvation the gate already performs at a single
+conversation id. That aiming is possible because of the fact [AG-R-14](risks.md#ag-r-14) was raised
+*about*: a subagent runs in a conversation of its own, and the hook payload names it on every call.
+`AgyService.stop_task` drives it, checks the id against what the turn announced — the same containment
+`agy/subagents.py` states for the reading half of the same identifier — and answers `stopping`, never
+`stopped`, because the row must stay live until the stream says otherwise.
+
+`scripts/probe_agy_subagent_stop.py` measured it on a live turn, and the instrument is the asymmetry:
+**the stopped subagent's later calls were all denied, and the parent's still reached the dialog.**
+Same turn, same gate, two conversations, opposite outcomes — which is the whole difference from
+`cancel_streaming`, and the difference that kept this surface unbuilt while the only mechanism was
+turn-wide.
+
+**The question the row ended on is answered, and the answer was the awkward one.** It asked whether
+`agy` reports a starved subagent `CANCELED` — the state that maps to `stopped` and an amber LED. It
+does not: it reports **`DONE`**. Defensible from the harness's side, since the agent did read the
+refusal and wind down, and wrong on a row, because `DONE` maps to `completed` and puts green over work
+a user stopped. So the terminal word is this host's (`AgyTranslator.mark_stopped`): we know a human
+pressed the button, which the stream does not report. Narrow on purpose — it changes the word, never
+the terminality, and only for an id `stop_task` recorded.
+
+### What cannot be built, and it is in the wire
+
+The browser probe found nothing to press. `scripts/probe_agy_subagent_stop_ui.py` drove a fourteen-file
+delegation with a browser attached and **no live subagent row was ever on screen**: one
+`subagentEvent` arrived, already terminal.
+
+Reading the frames says why, and it is not a timing accident:
+
+| Frame | State | Carries |
+|---|---|---|
+| `tool` / `invoke_subagent` | **ACTIVE** | `Subagents: [{Model, Prompt, Role, TypeName, Workspace}]` — **no conversation id** |
+| `subagent` / `invoke_subagent` | **DONE** | `subagent_info.subagents[]` with `conversation_id`, `log_uri` |
+
+`agy` emits the `subagent` step **once, and at `DONE`**. The identity a Stop button needs therefore
+arrives **with the frame that ends the row**, and `block-render.js` draws Stop only on
+`live && task_id && supports(...)`. There is no window.
+
+**This is AG-R-14 residue 1 in a second place.** That residue is the spawn-to-announce race — a child
+whose first call can beat the claim onto disk, because *"`invoke_subagent`'s arguments carry only
+`Prompt`, `Role`, `TypeName`, `Model` and `Workspace` — no conversation id, because the child does not
+exist when the dialog for the spawn is answered."* The same sentence, read a second time, is also the
+answer to why a live row cannot carry a handle: the id does not exist yet, so nothing can be keyed on
+it. AG-18 closed the *gating* consequence of that by asking the kernel instead. There is no equivalent
+move here, because a **button** needs a name the user's click can carry, and the kernel does not have
+one either.
+
+So the gate half stays built, tested and unreachable, and the surface stays `UNBUILT` with its reason
+replaced: **it waits on an identity, not on a mechanism.**
+
+### The correction this forced next door
+
+`subagent_rows` is titled *"Subagent rows and their own tabs, **live**"* and is SUPPORTED on `agy`.
+The word `live` overstates it, and the measurement above is what shows that: the row arrives already
+terminal, so it never spins. Worse in the other direction — the child can go on making tool calls
+*after* that `DONE` frame; two did, in the run that measured the stop. So the row reports an end the
+subagent has not reached.
+
+Left SUPPORTED rather than downgraded, because the row and its tab are real and carry the subagent's
+whole transcript — what is absent is the liveness, and it is now stated in the descriptor rather than
+implied by the title. **A capability's title is a claim, and this one had been making a claim nobody
+had checked.**
+
+### What the sitting cost, and what it bought
+
+Two probes, three tests files' worth of new coverage (an aimed refusal at the gate, the stopped word
+at the pump, `stop_task`'s containment and localhost rule), and a capability that ends the day exactly
+where it started — with a different reason and two measurements behind it. The alternative was
+shipping a button that could never appear, or shipping the descriptor's guess that `CANCELED` was
+coming.
+
+One test earned its place immediately: `test_a_remote_client_cannot_stop_anything` was first written
+patching `_localhost_available`, which is the *gate's* deadline question, and passed the call straight
+through while asserting it had been stopped. `_check_localhost_only` reads `_collab`. A test that
+patches the wrong seam is a test that reports the code it did not exercise.
+
+4,857 Python and 4,485 webapp tests green.

@@ -121,8 +121,9 @@ class Surface:
     #: the honest one: both reach the same product, so a surface the SDK
     #: cannot feed is one Antigravity cannot feed, whichever way it is
     #: driven. Only where the *transport* changes the answer does this
-    #: carry a value — which today is the transcript surfaces, because
-    #: ``agy`` writes a full conversation log to disk and the SDK does not.
+    #: carry a value — which today is the two subagent surfaces, because
+    #: ``agy`` announces a delegation on its stream and writes the
+    #: subagent's own conversation to disk, and the SDK does neither.
     agy: str | None = None
 
     def status_for(self, engine: str) -> str:
@@ -268,14 +269,80 @@ SURFACES: tuple[Surface, ...] = (
         "where a 503 was retried through without the caller seeing it.",
     ),
     Surface(
-        key="subagent_tabs",
-        title="Subagent rows and their own tabs",
+        key="subagent_rows",
+        title="Subagent rows and their own tabs, live",
         claude=SUPPORTED,
         antigravity=UNBUILT,
-        note="Every Step carries trajectory_id, parent_trajectory_id and "
-        "depth, and usage is per-trajectory, so this is buildable. The "
-        "pump already attributes a nested trajectory to an agent_id; "
-        "what is missing is a chat that renders more than one.",
+        agy=SUPPORTED,
+        note="Split from subagent_tabs on 2026-09-09, because one key was "
+        "answering two questions and the transports disagree about them "
+        "separately. This one is the live strip, which is fed by the pump "
+        "and gates no RPC. agy announces a delegation as a `subagent` step "
+        "carrying subagent_info.subagents[], each naming a conversation_id "
+        "of its own, so AG-13's contract is met by announcement rather "
+        "than by the SDK's per-step scope — measured at 1.1.27 by "
+        "scripts/probe_agy_subagent_frames.py. The SDK transport carries "
+        "trajectory_id and depth, which antigravity/steps.py already maps "
+        "onto agent_id, and no pump there emits the announcement yet. "
+        "**The word `live` in this title overstates it on agy, measured "
+        "2026-09-10.** The `subagent` step is emitted once and at DONE, so "
+        "the row arrives already terminal and there is no window in which "
+        "it spins; the ACTIVE `invoke_subagent` frame that would give it "
+        "one carries no conversation id to key it by. Worse in the other "
+        "direction: the child can still be making tool calls after that "
+        "DONE frame — two of them, in the run that measured it — so the "
+        "row reports an end the subagent has not reached. Still SUPPORTED "
+        "rather than downgraded, because the row and its tab are real and "
+        "carry the subagent's whole transcript; what is absent is the "
+        "liveness, and it is stated here rather than implied by the title.",
+    ),
+    Surface(
+        key="subagent_transcripts",
+        title="Read a subagent's transcript",
+        claude=SUPPORTED,
+        antigravity=UNBUILT,
+        agy=SUPPORTED,
+        note="get_subagent_transcript and list_subagent_transcripts. Split "
+        "from subagent_tabs on 2026-09-10, which is what that key's own "
+        "note said would happen the moment one of its three methods was "
+        "honest and another was not — and it is the ⏹ that is not. What "
+        "made this half honest was reading the files rather than reasoning "
+        "about them: a subagent writes its own conversation under "
+        "BRAIN_DIR/<conversation_id>/.system_generated/logs/, addressed by "
+        "the same conversation_id the announcement already carries, and "
+        "transcript_full.jsonl there records tool arguments as objects "
+        "where transcript.jsonl double-encodes each one as a JSON string. "
+        "The SDK transport marks every step with trajectory_id and depth "
+        "and no reader has been written, so it stays unbuilt rather than "
+        "absent.",
+    ),
+    Surface(
+        key="subagent_stop",
+        title="⏹ one subagent, leaving the rest of the turn running",
+        claude=SUPPORTED,
+        antigravity=UNBUILT,
+        agy=UNBUILT,
+        note="stop_task. The scoping this row asked for was built and "
+        "measured on 2026-09-10, and it is still UNBUILT here — for a "
+        "different reason than the one this row carried, and the new one is "
+        "in the wire rather than in us. AgyGateServer.refuse_conversation "
+        "aims the gate's starvation at one conversation id, and "
+        "scripts/probe_agy_subagent_stop.py showed it holding on a live "
+        "turn: every one of the stopped subagent's later calls denied, the "
+        "parent's still reaching the dialog. It also answered the question "
+        "this row ended on, awkwardly — agy reports a starved subagent "
+        "DONE, not CANCELED — so AgyTranslator.mark_stopped owns the "
+        "terminal word, because a green LED over a stop is a lie. **What "
+        "cannot be built is the aim.** A subagent's conversation id first "
+        "appears on the `subagent` step, which agy emits once, at DONE; the "
+        "live `invoke_subagent` frame carries Role, TypeName, Model, "
+        "Workspace and Prompt and no id, because the child does not exist "
+        "yet — AG-R-14 residue 1, in a second place. So the identity the "
+        "button would need arrives with the frame that ends the row, and "
+        "scripts/probe_agy_subagent_stop_ui.py found no live row to press "
+        "at all. The gate half stays built and tested; what it waits on is "
+        "an identity, not a mechanism. The SDK transport is unbuilt for the "
+        "older reason: no pump there emits the announcement.",
     ),
     Surface(
         key="agent_questions",
@@ -305,9 +372,13 @@ SURFACES: tuple[Surface, ...] = (
         antigravity=SUPPORTED,
         note="AG-1's worked example and the reason for a second engine: a "
         "thing one engine can do and the other cannot. Reachable from "
-        "Claude as a consultant tool (AG-7). Note that a free-tier key "
-        "reports limit: 0 for every image model, so this is supported by "
-        "the engine and gated by the account (AG-12).",
+        "Claude as a consultant tool (AG-7). A free-tier key reports "
+        "limit: 0 for every image model, so on the SDK transport this is "
+        "supported by the engine and refused by the account (AG-12) — "
+        "which is why AG-16 gave the consultant a second transport: agy "
+        "reaches the owner's subscription, where the allowance is not "
+        "zero. Still 'supported' either way; the descriptor answers what "
+        "the engine can feed, never which account is paying.",
     ),
 )
 

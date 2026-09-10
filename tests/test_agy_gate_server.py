@@ -19,6 +19,9 @@ Offline. No ``agy``, no network.
 from __future__ import annotations
 
 import asyncio
+import os
+import subprocess
+import sys
 
 import pytest
 
@@ -262,6 +265,58 @@ class TestOwnershipLifecycle:
         # And the hook is back to treating it as somebody else's.
         assert hook.decide(payload(), config_dir=config_dir) == hook.ALLOW
 
+    def test_a_second_conversation_can_be_claimed_at_once(self, wired):
+        """A session owns its own conversation *and* its subagents'.
+
+        One claim per host was a containment hole, not a simplification:
+        a subagent gets a conversation id of its own, the hook passes
+        through everything unclaimed, and so every call a subagent made
+        went ungated past a dialog that had approved only the spawn.
+        """
+        _recorder, _gate, server, config_dir = wired
+        server.claim(OURS)
+        server.claim("child-1")
+        assert registry.lookup(OURS, config_dir=config_dir) is not None
+        assert registry.lookup("child-1", config_dir=config_dir) is not None
+
+    def test_releasing_a_subagent_leaves_the_session_claimed(self, wired):
+        """A subagent settling must not un-gate the turn that spawned it."""
+        _recorder, _gate, server, config_dir = wired
+        server.claim(OURS)
+        server.claim("child-1")
+        server.release("child-1")
+        assert registry.lookup("child-1", config_dir=config_dir) is None
+        assert registry.lookup(OURS, config_dir=config_dir) is not None
+
+    def test_stop_releases_every_claim(self, wired):
+        """Including a subagent still running at teardown.
+
+        A registry entry is a file that outlives the process, so a claim
+        left behind makes this host intercept a *later* session of the
+        user's own that resumes that conversation.
+        """
+        _recorder, _gate, server, config_dir = wired
+
+        async def go():
+            await server.start()
+            server.claim(OURS)
+            server.claim("child-1")
+            await server.stop()
+
+        asyncio.run(go())
+        assert registry.lookup(OURS, config_dir=config_dir) is None
+        assert registry.lookup("child-1", config_dir=config_dir) is None
+
+    def test_releasing_something_never_claimed_is_quiet(self, wired):
+        _recorder, _gate, server, _cfg = wired
+        server.release("never-claimed")
+
+    def test_a_blank_conversation_is_not_claimed(self, wired):
+        """A claim on "" would be an entry no hook payload can match."""
+        _recorder, _gate, server, config_dir = wired
+        server.claim("")
+        assert registry.lookup("", config_dir=config_dir) is None
+
     def test_a_stale_socket_file_does_not_stop_a_restart(self, wired):
         """A killed process leaves the file behind; bind would fail on it."""
         _recorder, _gate, server, _cfg = wired
@@ -273,6 +328,46 @@ class TestOwnershipLifecycle:
             await server.stop()
 
         asyncio.run(go())
+
+    def test_a_claim_records_the_agy_process(self, wired):
+        """So a reader after this host is gone can still tell what is running.
+
+        The pid is the caller's to supply — this class spawns nothing — and
+        it is what separates an entry we abandoned from one whose agent
+        outlived us (AG-R-14 residue 3).
+        """
+        _recorder, _gate, server, config_dir = wired
+        server.claim(OURS, agy_pid=4242)
+        entry = registry.lookup(OURS, config_dir=config_dir)
+        assert entry["agy_pid"] == 4242
+        assert entry["pid"] == os.getpid()
+
+    def test_starting_reaps_a_dead_hosts_claims(self, wired):
+        """The same cause as the stale socket above, one layer up.
+
+        A corpse entry costs the *user's* own sessions, not ours: it keeps
+        ``owns_anything`` true, so every unparseable payload from their own
+        ``agy`` denies. Start is where a host exists again to sweep.
+        """
+        _recorder, _gate, server, config_dir = wired
+        dead = subprocess.Popen([sys.executable, "-c", ""])
+        dead.wait()
+        registry.claim(
+            "abandoned", "/tmp/gone.sock", config_dir=config_dir,
+            pid=dead.pid, agy_pid=dead.pid,
+        )
+        live = registry.claim(
+            "other-host", "/tmp/live.sock", config_dir=config_dir
+        )
+
+        async def go():
+            await server.start()
+            await server.stop()
+
+        asyncio.run(go())
+        assert not (registry.registry_dir(config_dir) / "abandoned.json").exists()
+        # A second host's live claim shares the directory and survives.
+        assert live.exists()
 
 
 class TestTheRoundTrip:
@@ -323,3 +418,92 @@ class TestTheRoundTrip:
 
         assert asyncio.run(go()) == hook.ALLOW
         assert recorder.requests() == []
+class TestStoppingOneSubagentRatherThanTheTurn:
+    """``refuse_conversation`` — ⏹ on a row, not on the turn.
+
+    The mechanism that already existed was ``refuse_all``, which is
+    turn-wide: wiring ⏹ on a subagent to it would have stopped the parent
+    as well as the subagent the user aimed at, and that is why
+    ``subagent_stop`` stayed UNBUILT with its design written out rather
+    than being wired to the nearest thing.
+
+    What makes aiming possible is the fact AG-R-14 was raised *about*: a
+    subagent runs in a conversation of its own, and the hook payload names
+    it on every call.
+    """
+
+    CHILD = "c21acd4d-0000-4000-8000-000000000001"
+
+    @pytest.mark.asyncio
+    async def test_the_stopped_conversation_is_denied_with_its_reason(self, wired):
+        _recorder, _gate, server, _config_dir = wired
+        server.refuse_conversation(self.CHILD, "the user stopped this subagent")
+        answer = await server.decide(payload(conversation=self.CHILD))
+        assert answer["decision"] == "deny"
+        assert answer["reason"] == "the user stopped this subagent"
+
+    @pytest.mark.asyncio
+    async def test_the_parent_is_untouched(self, wired):
+        """The whole difference from ``refuse_all``, in one assertion.
+
+        Answered by the dialog rather than by the refusal: the parent's
+        call goes down the ordinary path, so it is *asked about*, which is
+        what "the rest of the turn keeps running" means here.
+        """
+        recorder, gate, server, _config_dir = wired
+        server.refuse_conversation(self.CHILD, "stopped")
+        decide = asyncio.ensure_future(server.decide(payload(conversation=OURS)))
+        await answer_next(gate, recorder, {"action": "allow"})
+        assert (await decide)["decision"] == "allow"
+
+    @pytest.mark.asyncio
+    async def test_a_stopped_subagent_is_never_put_to_the_user_again(self, wired):
+        """Pressing stop is an answer, and re-asking would be the opposite.
+
+        The same rule ``refuse_all`` follows. Asserted on the broadcast
+        rather than on the verdict, because a dialog that appears and is
+        then auto-answered would give the same verdict and a very
+        different experience.
+        """
+        recorder, _gate, server, _config_dir = wired
+        server.refuse_conversation(self.CHILD, "stopped")
+        await server.decide(payload(conversation=self.CHILD))
+        assert recorder.requests() == []
+
+    @pytest.mark.asyncio
+    async def test_a_turn_wide_stop_still_covers_everything(self, wired):
+        """``refuse_all`` subsumes an aimed refusal, and is checked first."""
+        _recorder, _gate, server, _config_dir = wired
+        server.refuse_all("the user stopped this turn")
+        answer = await server.decide(payload(conversation=OURS))
+        assert answer["decision"] == "deny"
+        assert answer["reason"] == "the user stopped this turn"
+
+    @pytest.mark.asyncio
+    async def test_resume_clears_the_aimed_refusals_too(self, wired):
+        """A stop applies to the turn it was pressed during.
+
+        This matters more than for the turn-wide refusal: a subagent's id
+        is ``agy``'s own conversation id, so one left standing would still
+        be aimed at that conversation if the user resumed it later — the
+        interception ``registry.release`` exists to prevent, arriving
+        through a different door.
+        """
+        recorder, gate, server, _config_dir = wired
+        server.refuse_conversation(self.CHILD, "stopped")
+        server.resume()
+        assert server.is_refusing(self.CHILD) is False
+        decide = asyncio.ensure_future(server.decide(payload(conversation=self.CHILD)))
+        await answer_next(gate, recorder, {"action": "allow"})
+        assert (await decide)["decision"] == "allow"
+
+    def test_an_empty_id_aims_at_nothing(self, wired):
+        """A missing row id must not become a refusal that matches "".
+
+        ``decide`` looks the payload's conversation up in this map, and a
+        payload with no conversation id reads as ``""`` — so an empty key
+        would stop every call this host could not attribute.
+        """
+        _recorder, _gate, server, _config_dir = wired
+        server.refuse_conversation("", "stopped")
+        assert server.is_refusing("") is False

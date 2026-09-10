@@ -48,6 +48,14 @@ const _MODEL_DEFAULTS = {
     available: ['claude', 'antigravity'],
     mountable: ['claude'],
   }),
+  // AG-R-15's picker is read on every mount for the same reason, and an
+  // empty list renders no panel — so a test that does not care about the
+  // consultant is not given one.
+  'Settings.get_consultant_model': () => ({
+    model: 'gemini-3.8-flash-high',
+    inherit_value: 'auto',
+    models: [],
+  }),
 };
 
 function publishFakeRpc(methods) {
@@ -250,9 +258,14 @@ describe('aic-settings-tab preference cards', () => {
     publishConfigFiles();
     const el = mountTab();
     await settle(el);
-    expect(prefCards(el)).toHaveLength(2);
+    expect(prefCards(el)).toHaveLength(3);
     expect(el.shadowRoot.textContent).toContain('Thinking display');
     expect(el.shadowRoot.textContent).toContain('Doc enrichment');
+    // AG-17. Third because it is a policy rather than a preference, and
+    // it is on this grid rather than beside the engine selector because
+    // it also governs the consultant — which is not an engine anybody
+    // picks, and is the surface a Claude-only workplace actually meets.
+    expect(el.shadowRoot.textContent).toContain('Engines allowed');
     // The Agentic-coding switch and its machinery are gone for good.
     expect(el.shadowRoot.querySelector('.card.toggle-card')).toBeNull();
     expect(el.shadowRoot.querySelector('.toggle-switch')).toBeNull();
@@ -2340,5 +2353,220 @@ describe('aic-settings-tab standing permission rules', () => {
     const el = mountTab();
     await settle(el);
     expect(rulesPanel(el)).toBeFalsy();
+  });
+});
+
+// ----------------------------------------------------------------------
+// AG-17 — the engine policy
+// ----------------------------------------------------------------------
+
+/** The engine-policy card's select, addressed by its card rather than by order. */
+function policySelect(el) {
+  return el.shadowRoot.querySelector('.pref-card[data-pref="engine-policy"] select');
+}
+
+/** `app.json` text with an `engines` section a test supplies. */
+function appWith(engines) {
+  return `${JSON.stringify({ doc_index: { keywords_enabled: true }, engines }, null, 2)}\n`;
+}
+
+describe('aic-settings-tab engine policy', () => {
+  it('shows every engine allowed when the file names no policy', async () => {
+    // The state every install had before this control existed. A default
+    // that read as a restriction would take a feature from somebody who
+    // never wrote one.
+    publishConfigFiles();
+    const el = mountTab();
+    await settle(el);
+    expect(policySelect(el).value).toBe('all');
+    expect(policySelect(el).disabled).toBe(false);
+  });
+
+  it('writes a Claude-only policy as a list the file can be read back from', async () => {
+    const backend = publishConfigFiles();
+    const el = mountTab();
+    await settle(el);
+    const select = policySelect(el);
+    select.value = 'claude';
+    select.dispatchEvent(new Event('change'));
+    await settle(el);
+    expect(backend.saves).toHaveLength(1);
+    expect(backend.saves[0].key).toBe('app');
+    expect(JSON.parse(backend.saves[0].content).engines.enabled).toEqual(['claude']);
+  });
+
+  it('writes the full list rather than removing the key', async () => {
+    // A reader meeting this file should see what is permitted, not an
+    // absence whose meaning they have to know.
+    const backend = publishConfigFiles({
+      files: { app: appWith({ enabled: ['claude'] }) },
+    });
+    const el = mountTab();
+    await settle(el);
+    const select = policySelect(el);
+    select.value = 'all';
+    select.dispatchEvent(new Event('change'));
+    await settle(el);
+    expect(JSON.parse(backend.saves[0].content).engines.enabled)
+      .toEqual(['claude', 'antigravity', 'agy']);
+  });
+
+  it('hydrates from a policy that permits one transport', async () => {
+    publishConfigFiles({ files: { app: appWith({ enabled: ['claude', 'agy'] }) } });
+    const el = mountTab();
+    await settle(el);
+    expect(policySelect(el).value).toBe('claude-agy');
+  });
+
+  it('reads a list that omits claude as claude being in force anyway', async () => {
+    // The server adds it back rather than leaving the app with no
+    // engine, so a control that showed something else would be
+    // describing a configuration that cannot exist.
+    publishConfigFiles({ files: { app: appWith({ enabled: ['agy'] }) } });
+    const el = mountTab();
+    await settle(el);
+    expect(policySelect(el).value).toBe('claude-agy');
+  });
+
+  it('disables itself rather than rounding a hand-written policy', async () => {
+    // `decode` returning null: the file says something these four
+    // presets cannot. Overwriting it on the next gesture would be a
+    // control editing what it was not asked about.
+    publishConfigFiles({
+      files: { app: appWith({ enabled: ['claude', 'antigravity', 'gpt-5'] }) },
+    });
+    const el = mountTab();
+    await settle(el);
+    expect(policySelect(el).disabled).toBe(true);
+    const card = el.shadowRoot.querySelector('.pref-card[data-pref="engine-policy"]');
+    expect(card.getAttribute('title')).toContain('cannot show');
+  });
+
+  it('says the application must restart, not the session', async () => {
+    // The third disposition. Restart session restarts the engine, and
+    // engines are mounted once when the application starts — so naming
+    // the session control here would be a promise this tab cannot keep.
+    const toasts = toastSpy();
+    publishConfigFiles();
+    const el = mountTab();
+    await settle(el);
+    const select = policySelect(el);
+    select.value = 'claude';
+    select.dispatchEvent(new Event('change'));
+    await settle(el);
+    const said = toasts.map((t) => t.message).join(' ');
+    expect(said).toContain('when AIC⚡DC next starts');
+    expect(said).not.toContain('Restart session');
+  });
+
+  it('does not reload app.json for a value that is only read at startup', async () => {
+    // A reload would suggest the running process picked it up. It did
+    // not: the adapters were constructed before this was written.
+    const backend = publishConfigFiles();
+    const el = mountTab();
+    await settle(el);
+    const select = policySelect(el);
+    select.value = 'claude';
+    select.dispatchEvent(new Event('change'));
+    await settle(el);
+    expect(backend.reloads).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// AG-R-15 — the consultation model, and the vendor warning
+// ---------------------------------------------------------------------------
+
+const CONSULTANT_MODELS = [
+  { value: 'gemini-3.8-flash-high', displayName: 'Gemini 3.8 Flash (High)', second_vendor: false },
+  { value: 'gemini-3.8-flash-low', displayName: 'Gemini 3.8 Flash (Low)', second_vendor: false },
+  { value: 'claude-opus-4-6-thinking', displayName: 'Claude Opus 4.6 (Thinking)', second_vendor: true },
+];
+
+describe('aic-settings-tab second opinion model', () => {
+  function consultantRpc(model, extra = {}) {
+    publishFakeRpc({
+      'Settings.get_consultant_model': () => ({
+        model,
+        inherit_value: 'auto',
+        models: CONSULTANT_MODELS,
+      }),
+      ...extra,
+    });
+  }
+
+  function panel(el) {
+    return [...el.shadowRoot.querySelectorAll('.model-panel')].find(
+      (p) => p.getAttribute('aria-label') === 'Second opinion model',
+    );
+  }
+
+  it('renders the choices agy offers', async () => {
+    consultantRpc('gemini-3.8-flash-high');
+    const el = mountTab();
+    await settle(el);
+    const options = [...panel(el).querySelectorAll('option')].map((o) => o.value);
+    expect(options).toContain('gemini-3.8-flash-low');
+    expect(options).toContain('auto');
+  });
+
+  it('marks a non-Google model in the list', async () => {
+    consultantRpc('gemini-3.8-flash-high');
+    const el = mountTab();
+    await settle(el);
+    const claude = [...panel(el).querySelectorAll('option')].find(
+      (o) => o.value === 'claude-opus-4-6-thinking',
+    );
+    expect(claude.textContent).toContain('⚠');
+  });
+
+  it('warns in prose when the chosen model is the same vendor', async () => {
+    // AG-13's premise made false. The option is selectable; it is not silent.
+    consultantRpc('claude-opus-4-6-thinking');
+    const el = mountTab();
+    await settle(el);
+    expect(panel(el).textContent).toContain('not a second vendor');
+  });
+
+  it('does not warn for a Google model', async () => {
+    consultantRpc('gemini-3.8-flash-high');
+    const el = mountTab();
+    await settle(el);
+    expect(panel(el).textContent).not.toContain('not a second vendor');
+  });
+
+  it('takes the answer from the reply rather than from the select', async () => {
+    // The select is a request. A refused change must not leave the control
+    // showing a value the server never accepted.
+    const calls = [];
+    consultantRpc('gemini-3.8-flash-high', {
+      'Settings.set_consultant_model': (value) => {
+        calls.push(value);
+        return { error: 'unknown_model' };
+      },
+    });
+    const el = mountTab();
+    await settle(el);
+    const select = panel(el).querySelector('select');
+    select.value = 'claude-opus-4-6-thinking';
+    select.dispatchEvent(new Event('change'));
+    await settle(el);
+    expect(calls).toEqual(['claude-opus-4-6-thinking']);
+    expect(el._consultant.model).toBe('gemini-3.8-flash-high');
+  });
+
+  it('renders nothing when agy offers no list', async () => {
+    // An empty list means the subprocess failed, not that the account has no
+    // models — an empty picker under a heading would say the opposite.
+    consultantRpc('gemini-3.8-flash-high', {
+      'Settings.get_consultant_model': () => ({
+        model: 'gemini-3.8-flash-high',
+        inherit_value: 'auto',
+        models: [],
+      }),
+    });
+    const el = mountTab();
+    await settle(el);
+    expect(panel(el)).toBeUndefined();
   });
 });

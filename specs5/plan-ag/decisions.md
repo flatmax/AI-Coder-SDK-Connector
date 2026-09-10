@@ -309,6 +309,16 @@ exists on this engine.
 | `start_subagent` / `invoke_subagent` | **still asks** |
 | a write whose path cannot be read | still asks |
 
+> **Corrected 2026-09-09 by [AG-R-14](risks.md#ag-r-14), and completed 2026-09-10 by
+> [AG-18](#ag-18).** The spawners are in the *still asks* column because a subagent gets the whole
+> tool set, so approving a delegation is approving everything it may then do. That was the right
+> place to put them and it was doing none of the work claimed for it: the subagent's own calls
+> reached no dialog at all, so a row that reads as "this one is dangerous enough to always confirm"
+> was in fact **the only** confirmation on that whole branch of execution. Measured, not inferred —
+> `probe_agy_subagent_gate.py` denied everything but the delegation and watched the subagent's edit
+> land. The dialog on the spawn is now what this row always meant it to be, because the calls under
+> it are gated too.
+
 What this decision was protecting was never "edits are dangerous". It was the *execution* path:
 [AG-R-11](risks.md#ag-r-11) measured the agent, refused an `edit_file`, reaching for `sed -i`, then
 inline `python3`, then `list_dir` — three routes to one write, every one through the shell. A posture
@@ -701,6 +711,13 @@ own unrelated `agy` sessions. `workspacePaths` is **empty** in every captured pa
 it. `conversationId` can: AIC⚡DC learns its conversation id from the `init` frame before any tool call
 arrives, so the hook can allow-and-return immediately for any conversation the host does not own.
 
+> **Amended 2026-09-10 by [AG-18](#ag-18): `conversationId` is no longer the primary scope.** It is
+> correct for every conversation somebody announces, and [AG-R-14](risks.md#ag-r-14) is the two cases
+> where nobody does — a subagent whose first call outruns its announcement, and a grandchild that is
+> never announced at all. On a systemd platform the hook now asks the kernel which cgroup it is in and
+> consults the conversation registry only when that answers nothing; elsewhere this row still
+> describes the whole mechanism, residues included.
+
 ### It is a selectable engine, labelled by which account pays **(user, 2026-09-03)**
 
 `agy` gets its own identifier in `capabilities.ENGINES` and its own row in the picker, rather than
@@ -807,6 +824,31 @@ which is worse than not attaching it at all.
 way a `Task` subagent's does. It appears as its own row and its own tab. If the SDK ever passes a
 tool-use id to in-process handlers, this becomes a two-line change and the nesting comes back.
 
+### The accepted cost, met by a user (2026-09-09)
+
+Reported from the running app: the consultation row **trails the bottom of the chat** as the
+conversation grows, rather than staying with the `second_opinion` card that started it. That is this
+cost, seen — and it is worth separating the two halves of it, because they are not equally blocked.
+
+**The blocker still holds.** Re-measured at `claude-agent-sdk` 0.2.137: the `tools/call` path builds
+`CallToolRequestParams(name=…, arguments=…)` and drops everything else from the request, so an
+in-process handler still receives only its own arguments and a consultation still cannot learn the id
+of the card that invoked it. The 2026-09-01 measurement is current, and the two-line change is not
+available yet.
+
+**But the complaint is about *placement*, and placement is not attribution.** The row sorts to the
+bottom because its `tool_use_id` matches no card in the turn — the same mechanism recorded in
+`32d04ce7` for a backgrounded shell command. This decision rejected correlating a consultation with
+the most recent `mcp__aic-dc-antigravity__*` card, and the reason given is *attribution*: the failure
+mode is attaching output to the wrong card. **Ordering by that correlation is a weaker claim than
+attributing by it.** An ordering that guesses wrong puts a row in the wrong place; an attribution that
+guesses wrong says a different agent produced the work. Those are not the same risk, and this entry
+did not distinguish them because the question it was answering was which card the row *belongs* to.
+
+Not decided here. What is recorded is that the option exists, that it is cheaper than it looked, and
+that reopening it means choosing a rule for *where a row with no matching card sorts* — which is a
+chat-panel question about every such row, not a consultation one.
+
 ### The contract, read off the webapp on 2026-09-01
 
 Written down because "no webapp change" is only true if the server gets these exactly right, and
@@ -828,7 +870,11 @@ construction — but it is the one that fails silently if the bridge is ever cal
 - **Read-only, like every subagent tab.** There is no channel into a running consultation, so the
   input surface is dropped. That is already the webapp's behaviour and needs nothing new.
 - **Stoppable.** `Conversation.cancel()` exists, so the ⏹ affordance is real rather than decorative.
-  It maps onto `stop_task`, which is why that method is in the `subagent_tabs` surface.
+  It maps onto `stop_task`, which is why that method is in the `subagent_tabs` surface. **Amended
+  2026-09-10:** that key no longer exists — `subagent_tabs` split into `subagent_transcripts` and
+  `subagent_stop`, and `stop_task` belongs to the second. Which does *not* make this bullet's claim
+  conditional on the key: a consultation is cancelled here by the bridge, without the request reaching
+  either CLI. `subagent_stop` being `UNBUILT` is about stopping a subagent the **engine** spawned.
 - **No cost figure.** [AG-6](#ag-6) — Antigravity reports tokens and no USD, so the tab hides its
   cost display rather than drawing a zero. This is the first real consumer of the capability
   descriptor ([AG-3](#ag-3), [AG-9](#ag-9)), and it is a good one: the surface is genuinely absent
@@ -928,3 +974,325 @@ survives a **server restart**, and the same command in a later session raises **
 rule must never widen beyond what was shown. A rule derived from `rm -rf build/` must not match
 `rm -rf /`, and a path rule for `src/a.py` must not match `src/`. The stored form is asserted, not the
 dialog's label.
+
+---
+
+## AG-16 — The consultant runs over `agy` too, and by default prefers it **(user)**
+
+**The consultant has never been able to do the thing it was built for.** AG-1's worked example for
+having a second engine at all is image generation — a capability Anthropic does not offer — and
+`generate_image` has been implemented, tested and mounted since phase 1 without once returning an
+image. The reason is not code: on a free-tier Gemini key **every image model reports `limit: 0`**,
+which is an allowance of zero rather than a throttle, so no amount of retrying or waiting changes it
+([AG-12](#ag-12--the-free-ai-studio-tier-is-chosen-not-defaulted-into-user)). The same key caps agent
+requests at 20 per model per day and queues what is left behind paid traffic.
+
+**`agy` is the same product on an account that has an allowance.** It authenticates by OAuth against
+the owner's Google subscription — the entire reason [AG-14](#ag-14) added it as a second transport —
+and its `init` frame advertises `generate_image` among its 57 tools. So the consultant gains a second
+implementation, and the second one is the first that can run.
+
+`claude_code/service.py` said the opposite in a log line: *"There is no agy equivalent — the CLI has
+no one-shot consultation mode."* That was written before anything drove `agy`, and it is wrong twice:
+`agy` runs headlessly per prompt, and phase 8 had already built the process, the stream reader and the
+gate a consultation composes. **A sentence about a capability, written while nothing exercised it,
+outlived the reason it was true** — the same shape as the read tools' `ARG_ALIASES` and
+`EngineHealth.mcp` before it.
+
+### The decision
+
+**Both transports implement one consultant contract, `ConsultantBridge` holds either, and `auto`
+prefers `agy`.** `choose_consultant` answers with a consultant and a sentence saying which and why, or
+with `None` and a sentence saying why there is none. `app.json`'s `engines.consultant` names one
+explicitly — `agy`, `sdk`, or `auto`.
+
+Auto prefers `agy` because the alternative is a transport that cannot generate an image at all. It
+falls back to the SDK rather than refusing, since a second opinion on a metered key is still a second
+opinion. **`sdk` is worth naming explicitly rather than being the fallback only:** a user with a
+*paid* key may want it, because the SDK consultant pins its model and an opinion whose model moved is
+not a second opinion.
+
+### Containment is the whole of the design, and it is not the SDK's
+
+The SDK consultant restricts itself by **enabling** only what a consultation needs — `FINISH`, plus
+`GENERATE_IMAGE` for an image — so the agent never holds the rest. **That option does not exist on
+this transport.** `agy`'s tool set is the binary's, its headless permission layer auto-denies rather
+than asking, and AIC⚡DC therefore runs it with `--dangerously-skip-permissions` and reviews the calls
+itself. A consultation cannot subtract a tool; it can only answer for one.
+
+So the restriction is a `StaticPolicy` on the gate: the consultation's conversation is claimed in the
+registry exactly as a session's is, and every call is answered from a fixed allowlist **with no
+dialog**. A second opinion is allowed nothing; an image generation is allowed `generate_image`.
+Everything else is denied with prose the model reads, which turns a refusal into "answer the question"
+rather than into [AG-R-11](risks.md#ag-r-11)'s search for another route — the same mechanism, used the
+useful way round.
+
+**Two reasons a consultation must not raise a dialog, and the second is structural.** It was already
+answered: a consultation only happens inside an `mcp__aic-dc-antigravity__*` tool call, which reached
+the dialog by the ordinary path. And nobody is watching the right window: the Claude turn that asked
+is *blocked on the tool result*, so a dialog raised here interrupts a turn to ask about a call the user
+never made.
+
+### It refuses to run without the gate installed, and that is AG-5 rather than tidiness
+
+An unclaimed conversation is passed straight through by the hook — correctly, since that is how the
+user's own `agy` sessions stay untouched. An unclaimed *consultation* is therefore an agent with 57
+tools, `--dangerously-skip-permissions`, and the repository as its working directory. So
+`AgyConsultant.available` is false without a `current` gate and the tools are not offered at all,
+which is AG-9's "hidden rather than stubbed" arriving at a much sharper edge than usual.
+
+### What it borrows, and the one thing it must not
+
+[AG-R-9](risks.md#ag-r-9) warned that a consultant grown into an engine adapter is all cost and no
+reuse. This is that relationship reversed and the risk does not apply: the engine was built first and
+this *consumes* it — `AgySession` for the process and the frames, `AgyTranslator` for the rendering,
+`files_written_by` for which file a call wrote, `verify_image_write` for whether to believe it.
+
+**The one thing it does not borrow is the turn's close.** `AgySession.stream_turn` ends by emitting
+`streamComplete`, which carries a request id and tells the browser a turn is over — and the turn that
+is open is the *Claude* turn holding this tool call. So the session grew `stream_frames`, the reader
+with no rendering in it, and `stream_turn` became that plus a translator and the close. One reader,
+two callers, and the consultant is the one that must not end anything.
+
+### Exit criterion
+
+A real `generate_image` on the paid subscription writes a picture **inside the repository**, verified
+by `stat` and a containment test rather than by the tool's own success report (AG-R-3), while the gate
+records that `generate_image` was the only tool allowed. And a real `second_opinion` returns prose
+having been allowed **nothing at all**, with no `streamComplete` reaching the tab.
+
+`scripts/probe_agy_consultant.py` is that criterion, and it settles one thing the offline tests
+structurally cannot: **which argument name `agy` gives the output path.** `files_written_by` knows
+`output_path` and `OutputPath`, both from the SDK's vocabulary; whether the CLI spells it either way is
+unmeasured, so the probe prints the tool frame verbatim on failure. This is phase 4's `PATH (none
+named)` trap in advance — a table that looks right, is never exercised, and degrades quietly.
+
+**Met 2026-09-08, and the question above was answered by being falsified.** There is no output-path
+argument on *either* transport: the tool takes `ImageName`, and the harness chooses the location. The
+trap was real and one layer deeper than this paragraph guessed — the table did not have the wrong
+spelling, it was answering a question the tool does not accept. So the consultant **collects** the
+image out of `brain/<conversation_id>/` and copies it into the repository, and `files_written_by` is
+no longer asked. Measured contract in
+[`sdk-surface.md` § `generate_image` takes a name, not a path](sdk-surface.md#generate_image-takes-a-name-not-a-path--measured-2026-09-08);
+the run in [`delivery.md` § Phase 10](delivery.md#phase-10--the-consultant-on-the-paid-transport-and-the-argument-that-does-not-exist-2026-09-08).
+
+One line of this decision is superseded by it. § *What it borrows* names `files_written_by` as the
+borrowed answer to "which file a call wrote"; for images that borrowing is withdrawn, for the reason
+above. The other three — `AgySession`, `AgyTranslator`, `verify_image_write` — stand, and
+`verify_image_write` is now the judge of a file *we* placed rather than one the harness did, which is
+a stronger position for it rather than a weaker one.
+
+---
+
+## AG-17 — A Claude-only deployment is supported, and the second engine can be switched off **(user)**
+
+**Asked as a question and it had no answer.** *"Is there a way to disable agy engine calling in the
+settings? This would be necessary for some workplaces where they are only allowed to use Claude."*
+There is not, and reading for one is what produced this entry: every mechanism that looks like an off
+switch turns out to be something else wearing its clothes.
+
+### What was already there, and why none of it is this
+
+| Mechanism | What it actually does |
+|---|---|
+| `engines.master` ([AG-1](#ag-1)) | Names which engine a session *starts* on. `switch_engine` reaches any mounted engine at runtime, so this is a default, never a restriction |
+| The `agy` permission gate ([AG-14](#ag-14)) | `connect_engine` refuses without it, so removing it does stop a session — but it is a *safety interlock*, the engine still appears in `list_engines().mountable`, the refusal arrives only after the user has chosen it, and **one click in Settings puts it back** |
+| No Gemini key, or no wheel ([AG-R-8](risks.md#ag-r-8), [AG-R-10](risks.md#ag-r-10)) | Keeps the SDK engine absent, and it is the closest thing to a Claude-only story the app has. It is the *absence of a credential*, not a decision anybody made or can audit |
+| `mcp_servers` toggles | Cover user-configured servers. The consultant's is in-process and mounts before there is anything to toggle |
+
+And the `agy` adapter mounts on `shutil.which("agy") is not None` with **no configuration consulted at
+all**. A machine that has the CLI installed for any reason has the engine.
+
+### The finding, which is [AG-16](#ag-16)'s and arrived one message after it
+
+Until 2026-09-06 the consultant needed a Gemini API key, so a workplace that had never set one got no
+Antigravity surface anywhere. AG-16 mounted the consultant on the `agy` binary plus an installed gate
+instead — and `auto` prefers it — so **the same install now offers `second_opinion` and
+`generate_image` inside every Claude turn**, with source code as their intended argument
+([AG-7](#ag-7), [AG-12](#ag-12)).
+
+Every such call still reaches the permission dialog, because those two tools sit on their own gated
+MCP server rather than the ungated index one ([AG-5](#ag-5)) — so nothing is sent without a human
+click. **That is not the same as a policy, and the difference is the whole of this entry:** the tools
+are advertised to the model on every turn, the model will reach for them, and "the user approved it"
+is exactly the outcome a workplace rule exists to make impossible rather than to rely on.
+
+**A capability widened by a change is not automatically wanted by everyone the change reaches.** AG-16
+was written from the position of an owner who wants the second engine and cannot pay for it; the same
+default, on a machine that is not allowed a second provider, is a defect. Nothing in this directory
+had a place to notice that, which is why this is a decision rather than a follow-up.
+
+### The decision
+
+**One key: `engines.enabled` in `app.json`, an allowlist of engine names, defaulting to all of them.**
+When it does not name an Antigravity engine, that adapter does not mount, the selector does not offer
+it, `switch_engine` refuses it — and **the consultant does not mount either**.
+
+Three properties, each chosen against an alternative that looked simpler:
+
+- **`claude` cannot be removed.** An empty allowlist, or one naming only engines this install does not
+  have, would produce an application with no engine at all — a config typo costing the user the whole
+  product, which is the failure `engines.master`'s fallback already exists to prevent. Claude is
+  always enabled and a list that omits it is corrected with a warning.
+- **The consultant follows the engine rather than getting its own switch.** It would have been one
+  more boolean, and two switches for one question are two things that can disagree — the convergence
+  this suite keeps choosing (§ C3 of the Claude queue, the merged tool tables, one `windowIsOpen`).
+  "May this install reach Antigravity at all" is one question. AG-16's `engines.consultant` answers a
+  different one — *which transport*, given that it may — so the two compose by intersection: the
+  allowlist decides **whether**, the transport preference decides **which**, and naming a transport
+  that is not enabled yields no consultant rather than an override.
+- **It is `app.json`, not `engine.json`.** Same reasoning as `engines.master`: every key in
+  `engine.json` is a Claude session option, and a cross-engine fact does not belong inside one
+  engine's option file.
+
+### A Settings toggle as well, and what it is not **(user, 2026-09-06)**
+
+The user asked for the control to exist in Settings, and it does. The reasoning against was put and
+the choice was made with it in view, so it is recorded rather than re-argued: **a control the user can
+switch off is a control the user can switch back on**, so the toggle is a convenience for one person
+on one machine and the file is the thing an organisation manages. A workplace that needs enforcement
+ships `app.json` read-only or writes it from configuration management; the toggle then reflects a
+state it cannot change, which is the honest rendering of a policy — the same shape as the gate panel
+being absent on an engine that has no gate.
+
+**That sentence needed the config layer to be true, and on 2026-09-06 it was not.** `app.json` was a
+managed file, so the first start after any version change replaced it from the bundle and the policy
+went with it — a Claude-only install became a two-provider install by being upgraded
+([AG-R-13](risks.md#ag-r-13)). Read-only did hold, but by aborting the upgrade pass, which then
+repeated on every start. Both were found by phase 11's verification and fixed on 2026-09-07: the file
+is merged key by key against a pristine copy of the bundle, so a value configuration management writes
+survives an upgrade while a default nobody touched still moves
+([`../1-foundation/configuration.md`](../1-foundation/configuration.md#appjson-is-merged-key-by-key-commitmd-is-overwritten)).
+Read-only is still a legitimate way to pin the file; it is no longer the only thing standing between a
+policy and its own expiry date. **The general form is worth naming for whatever policy comes next: the
+file a policy lives in is part of the decision, not an implementation detail of it.**
+
+**The two halves take effect at different times, and the card has to say so**, because this is one key
+with two consumers. The engine adapters are constructed at **startup**, so disabling is an
+app-restart field and joins the restart confirmation's list. The consultant mounts when a **session**
+is built, so it goes on the next session. Neither takes effect now, and a toggle that silently did
+nothing until a restart is the failure the preference cards were given their disposition sentence for
+([`../5-webapp/settings.md`](../5-webapp/settings.md) § *Preference Cards*).
+
+### What this does not do, stated so it is not mistaken for more
+
+It governs **what AIC⚡DC mounts**. It does not uninstall `agy`, stop the user running it in their own
+terminal, or prevent an MCP server they configure themselves from reaching anything. It is not a
+network control and must not be described as one: a workplace that needs traffic blocked blocks
+traffic. What it removes is this application's own ability to reach a second provider — the engine,
+the consultant, and the tools offered to the model — which is the part this repository owns.
+
+### Exit criterion
+
+With `engines.enabled: ["claude"]` in `app.json` on a machine that has **both** the `agy` binary with
+its gate installed and a Gemini key with the wheel — the configuration where every other mechanism
+would have mounted something — a freshly started server:
+
+1. mounts no Antigravity adapter, so `list_engines().mountable` is `["claude"]`;
+2. refuses `switch_engine("agy")` and `switch_engine("antigravity")` with a reason naming the policy
+   rather than a missing binary, since "you have not installed it" would send an administrator to fix
+   something that is not the cause;
+3. builds a Claude session whose MCP servers **do not include** `aic-dc-antigravity` — asserted
+   against the mounted server list, never against the log line, because a log line saying it was
+   skipped is what a build that mounted it anyway would also print.
+
+And the tripwire that keeps it true: a test asserting that **every** Antigravity-reaching mount point
+consults the allowlist, so a future surface cannot be added beside them and inherit the old default.
+That is the failure this entry was written about — a mount condition that answered `which("agy")` and
+nothing else, correct on the day it was written and wrong the day the product met a workplace.
+
+---
+
+## AG-18 — The gate's identity is a cgroup, not a conversation id
+
+**Decided 2026-09-10, and it amends [AG-14](#ag-14) rather than reversing it.** The `agy` gate keeps
+its shape — a global `PreToolUse` hook, a Unix socket per session, the shared `PermissionBroker`
+behind it, and a passthrough for everything that is not ours. What changes is the question the hook
+asks to decide *ours*: **on a systemd platform it asks the kernel which cgroup it is in, and only
+falls back to the conversation registry when that answers nothing.**
+
+### What forced it
+
+AG-14 chose `conversationId` because it was the one field in the hook payload that could scope a
+global hook to our own sessions — `workspacePaths` is empty in every captured payload, and
+workspace-local `hooks.json` does not load headlessly. That reasoning was correct and remains correct;
+it was also **complete only for conversations somebody tells us about**.
+
+[AG-R-14](risks.md#ag-r-14) is the two cases where nobody can. `agy` starts a subagent *before* the
+frame announcing it arrives, so the child's first call can beat the claim onto disk. And a subagent's
+own frames never reach this host, so a subagent that spawns a further subagent announces the
+grandchild to nobody at all. The second has no claim to be late with, which is the tell: this is not a
+latency problem with a tighter fix available, it is the premise that **identity is something written
+down in advance**.
+
+### Why the kernel, and not a marker of our own
+
+Two userspace schemes were designed and rejected before this one, and the way they die is the argument
+for what replaced them. Both are recorded at length in [AG-R-14](risks.md#ag-r-14); in short:
+
+| Candidate | Why not |
+|---|---|
+| An inherited environment marker | It is mutable data belonging to the process it identifies. [AG-R-11](risks.md#ag-r-11) already measured this agent reaching for `run_command` when a write was refused — and it is worse than the adversarial case, because `env -i`, build runners and `subprocess(env={})` scrub environments as ordinary practice, so it fails open on benign tooling |
+| Walking the process ancestry | The same idea one step better, and still defeated by a standard double-fork |
+| A private config root, so the hook exists only for our sessions and can fail closed | Self-contradictory: refusing an unknown conversation refuses *exactly the two cases this is about*, converting an unsupervised action into a denial of service against our own delegation. And the override has to travel by environment (the first row) or by argv (which a shell-spawned process does not inherit) |
+
+cgroup v2 has neither weakness, because **membership is enforced by the kernel rather than carried by
+the process**: an unprivileged process cannot move itself out, and every descendant is bound. Measured
+before anything was built, because it was nearly free to measure — one scope, four descendants, each
+printing its own `/proc/self/cgroup`:
+
+| descendant | in the scope? |
+|---|---|
+| direct child | yes |
+| subshell | yes |
+| `env -i` (environment fully stripped) | **yes** |
+| `setsid` double-fork | **yes** |
+
+The last two are precisely the escapes that kill the marker design and its ancestry variant.
+
+### The three properties this turns on
+
+- **The registration precedes the thing it describes.** `AgyGateServer.start` publishes the unit → socket
+  entry before `AgySession` spawns anything, so there is no race to lose: a conversation exists before
+  we are told its id, and a scope does not exist until we make it. Everything the kernel later places
+  inside — a subagent, a grandchild, a shell command's own subprocess — is covered by an entry that was
+  already on disk.
+- **Recognition is by registration, never by name.** A prefix test on `aic-dc-` would let any process
+  in a scope somebody else named that way route into our dialog, which is a worse hole than the one
+  being closed. `registry.scope_owner` matches against the entries this host wrote, and against
+  `<unit>.scope` rather than the bare unit, so a longer unit sharing our prefix does not match.
+  [AG-R-12](risks.md#ag-r-12)'s isolation property therefore holds by a stronger mechanism than it did:
+  the user's own session sits in their terminal's spawn scope and is not in the directory.
+- **It is consulted second.** The conversation lookup runs first and the cgroup question is the
+  fallback, so a platform with no scopes never leaves the path that shipped in AG-14. That ordering is
+  what makes this additive to a working gate rather than a rewrite of one, and there is a test named
+  for it.
+
+### What it costs on the platforms that cannot
+
+`systemd-run --user --scope` is Linux with a running user manager. Phase 7 publishes macOS and Windows
+artefacts, and on those `scope.available()` is `False`, everything degrades to conversation-id routing,
+and **AG-R-14's two residues stand**. That is a per-platform gap rather than a design one, and this
+entry does not pretend otherwise — it is stated in `scope.py`'s module docstring, where someone
+porting will read it.
+
+**What to do about those platforms is deliberately left open**, because both answers cost something a
+decision should not spend silently. Denying a spawn that arrives from an already-claimed subagent
+conversation closes the nesting case by refusing what cannot be gated — an amendment to
+[AG-5](#ag-5), taking a capability away from the agent. Accepting the residue keeps the capability and
+ships a gate that is weaker on two of three published targets than on the one it was measured on.
+Neither should be chosen by whoever next touches this file without saying so.
+
+### Exit criterion
+
+**Met 2026-09-10, and by falsification rather than by a green log.** `scripts/probe_agy_cgroup_identity.py`
+had already shown the mechanism working on two real turns — the hook subprocess inheriting the scope, a
+subagent's calls carrying it, and a turn outside the scope reporting the terminal's own cgroup, which is
+the control. That is not enough on its own: the registry was still running underneath, so a claim that
+landed in time would print the same result.
+
+So the criterion is `probe_agy_subagent_gate.py` **with `AgyGateServer.claim` stubbed to a no-op on both
+the parent and the subagent**: all eight tool calls still reached the dialog, the subagent's seven
+included, and the deny still left the target file byte-identical. Conversation claims were inert and
+cgroup identity carried the load alone. A mechanism that is only ever measured with its predecessor
+running is a mechanism whose contribution has not been measured.
