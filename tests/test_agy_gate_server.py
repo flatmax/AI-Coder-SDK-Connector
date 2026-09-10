@@ -26,7 +26,7 @@ import sys
 import pytest
 
 from aic_dc.agy import hook, registry
-from aic_dc.agy.gate_server import AgyGateServer
+from aic_dc.agy.gate_server import AgyGateServer, StaticPolicy
 from aic_dc.antigravity.permissions import AntigravityPermissionGate
 
 OURS = "cd4edb7f-6de3-468f-9815-e76b310a920a"
@@ -507,3 +507,226 @@ class TestStoppingOneSubagentRatherThanTheTurn:
         _recorder, _gate, server, _config_dir = wired
         server.refuse_conversation("", "stopped")
         assert server.is_refusing("") is False
+
+
+def invocation(conversation=OURS, num=2):
+    """A ``PostInvocation`` payload. No tool, so nothing to put in a dialog."""
+    return {
+        "conversationId": conversation,
+        "modelName": "gemini-3.8-flash-low",
+        "workspacePaths": [],
+        "invocationNum": num,
+        "initialNumSteps": 4,
+    }
+
+
+def stopped(conversation=OURS, reason="NO_TOOL_CALL"):
+    """A ``Stop`` payload, carrying the one field the stream never has."""
+    return {
+        "conversationId": conversation,
+        "executionNum": 1,
+        "terminationReason": reason,
+        "error": "",
+        "fullyIdle": True,
+    }
+
+
+class TestTheStopEndsTheLoop:
+    """``decide_invocation`` — AG-19.
+
+    ⏹ used to be a refusal the agent could read and then keep talking
+    through. This is the same latch, asked at the one point ``agy`` will
+    act on it mechanically. **No new state**: the assertions below are all
+    about ``refuse_all`` and ``refuse_conversation`` driving both answers.
+    """
+
+    CHILD = "c21acd4d-0000-4000-8000-000000000001"
+
+    def test_a_running_turn_is_left_alone(self, wired):
+        _recorder, _gate, server, _cfg = wired
+        assert server.decide_invocation(invocation()) == {}
+        assert server.was_terminated(OURS) is False
+
+    def test_a_stopped_turn_is_terminated(self, wired):
+        _recorder, _gate, server, _cfg = wired
+        server.refuse_all("the user stopped this turn")
+        assert server.decide_invocation(invocation()) == {
+            "terminationBehavior": "terminate"
+        }
+        assert server.was_terminated(OURS) is True
+
+    def test_an_aimed_stop_ends_only_that_conversations_loop(self, wired):
+        """The subagent case, and it closes ``refuse_conversation``'s first
+        stated limit one level up.
+
+        A subagent producing only prose asks permission for nothing and
+        cannot be starved — that is written into ``refuse_conversation``
+        as a known hole. Its *loop* still ends here, at the end of the
+        invocation it is in, while the parent's keeps running.
+        """
+        _recorder, _gate, server, _cfg = wired
+        server.refuse_conversation(self.CHILD, "the user stopped this subagent")
+        assert server.decide_invocation(invocation(self.CHILD)) == {
+            "terminationBehavior": "terminate"
+        }
+        assert server.decide_invocation(invocation(OURS)) == {}
+        assert server.was_terminated(self.CHILD) is True
+        assert server.was_terminated(OURS) is False
+
+    def test_it_raises_no_dialog(self, wired):
+        """There is no user in this question — they already answered it."""
+        recorder, _gate, server, _cfg = wired
+        server.refuse_all("stopped")
+        server.decide_invocation(invocation())
+        assert recorder.requests() == []
+
+    def test_a_consultation_has_no_stop_to_read(self, wired):
+        """A static-policy gate is never given one, so it never terminates."""
+        _recorder, _gate, _server, config_dir = wired
+        consultation = AgyGateServer(
+            config_dir / "c.sock",
+            policy=StaticPolicy.of(["FINISH"], "not allowed"),
+            config_dir=config_dir,
+        )
+        assert consultation.decide_invocation(invocation()) == {}
+
+    def test_resume_forgets_the_termination(self, wired):
+        """A stop applies to the turn it was pressed during, and so does
+        the record of having acted on it — otherwise the *next* turn's
+        footer would report itself cancelled."""
+        _recorder, _gate, server, _cfg = wired
+        server.refuse_all("stopped")
+        server.decide_invocation(invocation())
+        server.resume()
+        assert server.was_terminated(OURS) is False
+        assert server.decide_invocation(invocation()) == {}
+
+    def test_an_unnamed_conversation_is_still_terminated(self, wired):
+        """Recorded against nothing, but the loop still ends.
+
+        The record is for the footer; the termination is the mechanism,
+        and it must not depend on a field being present.
+        """
+        _recorder, _gate, server, _cfg = wired
+        server.refuse_all("stopped")
+        assert server.decide_invocation({"invocationNum": 1}) == {
+            "terminationBehavior": "terminate"
+        }
+        assert server.was_terminated("") is False
+
+
+class TestTheStopEventIsRecordedAndNeverBlocked:
+    """``note_stop`` — AG-R-16."""
+
+    @pytest.mark.parametrize(
+        "reason", ["NO_TOOL_CALL", "TERMINAL_CUSTOM_HOOK", "max_steps_exceeded", ""]
+    )
+    def test_the_answer_is_always_empty(self, wired, reason):
+        _recorder, _gate, server, _cfg = wired
+        assert server.note_stop(stopped(reason=reason)) == {}
+
+    def test_our_own_termination_is_not_reported_as_a_stranger(self, wired, caplog):
+        _recorder, _gate, server, _cfg = wired
+        server.refuse_all("stopped")
+        server.decide_invocation(invocation())
+        with caplog.at_level("WARNING"):
+            server.note_stop(stopped(reason="TERMINAL_CUSTOM_HOOK"))
+        assert "does not own" not in caplog.text
+
+    def test_a_hook_we_do_not_own_ending_our_loop_is_named(self, wired, caplog):
+        """AG-R-16 arriving from the other direction.
+
+        ``hooks.json`` merges named hooks per event, so a user's own
+        ``Stop`` or a plugin's ``PostInvocation`` fires on this app's
+        conversations exactly as this app's fires on theirs. Logged rather
+        than acted on: it is a fact about their configuration.
+        """
+        _recorder, _gate, server, _cfg = wired
+        with caplog.at_level("WARNING"):
+            server.note_stop(stopped(reason="TERMINAL_CUSTOM_HOOK"))
+        assert "does not own" in caplog.text
+        assert OURS in caplog.text
+
+    def test_an_ordinary_end_says_nothing(self, wired, caplog):
+        _recorder, _gate, server, _cfg = wired
+        with caplog.at_level("WARNING"):
+            server.note_stop(stopped(reason="NO_TOOL_CALL"))
+        assert caplog.text == ""
+
+
+class TestTheEventRoutesTheAnswer:
+    """The dispatch in ``_handle``, over a real socket.
+
+    Everything above calls the three methods directly, which would keep
+    passing if the router sent every payload to ``decide``. It would not
+    fail quietly: a ``Stop`` answered by the gate would come back
+    ``{"decision": "deny"}``, which ``agy`` reads as *permit the stop* —
+    right by accident, on a turn nobody stopped.
+    """
+
+    def _over_the_socket(self, server, config_dir, call):
+        async def go():
+            await server.start()
+            server.claim(OURS)
+            loop = asyncio.get_running_loop()
+            result = await loop.run_in_executor(None, call)
+            await server.stop()
+            return result
+
+        return asyncio.run(go())
+
+    def test_a_stopped_turn_terminates_hook_to_host_and_back(self, wired):
+        _recorder, _gate, server, config_dir = wired
+        server.refuse_all("the user stopped this turn")
+        result = self._over_the_socket(
+            server,
+            config_dir,
+            lambda: hook.decide_invocation(invocation(), config_dir=config_dir),
+        )
+        assert result == {"terminationBehavior": "terminate"}
+
+    def test_a_running_turn_proceeds_hook_to_host_and_back(self, wired):
+        _recorder, _gate, server, config_dir = wired
+        result = self._over_the_socket(
+            server,
+            config_dir,
+            lambda: hook.decide_invocation(invocation(), config_dir=config_dir),
+        )
+        assert result == {}
+
+    def test_a_stop_is_recorded_without_a_decision_coming_back(self, wired, caplog):
+        _recorder, _gate, server, config_dir = wired
+        with caplog.at_level("WARNING"):
+            result = self._over_the_socket(
+                server,
+                config_dir,
+                lambda: hook.report_stop(
+                    stopped(reason="TERMINAL_CUSTOM_HOOK"), config_dir=config_dir
+                ),
+            )
+        assert result == {}
+        # The side effect the round trip exists for: the host saw the
+        # reason, and said so, having never been asked for a decision.
+        assert "does not own" in caplog.text
+
+    def test_a_tool_call_is_still_answered_by_the_gate(self, wired):
+        """The router's other half: an unstamped payload is the gate.
+
+        Which is also what an older hook process sends, so this is the
+        version-skew case as well as the default.
+        """
+        recorder, gate, server, config_dir = wired
+
+        async def go():
+            await server.start()
+            server.claim(OURS)
+            loop = asyncio.get_running_loop()
+            decision = loop.run_in_executor(
+                None, lambda: hook.decide(payload(), config_dir=config_dir)
+            )
+            await answer_next(gate, recorder, {"action": "allow"})
+            result = await decision
+            await server.stop()
+            return result
+
+        assert asyncio.run(go())["decision"] == "allow"

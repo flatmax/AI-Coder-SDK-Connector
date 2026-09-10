@@ -5,6 +5,13 @@ knows nothing about permissions; it decides *whose* call this is and then
 asks. This is what it asks. One unix socket per session, one connection
 per tool call, newline-delimited JSON each way.
 
+**Three events arrive on it, not one.** ``PreToolUse`` is the dialog and
+everything below is about it; ``PostInvocation`` asks whether the loop
+should end now, and ``Stop`` reports that it did (AG-19, AG-R-16). Those
+two carry no tool and raise no dialog — they read the same latched stop
+the gate reads, which is the whole reason they are here rather than in a
+second socket with a second copy of that state.
+
 It owns almost nothing
 ======================
 The queue, the countdown, the localhost rule, the dialog payload and the
@@ -60,7 +67,7 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
-from aic_dc.agy import registry, scope
+from aic_dc.agy import hook, registry, scope
 from aic_dc.antigravity.permissions import (
     AntigravityPermissionGate,
     denormalise_args,
@@ -79,6 +86,13 @@ UNREADABLE = {
         "by the user."
     ),
 }
+
+#: What ``agy`` puts in a ``Stop`` payload's ``terminationReason`` when a
+#: hook ended the loop, rather than the model or a limit. Measured
+#: 2026-09-10 beside ``NO_TOOL_CALL`` for an ordinary end; it is the word
+#: that lets this host tell a loop **it** ended from one a stranger's hook
+#: ended in the same merged hooks file (AG-R-16).
+HOOK_TERMINATION = "TERMINAL_CUSTOM_HOOK"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -190,6 +204,13 @@ class AgyGateServer:
         #: id, valued by the reason the agent reads. Cleared by `resume`
         #: with its turn-wide sibling.
         self._refused_conversations: dict[str, str] = {}
+        #: Conversations whose loop *this* server ended, by answering
+        #: `terminate` to a `PostInvocation` (AG-19). Recorded rather than
+        #: inferred, and it answers two different questions: the session
+        #: reads it to badge a stopped turn honestly, and `note_stop` reads
+        #: it to tell our own termination from a stranger's hook ending our
+        #: loop in the same merged file (AG-R-16). Cleared by `resume`.
+        self._terminated: set[str] = set()
         #: The systemd scope `agy` will be launched into, or None where the
         #: platform has none. Named at construction rather than at `start`
         #: so `AgySession` can read it while assembling argv, and held here
@@ -302,6 +323,7 @@ class AgyGateServer:
         """
         self._refusal = None
         self._refused_conversations.clear()
+        self._terminated.clear()
 
     async def start(self) -> None:
         """Listen. Safe to call once; a second call is a no-op."""
@@ -516,6 +538,81 @@ class AgyGateServer:
             }
         return {"decision": "allow"}
 
+    def was_terminated(self, conversation_id: str) -> bool:
+        """Whether this server ended that conversation's loop. AG-19.
+
+        Read by :class:`~aic_dc.agy.session.AgySession` when it closes a
+        turn out, because a loop ended this way reports ``status:
+        "SUCCESS"`` with empty prose — which, rendered as it arrives, is a
+        completed answer that happens to say nothing. It is the *stop*
+        having worked, and the footer has to say so.
+        """
+        return str(conversation_id) in self._terminated
+
+    def decide_invocation(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Whether this conversation's loop ends here. AG-19.
+
+        ``PostInvocation``, and the answer is the latch:
+        :meth:`refuse_all` for ⏹ on the turn, :meth:`refuse_conversation`
+        for ⏹ on one subagent's row. **No new state and no dialog** — this
+        is the same stop the gate has been refusing tool calls with since
+        it was pressed, asked at the one moment ``agy`` will act on it
+        mechanically rather than leave it to the agent's judgement.
+
+        It is what makes the aimed stop reach a subagent that asks for
+        nothing: :meth:`refuse_conversation` records three limits, the
+        first of which is that a subagent producing only prose cannot be
+        starved. Its loop still ends here, at the end of the invocation it
+        is in.
+
+        Returns ``{}`` for every conversation that was not stopped, which
+        is nearly all of them — including a consultation's, whose gate has
+        a static policy and no ⏹ at all.
+        """
+        conversation_id = str(payload.get("conversationId") or "")
+        stopped = self._refusal is not None or (
+            conversation_id in self._refused_conversations
+        )
+        if not stopped:
+            return {}
+        if conversation_id:
+            self._terminated.add(conversation_id)
+        logger.info(
+            "Ending the loop for %s: the user stopped it",
+            conversation_id or "an unnamed conversation",
+        )
+        return {"terminationBehavior": "terminate"}
+
+    def note_stop(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Record that a loop ended, and never object to it. AG-R-16.
+
+        The ``Stop`` event, whose payload carries the ``terminationReason``
+        this host has no other way to see. Answering ``{}`` is the whole
+        decision and it is not conditional: ``{"decision": "continue"}``
+        would re-enter a loop the user stopped, and the one thing worth
+        guaranteeing about this path is that the string never appears on
+        it. :func:`aic_dc.agy.hook.report_stop` does not forward this
+        return value either, so both ends hold that property alone.
+
+        What it does with the payload is tell one hook-ended loop from
+        another. ``TERMINAL_CUSTOM_HOOK`` on a conversation
+        :meth:`decide_invocation` never terminated means **somebody
+        else's** ``Stop``, ``PostInvocation`` or plugin ended our turn —
+        the merge AG-R-16 describes, arriving from the other direction.
+        That is logged rather than acted on: it is a fact about the user's
+        own configuration, and the useful thing is to name it.
+        """
+        conversation_id = str(payload.get("conversationId") or "")
+        reason = str(payload.get("terminationReason") or "")
+        if reason == HOOK_TERMINATION and not self.was_terminated(conversation_id):
+            logger.warning(
+                "A hook AIC-DC does not own ended the loop for %s. Another "
+                "entry in the shared hooks file is acting on this app's "
+                "conversations (see AG-R-16).",
+                conversation_id or "an unnamed conversation",
+            )
+        return {}
+
     async def _handle(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ) -> None:
@@ -531,7 +628,18 @@ class AgyGateServer:
             payload = json.loads(line.decode("utf-8"))
             if not isinstance(payload, dict):
                 raise ValueError("payload is not an object")
-            answer = await self.decide(payload)
+            # Routed on the key the hook stamps from *its* argv, never on
+            # the shape of the payload: a tool call sniffed as an
+            # invocation event would be answered `{}`, and `{}` on a tool
+            # call is allow. An absent key is the gate, which is both the
+            # conservative reading and what an older hook process sends.
+            event = payload.get(hook.EVENT_KEY) or hook.PRE_TOOL_USE
+            if event == hook.POST_INVOCATION:
+                answer = self.decide_invocation(payload)
+            elif event == hook.STOP:
+                answer = self.note_stop(payload)
+            else:
+                answer = await self.decide(payload)
         except Exception:  # noqa: BLE001 - the hook is waiting on us
             logger.exception("The agy gate server could not answer a hook call")
             answer = dict(UNREADABLE)

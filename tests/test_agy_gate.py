@@ -570,3 +570,298 @@ class TestOverTheRealSocket:
 
         assert result == {"decision": "deny", "reason": "declined"}
         assert received[0]["toolCall"]["args"]["ReplacementContent"] == "MODIFIED_TEXT"
+
+
+def invocation(conversation_id: str = OURS, num: int = 2):
+    """A ``PostInvocation`` payload, in the shape ``hooks.md`` documents.
+
+    Same common fields as a tool call and no ``toolCall`` at all, which is
+    the point: nothing about this payload could be mistaken for something
+    to put in a dialog.
+    """
+    return {
+        "conversationId": conversation_id,
+        "modelName": "gemini-3.8-flash-low",
+        "workspacePaths": [],
+        "invocationNum": num,
+        "initialNumSteps": 4,
+    }
+
+
+def stopped(conversation_id: str = OURS, reason: str = "NO_TOOL_CALL"):
+    """A ``Stop`` payload. ``terminationReason`` is the field that matters."""
+    return {
+        "conversationId": conversation_id,
+        "modelName": "gemini-3.8-flash-low",
+        "executionNum": 1,
+        "terminationReason": reason,
+        "error": "",
+        "fullyIdle": True,
+    }
+
+
+class TestTheStopIsAMechanism:
+    """``PostInvocation`` — AG-19.
+
+    The gate refuses tool calls and hopes the agent takes the hint. This
+    ends the loop whether it takes it or not, and it reads the *same*
+    latch, so there is no second stop state to get out of step.
+    """
+
+    def test_a_stopped_conversation_is_terminated(self, config_dir):
+        registry.claim(OURS, "/tmp/s.sock", config_dir=config_dir)
+        result = hook.decide_invocation(
+            invocation(),
+            config_dir=config_dir,
+            ask=lambda *_: {"terminationBehavior": "terminate"},
+        )
+        assert result == {"terminationBehavior": "terminate"}
+
+    def test_a_running_conversation_proceeds(self, config_dir):
+        registry.claim(OURS, "/tmp/s.sock", config_dir=config_dir)
+        result = hook.decide_invocation(
+            invocation(), config_dir=config_dir, ask=lambda *_: {}
+        )
+        assert result == {}
+
+    def test_a_strangers_loop_is_never_ended(self, config_dir):
+        """The worst thing this hook could do, and it is global."""
+
+        def explode(*_args):
+            raise AssertionError("the host must not be consulted")
+
+        assert (
+            hook.decide_invocation(
+                invocation(THEIRS), config_dir=config_dir, ask=explode
+            )
+            == {}
+        )
+
+    @pytest.mark.parametrize(
+        "answer",
+        [
+            None,
+            {},
+            7,
+            "terminate",
+            {"terminationBehavior": "force_continue"},
+            {"terminationBehavior": ""},
+            {"decision": "deny", "reason": "the user declined"},
+        ],
+    )
+    def test_anything_but_terminate_proceeds(self, config_dir, answer):
+        registry.claim(OURS, "/tmp/s.sock", config_dir=config_dir)
+        result = hook.decide_invocation(
+            invocation(), config_dir=config_dir, ask=lambda *_: answer
+        )
+        assert result == {}
+
+    def test_the_answer_is_built_here_not_forwarded(self, config_dir):
+        """A host bug must not reach ``agy`` through this path.
+
+        ``injectSteps`` would put words in the model's mouth and a
+        ``decision`` is not this event's vocabulary at all. One value is
+        read off the socket and the rest is dropped.
+        """
+        registry.claim(OURS, "/tmp/s.sock", config_dir=config_dir)
+        result = hook.decide_invocation(
+            invocation(),
+            config_dir=config_dir,
+            ask=lambda *_: {
+                "terminationBehavior": "terminate",
+                "injectSteps": [{"userMessage": "keep going"}],
+                "decision": "allow",
+            },
+        )
+        assert result == {"terminationBehavior": "terminate"}
+
+    def test_an_unreachable_host_lets_the_loop_run(self, config_dir):
+        """The opposite direction from the gate, and AG-19 says so.
+
+        A failure here costs a loop that keeps running, on a tree the
+        ``PreToolUse`` gate is still refusing every call against. A failure
+        that *ended* loops would end a stranger's.
+        """
+        registry.claim(OURS, "/tmp/s.sock", config_dir=config_dir)
+
+        def boom(*_args):
+            raise ConnectionRefusedError("no listener")
+
+        assert (
+            hook.decide_invocation(invocation(), config_dir=config_dir, ask=boom) == {}
+        )
+
+    @pytest.mark.parametrize("junk", [None, "", [], 7])
+    def test_junk_proceeds_even_while_a_session_is_gated(self, config_dir, junk):
+        """Where :func:`decide` denies. The asymmetry is the design."""
+        registry.claim(OURS, "/tmp/s.sock", config_dir=config_dir)
+        assert hook.decide_invocation(junk, config_dir=config_dir) == {}
+        assert hook.decide(junk, config_dir=config_dir)["decision"] == "deny"
+
+    def test_the_event_reaches_the_host_stamped(self, config_dir):
+        registry.claim(OURS, "/tmp/s.sock", config_dir=config_dir)
+        seen = {}
+
+        def ask(_sock, sent):
+            seen.update(sent)
+            return {}
+
+        hook.decide_invocation(invocation(), config_dir=config_dir, ask=ask)
+        assert seen[hook.EVENT_KEY] == "PostInvocation"
+
+    def test_a_payload_cannot_name_its_own_event(self, config_dir):
+        """The stamp is overwritten, and that is a safety property.
+
+        The host answers a different shape per event, and ``{}`` — right
+        for an invocation hook — is what ``agy`` reads as *allow* on a tool
+        call. A payload able to relabel itself could ask for a tool call to
+        be answered in the shape that waves it through.
+        """
+        registry.claim(OURS, "/tmp/s.sock", config_dir=config_dir)
+        seen = {}
+
+        def ask(_sock, sent):
+            seen.update(sent)
+            return {}
+
+        liar = {**invocation(), hook.EVENT_KEY: "PreToolUse"}
+        hook.decide_invocation(liar, config_dir=config_dir, ask=ask)
+        assert seen[hook.EVENT_KEY] == "PostInvocation"
+
+        seen.clear()
+        liar = {**payload(), hook.EVENT_KEY: "Stop"}
+        hook.decide(liar, config_dir=config_dir, ask=lambda _s, sent: seen.update(sent)
+                    or {"decision": "allow"})
+        assert seen[hook.EVENT_KEY] == "PreToolUse"
+
+
+class TestTheStopEventAlwaysPermitsTheStop:
+    """``Stop`` — AG-R-16.
+
+    ``{"decision": "continue"}`` blocks a stop and re-enters the loop, and
+    ``~/.gemini/config/hooks.json`` is a file this app writes one entry
+    into and does not own. So this app is always a voice for stopping, and
+    the string it would take to be a voice against one never appears on
+    this path.
+    """
+
+    @pytest.mark.parametrize(
+        "answer",
+        [
+            {"decision": "continue", "reason": "the tests are still running"},
+            {"decision": "continue"},
+            {"terminationBehavior": "force_continue"},
+            None,
+            7,
+        ],
+    )
+    def test_the_host_cannot_revive_the_loop(self, config_dir, answer):
+        registry.claim(OURS, "/tmp/s.sock", config_dir=config_dir)
+        assert (
+            hook.report_stop(stopped(), config_dir=config_dir, ask=lambda *_: answer)
+            == {}
+        )
+
+    def test_an_unreachable_host_still_permits_the_stop(self, config_dir):
+        registry.claim(OURS, "/tmp/s.sock", config_dir=config_dir)
+
+        def boom(*_args):
+            raise ConnectionRefusedError("no listener")
+
+        assert hook.report_stop(stopped(), config_dir=config_dir, ask=boom) == {}
+
+    def test_the_host_is_told_which_reason_ended_the_loop(self, config_dir):
+        """The round trip's whole purpose: ``terminationReason`` is here
+        and nowhere on the stream."""
+        registry.claim(OURS, "/tmp/s.sock", config_dir=config_dir)
+        seen = {}
+
+        def ask(_sock, sent):
+            seen.update(sent)
+            return {}
+
+        hook.report_stop(
+            stopped(reason="TERMINAL_CUSTOM_HOOK"), config_dir=config_dir, ask=ask
+        )
+        assert seen["terminationReason"] == "TERMINAL_CUSTOM_HOOK"
+        assert seen[hook.EVENT_KEY] == "Stop"
+
+    def test_a_strangers_stop_is_not_reported(self, config_dir):
+        def explode(*_args):
+            raise AssertionError("the host must not be consulted")
+
+        assert (
+            hook.report_stop(stopped(THEIRS), config_dir=config_dir, ask=explode) == {}
+        )
+
+
+class TestTheEventComesFromArgv:
+    def test_the_gates_command_has_no_event(self):
+        assert hook.parse_argv(["/cfg"]) == ("/cfg", "PreToolUse")
+
+    @pytest.mark.parametrize("event", ["PostInvocation", "Stop"])
+    def test_an_invocation_event_is_read(self, event):
+        assert hook.parse_argv(["/cfg", "--event", event]) == ("/cfg", event)
+
+    @pytest.mark.parametrize(
+        "argv",
+        [
+            ["/cfg", "--event", "PostToolUse"],
+            ["/cfg", "--event", "preToolUse"],
+            ["/cfg", "--event"],
+            ["/cfg", "--event", ""],
+        ],
+    )
+    def test_anything_unrecognised_is_the_gate(self, argv):
+        """The fail-closed direction, and it is not a tidy default.
+
+        An event this parser could not name, answered as an invocation
+        hook, would print ``{}`` — and ``{}`` on a tool call is *allow*.
+        """
+        assert hook.parse_argv(argv)[1] == "PreToolUse"
+
+    def test_no_arguments_at_all_is_still_the_gate(self):
+        assert hook.parse_argv([]) == (None, "PreToolUse")
+        assert hook.parse_argv(None) == (None, "PreToolUse")
+
+
+class TestTheProcessPrintsTheRightShape:
+    """End to end, one subprocess per event.
+
+    The gate must never print ``{}``; the other two must never print
+    anything else when they have no opinion. Both are properties of
+    :func:`hook.main`'s dispatch rather than of any decision it makes.
+    """
+
+    def run(self, stdin: str, config_dir: Path, event: str | None = None):
+        argv = [sys.executable, "-m", "aic_dc.agy.hook", str(config_dir)]
+        if event:
+            argv += ["--event", event]
+        return subprocess.run(
+            argv, input=stdin, capture_output=True, text=True, timeout=60
+        )
+
+    @pytest.mark.parametrize("event", ["PostInvocation", "Stop"])
+    @pytest.mark.parametrize("stdin", ["", "this is not json", "null", "[]"])
+    def test_an_invocation_hook_says_nothing_on_junk(
+        self, config_dir, event, stdin
+    ):
+        done = self.run(stdin, config_dir, event)
+        assert done.returncode == 0
+        assert json.loads(done.stdout) == {}
+
+    @pytest.mark.parametrize("event", ["PostInvocation", "Stop"])
+    def test_a_strangers_invocation_is_untouched(self, config_dir, event):
+        done = self.run(json.dumps(invocation(THEIRS)), config_dir, event)
+        assert json.loads(done.stdout) == {}
+
+    def test_the_gate_never_prints_the_empty_object(self, config_dir):
+        """Restated as its own assertion because it is the whole risk."""
+        for stdin in ("", "this is not json", "null", "[]", json.dumps(payload())):
+            printed = json.loads(self.run(stdin, config_dir).stdout)
+            assert printed != {}
+            assert printed["decision"] in ("allow", "deny")
+
+    def test_a_stop_event_never_prints_continue(self, config_dir):
+        for stdin in ("", json.dumps(stopped()), json.dumps(stopped(THEIRS))):
+            assert "continue" not in self.run(stdin, config_dir, "Stop").stdout

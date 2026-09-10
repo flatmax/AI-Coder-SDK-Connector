@@ -5236,3 +5236,88 @@ as isolating by `conversationId`, which AG-18 had amended the same day. Where th
 the review sharpened it; where the description was stale, the review reproduced the staleness and
 added conviction to it.
 
+
+---
+
+## Phase 12 — the stop becomes a mechanism, and the control is the instrument (2026-09-11)
+
+[AG-19](decisions.md#ag-19) was specified on 2026-09-10 from eleven probes and three consultations,
+and none of it was written. This is the writing of it, plus [AG-R-16](risks.md#ag-r-16)'s `Stop`
+handler, which the same registration pays for.
+
+### What shipped
+
+One hooks entry now holds three handlers where it held one. The gate is unchanged, byte for byte —
+deliberately, so an install written before today reads as *this* interpreter and the thing wrong with
+it is the handlers it lacks rather than the one it has.
+
+| Piece | Where |
+|---|---|
+| `PostInvocation` → `terminate` while ⏹ is latched | `hook.decide_invocation`, `AgyGateServer.decide_invocation` |
+| `Stop` that always permits the stop | `hook.report_stop`, `AgyGateServer.note_stop` |
+| The event argument, and the frozen build's translation of it | `hook.parse_argv`, `--agy-hook-event` in `cli.py` |
+| Three registrations, three probes, two shapes | `install.hook_entry`, `install.hook_commands` |
+| A stopped turn's footer carrying `cancelled` | `AgyTranslator.note_cancelled`, `AgySession.stream_turn` |
+
+**The three events fail in opposite directions and it is written down rather than left to be
+noticed.** The gate must never print `{}` — that is the one shape `agy` reads as *allow*. The two
+invocation events must print `{}` on every failure, because ending a stranger's loop because this
+host was unreachable is the worse error, and the tree is protected by the gate either way. The
+`Stop` handler's `{}` is a literal rather than anything derived from the socket, so no host bug can
+reach the `"continue"` that would revive a stopped turn.
+
+**The event is stamped from argv, never read off the payload.** The host answers a different shape
+per event, and `{}` is right for an invocation hook and *allow* on a tool call — so a payload able to
+relabel itself could ask for a tool call to be answered in the shape that waves it through. `main`
+learns the event from the command `install` wrote, and overwrites whatever the payload claimed. An
+unrecognised event is the gate, which is the fail-closed direction rather than a tidy default.
+
+### The measurement, and why the control is the whole of it
+
+`scripts/probe_agy_stop_terminates.py`, two turns on the subscription, `agy` run against an isolated
+`--gemini_dir` so nothing of the user's was read or written.
+
+**A stopped turn ending proves nothing** — a cooperative agent ends a stopped turn too, which is
+exactly what starvation relied on. So the same prompt is stopped at the same point on the same gate,
+and the only difference is what the host answers at `PostInvocation`:
+
+| | Invocations | Tool calls | `terminationReason` | Footer |
+|---|---|---|---|---|
+| **control** — answers `{}` | **3** | `list_dir` allow, `view_file` **deny** | `NO_TOOL_CALL` | `cancelled: true` |
+| **armed** — answers `terminate` | **1** | `list_dir` allow | **`TERMINAL_CUSTOM_HOOK`** | `cancelled: true` |
+
+Eight checks, all held. The armed run ends in one invocation where the control needs three; the
+control never terminates, so it is a control; every call after the stop is denied on *both* runs, so
+the termination is a second layer rather than a replacement; and the two runs are told apart by the
+`terminationReason` [AG-R-16](risks.md#ag-r-16) turns on. The probe exits **2** rather than 0 when the
+control also ends in one invocation — a prompt that cannot tell a termination from a cooperative
+agent has measured nothing, and reporting that as a pass is the failure mode the control exists to
+prevent.
+
+**The probe failed its own control first, and the bug is worth keeping.** The recorder called
+`super().decide_invocation` on the control run and then discarded the answer, which left the server's
+`was_terminated` record saying the control had ended a loop it never told `agy` to end. The
+instrument lied in the same direction the feature would have, and the check that caught it was the
+one asserting the control *is* a control.
+
+### An existing claim this falsified
+
+`workspacePaths` **is populated**, on all three event types. [`sdk-surface.md`](sdk-surface.md)
+§ *Two limits that remain* recorded it empty in every captured payload and reasoned from that to
+`conversationId` as the sound isolation key. Measured today at `["/tmp/agyhooktest"]` on `PreToolUse`,
+`PostInvocation` and `Stop` alike.
+
+The likely cause is that the captures predate `ae23f0bd`, which added `--add-dir` to the session's
+argv — the field is the workspace, and until then no workspace was named. **This changes no
+decision**: routing on it would be worse, not better, since a stranger's own `agy` session in the
+same repository would match a path where it cannot match a conversation id or a cgroup
+([AG-R-14](risks.md#ag-r-14)). It is corrected because a false claim in the record is what a later
+reader would reason from.
+
+### What is still unbuilt on this transport
+
+Three of the six items listed on 2026-09-10 are done. The remainder are unchanged and are still in
+[`README.md`](README.md) § *Unbuilt on the `agy` transport*: skipping usage absorption on a
+non-`SUCCESS` result, standing guidance via `PreInvocation` `ephemeralMessage`, and reading
+`transcriptPath` off the payload instead of deriving it. The last of those is now measured rather
+than documented — the payloads captured today carry it, on every event.

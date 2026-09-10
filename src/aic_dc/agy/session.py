@@ -12,30 +12,40 @@ precede the first prompt, so there is exactly one window in which to take
 ownership. Claim late and the first tool call is waved through as somebody
 else's session; claim early is impossible.
 
-Cancellation is where this transport is genuinely weaker
-========================================================
+Cancellation, and the three layers it is made of
+================================================
 **There is no halt frame.** The input protocol accepts one event —
 ``user`` — and the binary answers anything else with *"unsupported stream
 input message event"*. The SDK transport has ``conversation.cancel()``,
-which sends a real ``halt_request``; there is no counterpart here.
+which sends a real ``halt_request``; there is no counterpart here. So ⏹ is
+assembled out of what ``agy`` does offer, and AG-19 gives each layer the
+job only it can do:
 
-What there *is* instead is the gate. Every tool call on this transport
-passes through :mod:`~aic_dc.agy.gate_server`, so ⏹ can
-**starve** a turn: from the moment it is pressed, every call is refused
-with a reason naming the user's stop. The agent reads those refusals and
-winds down, which is the same mechanism the Claude adapter already relies
-on — ``cancel_streaming`` denies the turn's open permissions *before* it
-interrupts, precisely because a released dialog is what makes an interrupt
-actionable.
+1. **The gate refuses.** Every tool call on this transport passes through
+   :mod:`~aic_dc.agy.gate_server`, so from the moment ⏹ is pressed each
+   call is denied with a reason naming the user's stop. This is what keeps
+   protecting the working tree, and it is unchanged. It is the same
+   mechanism the Claude adapter relies on — ``cancel_streaming`` denies
+   the turn's open permissions *before* it interrupts, because a released
+   dialog is what makes an interrupt actionable.
+2. **``PostInvocation`` ends the loop.** The gate answers
+   ``terminationBehavior: "terminate"`` while the stop is latched, so the
+   loop stops *mechanically* rather than because the agent read its
+   refusals and agreed to wind down. Measured 2026-09-10: the same prompt
+   ran 4 invocations without it and exactly 1 with it.
+3. **Killing the process is a user's escalation, never this module's.** It
+   ends the whole session to stop one turn, and costs 3.7s to rebuild.
+   :meth:`close` is that act, taken deliberately and separately.
 
-It is weaker in one stated way and the limit is worth knowing rather than
-discovering: **a turn producing only prose cannot be starved**, because it
-is asking permission for nothing. That turn runs to its own end.
-Terminating the process would stop it and would also end the session, so
-this does not do that silently — :meth:`cancel` starves, and
-:meth:`close` is the separate, explicit act of ending the session.
+**The residual gap is kept open on purpose.** ``PostInvocation`` fires
+*between* invocations, so nothing stops token generation inside one — a
+single-invocation prose answer runs to its natural end. Closing that would
+mean killing the process, to save a few seconds of text from a turn that
+holds no locks, runs no commands and touches no files. The honest handling
+is presentational, and it is why :meth:`stream_turn` badges the turn
+stopped rather than pretending the words never arrived.
 
-Governing spec: ``specs5/plan-ag/`` — AG-14; ``sdk-surface.md``
+Governing spec: ``specs5/plan-ag/`` — AG-14, AG-19; ``sdk-surface.md``
 § *The stream, measured in bidirectional mode*.
 """
 
@@ -510,18 +520,43 @@ class AgySession:
             # and no inner one to forget.
             await frames.aclose()
 
+        # After the frames and before the footer, which is the only place
+        # it can go: the turn's own `result` frame says `SUCCESS` for a
+        # loop this app terminated, so nothing in the stream distinguishes
+        # a stop from a turn that finished with nothing to say. The gate
+        # was told, so the gate is asked.
+        #
+        # `_cancelled` first because it is the user's own act and is true
+        # even when the stop only ever starved the turn; the gate's record
+        # is the stronger fact where it exists, and is what makes the
+        # difference visible in the log rather than only in the footer.
+        if self._cancelled:
+            if self._gate.was_terminated(self._conversation_id or ""):
+                logger.info("The stopped turn's loop was ended by the gate")
+            else:
+                logger.info(
+                    "The stopped turn ended without a termination: it was "
+                    "starved, or it finished before the next invocation"
+                )
+            translator.note_cancelled()
+
         for event in translator.stream_complete():
             yield event
 
     async def cancel(self) -> None:
-        """Stop the turn by starving it. See the module docstring.
+        """Latch the stop. See the module docstring for the three layers.
 
-        There is no halt frame on this transport, so ⏹ refuses every
-        subsequent tool call with a reason naming the user's stop. The
-        agent reads those and winds down. A turn producing only prose
-        cannot be starved and runs to its own end; that is stated rather
-        than papered over, and it is why this does not kill the process —
-        doing so would end the whole session to stop one turn.
+        This method is one line of work and two mechanisms, because the
+        gate holds the latch that both of them read: every subsequent tool
+        call is refused with a reason naming the user's stop, **and** the
+        next ``PostInvocation`` answers ``terminate`` off the same flag.
+        The refusal is what protects the tree; the termination is what
+        makes the stop a mechanism rather than a request the agent may
+        decline (AG-19).
+
+        Still not a process kill, and the reason is unchanged: that would
+        end a session the user is still holding. What it no longer relies
+        on is the agent's cooperation.
         """
         if not self._turn_active:
             return

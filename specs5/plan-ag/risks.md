@@ -1204,3 +1204,17 @@ different reason: this app will be a voice in the merge on every turn rather tha
 a further `step_update`. The stream reader knows both facts and today does not compare them; a
 warning naming the conversation is enough, because the case is a user's hook fighting the stop
 button and the useful thing is to say so rather than to fix it silently.
+
+**Mitigated 2026-09-11**, and the tripwire arrived from the other direction. The `Stop` handler ships
+with [AG-19](decisions.md#ag-19) on the same registration, so this app is a voice for stopping on
+**every** turn rather than only when defending — and `hook.report_stop` returns a literal `{}` rather
+than anything derived from the socket, so no host bug and no failure can reach the `"continue"` this
+risk is about. Whether that voice *wins* against a concurrent `"continue"` is still unverified, and
+is still worth a probe before it is relied on.
+
+What is now built is the detection this asked for, keyed on the field measured the same day:
+`AgyGateServer.note_stop` compares the `Stop` payload's `terminationReason` against its own record of
+having answered `terminate`, and a `TERMINAL_CUSTOM_HOOK` on a conversation this app never terminated
+logs a warning naming the conversation and this risk. That is a user's hook ending our loop, detected
+without waiting for the late `step_update` the paragraph above describes — and it is logged rather
+than acted on, because it is a fact about the user's own configuration.

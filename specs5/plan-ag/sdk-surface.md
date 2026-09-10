@@ -433,8 +433,19 @@ hook  workspacePaths        : []                                     → unusabl
 
 This is what makes a **global** hook shippable. It will see the user's own unrelated `agy` sessions —
 workspace-local `hooks.json` does not load headlessly — and it can allow-and-return immediately for
-any conversation the host does not own. `workspacePaths` cannot do that job: it is empty in every
-payload captured here, in both `-p` and bidirectional modes.
+any conversation the host does not own.
+
+**`workspacePaths` still cannot do that job, and the reason is no longer that it is empty.** Corrected
+2026-09-11: it is **populated** — `["/tmp/agyhooktest"]`, on `PreToolUse`, `PostInvocation` and `Stop`
+alike. The captures that recorded it empty almost certainly predate `ae23f0bd`, which added
+`--add-dir` to the session's argv; the field is the workspace, and until then no workspace was named.
+
+The conclusion is unchanged and now rests on something better than an empty field: **a path is not an
+identity**. A user's own `agy` session, opened in the same repository, carries the same
+`workspacePaths` as this app's — so routing on it would intercept exactly the sessions
+`probe_agy_isolation.py` exists to keep out, where a conversation id cannot and a cgroup
+([AG-R-14](risks.md#ag-r-14)) cannot. The empty reading was the right answer for a wrong reason, which
+is worth correcting precisely because nothing depends on it.
 
 ### The tool *names* differ, and only the tool names — measured 2026-09-03
 
@@ -511,8 +522,10 @@ does not exist.
   workspace-change event, not the headless bootstrap. The global file *"fires unconditionally"*, so a
   gate installed there intercepts the user's own unrelated `agy` sessions and must pass them through.
   **The natural isolation key does not work:** `workspacePaths` was **empty** in every payload
-  captured here. `conversationId` is the sound one — an adapter knows the conversation it started —
-  and it is unverified.
+  captured here — *superseded 2026-09-11, see § The hook payload's identity above: it is populated
+  once `--add-dir` names a workspace, and it is still the wrong key, because two sessions in one
+  repository share it.* `conversationId` is the sound one — an adapter knows the conversation it
+  started — and it is unverified.
 - **Concurrency.** An `flock` on `presence/<id>.lock` serialises turns; an interactive session and a
   headless turn on the same conversation conflict. An adapter must own its conversation, which is no
   loss — driving the user's open TUI session was never necessary.
@@ -1166,11 +1179,18 @@ for putting a sentence in front of the model before every invocation, which is w
   Antigravity 2.0, `antigravity-ide/` for the IDE. `aic_dc.agy.subagents` derives that path by hand;
   the payload carries it.
 
-**`workspacePaths` is documented as a common field and is empty here anyway.** § *Two limits that
+**`workspacePaths` is documented as a common field and was recorded empty here.** § *Two limits that
 remain* recorded it empty in every captured payload and called `conversationId` the sound isolation
-key. The doc does not contradict that measurement, it explains it: `hooks.md` is the *shared* Cortex
-hook specification across the CLI, the IDE and Antigravity 2.0, and the IDE is the surface that
-passes multi-root folder URIs at initialization. Read the doc as a family contract, not as a CLI one.
+key. The doc did not contradict that measurement, and was read as explaining it: `hooks.md` is the
+*shared* Cortex hook specification across the CLI, the IDE and Antigravity 2.0, and the IDE is the
+surface that passes multi-root folder URIs at initialization. Read the doc as a family contract, not
+as a CLI one — that part stands.
+
+**The measurement did not.** On 2026-09-11 the field came back populated on all three events, and the
+explanation above was therefore explaining something that was not happening: the CLI does pass it,
+once `--add-dir` gives it a workspace to pass. A doc that accounts for a measurement is not evidence
+that the measurement was right, and this is the second time on this transport that a plausible
+account of an observation outlived the observation.
 
 ### `SIGINT` ends the session — measured 2026-09-10
 

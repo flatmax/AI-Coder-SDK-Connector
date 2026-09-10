@@ -418,6 +418,7 @@ class TestTheTurnCloses:
         assert set(payload) == {
             "request_id",
             "stop_reason",
+            "cancelled",
             "num_tool_calls",
             "files_modified",
             "usage",

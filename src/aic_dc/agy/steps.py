@@ -193,6 +193,10 @@ class AgyTranslator:
         self._usage: dict[str, int] = {}
         self._status = ""
         self._response = ""
+        #: Whether the user stopped this turn. Set by `note_cancelled`
+        #: rather than read off the stream, because the stream cannot say
+        #: so — see that method.
+        self._cancelled = False
         # The *same* accounting object the SDK transport's translator
         # carries, and it is shared rather than reinvented because a
         # caller they share reaches straight into it:
@@ -648,6 +652,23 @@ class AgyTranslator:
             return self._response
         return "\n\n".join(self._text[k] for k in sorted(self._text) if self._text[k])
 
+    def note_cancelled(self) -> None:
+        """The user stopped this turn. AG-19.
+
+        Told rather than detected, because **the stream does not carry
+        it**. A loop ended by this app's ``PostInvocation`` handler reports
+        ``status: "SUCCESS"`` with an empty ``response`` — success meaning
+        only that the loop exited without an unhandled error — and a turn
+        starved by the gate reports the same. Rendered as they arrive, both
+        draw as a completed answer that happens to say nothing, which is
+        the one reading of a stop that is worse than no feedback at all.
+
+        :class:`~aic_dc.agy.session.AgySession` is what knows, since it
+        holds the latch ⏹ set and can ask the gate whether the loop was
+        ended mechanically or merely refused.
+        """
+        self._cancelled = True
+
     def stream_complete(self) -> list[Event]:
         """The turn's closing events, in the shape the browser already reads.
 
@@ -656,6 +677,13 @@ class AgyTranslator:
         phase 3 learned when ``UNSPECIFIED`` would have put one on every
         clean turn. Anything else is forwarded verbatim, since that is the
         only account of why a turn stopped early.
+
+        ``cancelled`` is the browser's own word, from the vocabulary the
+        Claude transport already fills in (``messages.py``): the HUD reads
+        it for "interrupted" and ``computeTurnOutcome`` reads it to keep
+        the LED green, because a turn the user stopped is not a fault. So a
+        stop renders here without the chat panel learning that a third
+        transport exists — AG-R-4.
         """
         stop_reason = "" if self._status in ("SUCCESS", "") else self._status
         return [
@@ -665,6 +693,7 @@ class AgyTranslator:
                 {
                     "request_id": self.request_id,
                     "stop_reason": stop_reason,
+                    "cancelled": self._cancelled,
                     "num_tool_calls": self.stats.tool_calls,
                     # The turn's files, accumulated per call rather than
                     # left empty: the footer lists what the turn touched,

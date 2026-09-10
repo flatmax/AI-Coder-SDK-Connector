@@ -102,6 +102,16 @@ def _build_parser() -> argparse.ArgumentParser:
         # to invoke a permission gate by hand.
         help=argparse.SUPPRESS,
     )
+    parser.add_argument(
+        "--agy-hook-event",
+        metavar="EVENT",
+        default=None,
+        # The lifecycle event `--agy-hook` is answering, on the frozen
+        # build only. `aic_dc.agy.hook` takes `--event`; a frozen binary's
+        # arguments are parsed here rather than there, so the flag is
+        # namespaced to this app and translated back below.
+        help=argparse.SUPPRESS,
+    )
     return parser
 
 
@@ -258,9 +268,13 @@ def main(argv: list[str] | None = None) -> int:
     # AG-5 rules out, so the frozen build needs a command it can actually
     # run. See `aic_dc.agy.install.hook_command`.
     if args.agy_hook is not None:
+        from aic_dc.agy.hook import EVENT_FLAG
         from aic_dc.agy.hook import main as agy_hook_main
 
-        return agy_hook_main([args.agy_hook])
+        argv = [args.agy_hook]
+        if args.agy_hook_event:
+            argv += [EVENT_FLAG, args.agy_hook_event]
+        return agy_hook_main(argv)
 
     # Install logging before anything else that might want to log.
     configure_logging(verbose=args.verbose)

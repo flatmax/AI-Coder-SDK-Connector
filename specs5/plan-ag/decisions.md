@@ -1433,7 +1433,7 @@ running is a mechanism whose contribution has not been measured.
 
 ---
 
-## AG-19 — The stop is a mechanism, not a request **(measured)**
+## AG-19 — The stop is a mechanism, not a request **(built 2026-09-11)**
 
 **Decided 2026-09-10 after three rounds of consultation with Antigravity and eleven live probes.**
 It amends [AG-14](#ag-14)'s cancellation story and reverses none of it.
@@ -1494,3 +1494,37 @@ rule holds for it unchanged: every path prints, and none exits 0 with empty stdo
 hook that fails silently does not fail closed — it lets the loop continue, which is the *opposite*
 direction from the tool gate's failure mode and the reason this is stated rather than assumed.
 
+
+### Built, and what the build had to decide that this did not
+
+Shipped 2026-09-11 with [AG-R-16](risks.md#ag-r-16)'s `Stop` handler, on the same registration. The
+three questions the specification left to the writing, each answered in the direction that makes the
+mistake visible rather than silent:
+
+- **The event comes from argv, not from the payload.** The host answers a different shape per event,
+  and `{}` — correct for an invocation hook — is the one shape `agy` reads as *allow* on a tool call.
+  A payload permitted to name its own event could therefore ask for a tool call to be answered in the
+  shape that waves it through. `hook.parse_argv` reads the event from the command `install` wrote,
+  overwrites whatever the payload claimed, and treats **anything unrecognised as the gate**, which is
+  the fail-closed direction rather than a tidy default.
+- **A gate with no stop is `stale`.** An entry written before today has a working `PreToolUse` and no
+  invocation handlers: the tree is still reviewed, and ⏹ would starve a turn while the panel called
+  the gate current. That is the same shape of untruth as an ungated agent reporting itself gated,
+  which is what the state exists to refuse — so `status` requires every handler, names the missing
+  ones, and says in `detail` that the gate itself still works. It costs an upgrading user one click
+  and it converges; calling it `current` would leave the mechanism unarmed and silent forever.
+- **The footer is told, not derived.** A terminated loop reports `status: "SUCCESS"` with empty
+  prose, so nothing on the stream distinguishes a stop from a turn with nothing to say.
+  `AgySession.stream_turn` asks the gate after the frames and before the footer, and the answer
+  reaches the browser as `cancelled` — a word the Claude transport already fills in, so the chat
+  panel learns nothing about a third transport (AG-R-4).
+
+**Measured against a control**, because a stopped turn ending proves nothing: a cooperative agent
+ends a stopped turn too, which is exactly what the starvation this replaces relied on. Same prompt,
+same stop point, same gate — 3 invocations when the host answers `{}`, **1 when it answers
+`terminate`**. The full run is in
+[`delivery.md` § Phase 12](delivery.md#phase-12--the-stop-becomes-a-mechanism-and-the-control-is-the-instrument-2026-09-11).
+
+**The residual gap named above is unchanged and was not closed.** `PostInvocation` still fires
+between invocations, so a single-invocation prose answer still runs to its natural end. What the
+build adds is that the turn now *says* it was stopped rather than rendering as a blank success.

@@ -562,3 +562,99 @@ class TestASubagentIsGatedToo:
 
         source = inspect.getsource(mod.AgySession.stream_frames)
         assert source.index("_gate_subagents") < source.index("yield frame")
+
+
+class TestTheStopIsAMechanism:
+    """AG-19 — the layer above starvation.
+
+    ``TestStopStarvesTheTurn`` above asserts the refusals, which still
+    protect the tree and are unchanged. What is asserted here is that the
+    *same latch* ends the loop, so there is no second stop state to fall
+    out of step, and that a turn stopped this way says so in its footer.
+    """
+
+    def test_the_gate_terminates_the_loop_off_the_same_latch(self, wired):
+        """One ``cancel``, two mechanisms, no new state between them."""
+        session, server, _cfg, _events = wired
+
+        async def go():
+            await session.start()
+            gen = session.stream_turn("x", translator=AgyTranslator("r1"))
+            await gen.__anext__()
+            before = server.decide_invocation({"conversationId": CONV})
+            await session.cancel()
+            after = server.decide_invocation({"conversationId": CONV})
+            await gen.aclose()
+            await session.close()
+            return before, after
+
+        before, after = asyncio.run(go())
+        assert before == {}
+        assert after == {"terminationBehavior": "terminate"}
+
+    def test_a_stopped_turn_is_reported_cancelled(self, wired):
+        """The correction AG-19 came with.
+
+        A loop this app terminated reports ``status: "SUCCESS"`` with empty
+        prose — success meaning only that it exited without an unhandled
+        error. Rendered as it arrives that is a completed answer which
+        happens to say nothing, and the browser reads ``cancelled`` to draw
+        it as a stop instead.
+        """
+        session, _server, _cfg, _events = wired
+
+        async def go():
+            await session.start()
+            gen = session.stream_turn("x", translator=AgyTranslator("r1"))
+            out = [await gen.__anext__()]
+            await session.cancel()
+            async for event in gen:
+                out.append(event)
+            await session.close()
+            return out
+
+        events = asyncio.run(go())
+        footer = [e for e in events if e.name == "streamComplete"][-1]
+        assert footer.payload["cancelled"] is True
+
+    def test_an_ordinary_turn_is_not(self, wired):
+        session, _server, _cfg, _events = wired
+
+        async def go():
+            await session.start()
+            out = []
+            async for event in session.stream_turn(
+                "x", translator=AgyTranslator("r1")
+            ):
+                out.append(event)
+            await session.close()
+            return out
+
+        events = asyncio.run(go())
+        footer = [e for e in events if e.name == "streamComplete"][-1]
+        assert footer.payload["cancelled"] is False
+
+    def test_the_next_turn_is_not_cancelled_by_the_last_one(self, wired):
+        """``resume`` clears the termination with the refusal, so the
+        record cannot leak into the following turn's footer."""
+        session, server, _cfg, _events = wired
+
+        async def go():
+            await session.start()
+            gen = session.stream_turn("x", translator=AgyTranslator("r1"))
+            await gen.__anext__()
+            await session.cancel()
+            await gen.aclose()
+            out = []
+            async for event in session.stream_turn(
+                "y", translator=AgyTranslator("r2")
+            ):
+                out.append(event)
+            terminated = server.was_terminated(CONV)
+            await session.close()
+            return out, terminated
+
+        events, terminated = asyncio.run(go())
+        assert terminated is False
+        footer = [e for e in events if e.name == "streamComplete"][-1]
+        assert footer.payload["cancelled"] is False
