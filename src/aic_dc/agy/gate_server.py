@@ -194,6 +194,11 @@ class AgyGateServer:
         self._scope_unit: str | None = (
             scope.unit_name() if scope.available() else None
         )
+        #: The `agy` pid already written onto the scope entry, so the rewrite
+        #: `claim` does happens once per session rather than once per
+        #: subagent. `None` until the child exists — the scope claim is
+        #: published before it does.
+        self._scope_agy_pid: int | None = None
 
     @property
     def asks(self) -> bool:
@@ -257,17 +262,16 @@ class AgyGateServer:
         # the failure is at session start where it reads as "the engine
         # will not run" rather than as stale state.
         self._socket_path.unlink(missing_ok=True)
+        # The registry entries that same killed process left behind are the
+        # same problem one layer up, and worth sweeping from here for the
+        # same reason: this is the moment a host exists again to do it, and
+        # a corpse entry costs the *user's* own sessions rather than ours
+        # (`registry.owns_anything`). Only corpses go — a second host on
+        # this machine has live entries in the same directory.
+        registry.reap_stale(self._config_dir)
         self._server = await asyncio.start_unix_server(
             self._handle, path=str(self._socket_path)
         )
-        # AG-R-14's third residue, and the same reasoning as the line above
-        # one directory over: entries belong to a host, a host can be killed
-        # without running `stop`, and what it leaves behind routes calls to a
-        # socket that answers nothing. Reaped here rather than in the hook
-        # because *here* is after an orphaned `agy` has lost its stdin and
-        # exited — see `registry.reap`, which argues why this is collection
-        # and not a change to what the gate answers.
-        registry.reap(self._config_dir)
         # AG-R-14. Published *before* `agy` is launched, which is what makes
         # it a fix rather than a narrower race: a conversation claim can be
         # late because the conversation exists before we are told its id,
@@ -280,7 +284,7 @@ class AgyGateServer:
                 self._scope_unit, self._socket_path, config_dir=self._config_dir
             )
 
-    def claim(self, conversation_id: str) -> None:
+    def claim(self, conversation_id: str, *, agy_pid: int | None = None) -> None:
         """Take ownership of a conversation, so the hook stops passing it through.
 
         Called between ``init`` and the first prompt, which is the only
@@ -295,13 +299,41 @@ class AgyGateServer:
         conversation nobody has claimed, so a subagent's every tool call
         went ungated past a dialog the user had approved only the *spawn*
         through. Measured by ``scripts/probe_agy_subagent_gate.py``.
+
+        ``agy_pid`` is the process this conversation runs in, recorded so a
+        later reader can tell an entry this host abandoned from one whose
+        agent is still running without it. The caller supplies it because
+        this class never spawns anything — see
+        :func:`aic_dc.agy.registry.entry_is_live`.
+
+        **It is also where the scope entry gets its second pid**, and this is
+        the only place it can: :meth:`start` publishes that entry before the
+        child exists, precisely so nothing can beat it onto disk, which
+        leaves it naming a container and no process. Written once per
+        session — every subagent carries the same pid, because they all run
+        inside this session's one ``agy``.
         """
         if not conversation_id:
             return
         registry.claim(
-            conversation_id, self._socket_path, config_dir=self._config_dir
+            conversation_id,
+            self._socket_path,
+            config_dir=self._config_dir,
+            agy_pid=agy_pid,
         )
         self._claimed.add(conversation_id)
+        if (
+            self._scope_unit
+            and agy_pid is not None
+            and agy_pid != self._scope_agy_pid
+        ):
+            registry.claim_scope(
+                self._scope_unit,
+                self._socket_path,
+                config_dir=self._config_dir,
+                agy_pid=agy_pid,
+            )
+            self._scope_agy_pid = agy_pid
 
     def release(self, conversation_id: str) -> None:
         """Give up one conversation, leaving the rest claimed.

@@ -288,8 +288,21 @@ class AgySession:
 
         # The one window. After this the hook recognises our calls; before
         # it, it would pass them through as a stranger's.
-        self._gate.claim(self._conversation_id)
+        self._gate.claim(self._conversation_id, agy_pid=self._agy_pid)
         return self._conversation_id
+
+    @property
+    def _agy_pid(self) -> int | None:
+        """The ``agy`` process this session's conversations run in.
+
+        Recorded on every claim so a registry entry can outlive this host
+        and still say whether anything is left to gate — our own child
+        survives a killed parent, which is what separates an abandoned
+        entry from an orphaned agent
+        (:func:`aic_dc.agy.registry.entry_is_live`).
+        """
+        proc = self._proc
+        return None if proc is None else proc.pid
 
     async def _read_frame(self) -> dict[str, Any] | None:
         """One NDJSON frame, or ``None`` at end of stream.
@@ -444,7 +457,10 @@ class AgySession:
             if not child or child == self._conversation_id:
                 continue
             try:
-                self._gate.claim(child)
+                # The subagent runs inside this session's own `agy`, so it
+                # carries the same pid: an entry for the child is abandoned
+                # exactly when the parent's is.
+                self._gate.claim(child, agy_pid=self._agy_pid)
             except Exception:  # noqa: BLE001 - a turn must not die on this
                 # Logged loudly: a claim that failed is a subagent running
                 # ungated, which is the condition this method exists to

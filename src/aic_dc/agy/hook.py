@@ -42,6 +42,15 @@ themselves. Those must pass through untouched and unstalled.
 ``conversationId``; this module's job is to act on the answer and to fail
 in the right direction when it cannot get one.
 
+**Ownership is not only "is there an entry".** Since 2026-09-10 the
+registry also asks whether anything is left alive behind one, so a file a
+killed host abandoned answers *not ours* rather than denying against a
+socket nobody is holding — while an entry whose ``agy`` outlived its host
+still denies, because that is an orphaned agent and not a stale file. The
+reasoning is in :mod:`~aic_dc.agy.registry` § *A claim outlives the process
+that made it*; nothing in this module changes for it, which is the point of
+having asked the registry rather than the socket.
+
 Governing spec: ``specs5/plan-ag/`` — AG-14, AG-5, and
 ``risks.md`` AG-R-12, whose mitigations are requirements of this file:
 a ``"*"`` matcher, never exit 0 silently, and a tripwire that asserts the

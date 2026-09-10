@@ -203,6 +203,32 @@ class TestTheScopeIsPublishedBeforeAgyRuns:
 
         asyncio.run(go())
 
+    def test_the_first_claim_adds_the_agent_pid_the_scope_could_not_know(
+        self, tmp_path
+    ):
+        """The one thing publishing early costs, paid back by the first claim.
+
+        An entry written before the child exists cannot name it, so it can
+        never be read as a corpse — which would leave a killed host's scope
+        on disk forever, keeping ``owns_anything`` true and denying the
+        *user's* own unparseable payloads (AG-R-14 residue 3).
+        """
+        server = self._server(tmp_path)
+        path = tmp_path / "cfg" / "agy-sessions" / f"scope-{UNIT}.json"
+
+        async def go():
+            await server.start()
+            assert "agy_pid" not in json.loads(path.read_text(encoding="utf-8"))
+            server.claim("a-conversation", agy_pid=4242)
+            server.claim("its-subagent", agy_pid=4242)
+            entry = json.loads(path.read_text(encoding="utf-8"))
+            await server.stop()
+            return entry
+
+        entry = asyncio.run(go())
+        assert entry["agy_pid"] == 4242
+        assert entry["unit"] == UNIT
+
 
 class TestArgv:
     def test_agy_is_launched_into_the_scope(self, tmp_path):

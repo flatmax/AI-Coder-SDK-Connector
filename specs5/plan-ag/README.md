@@ -1,5 +1,24 @@
 # Second Engine — Google Antigravity alongside Claude Code
 
+**Status (2026-09-10, latest):** **the `pid` the registry had always written is finally read — and
+reading *one* would have been the wrong fix.** A killed host left an entry no reader could tell from a
+live claim, and both costs fell on the *user's* own sessions rather than ours: one unclean exit made
+`owns_anything` permanently true, so every unparseable payload from their own `agy` was denied from
+then on, and a leftover claim intercepts a conversation they later resume — the interception
+[AG-R-12](risks.md#ag-r-12) exists to prevent, arriving by a route no care in `stop()` can close. **But
+`agy` is a child of this host and a child outlives a killed parent**, so a dead host with a live `agy`
+is an *orphaned agent*, and waving it through is the unreviewed write this transport has no second
+check for. So the entry carries the `agy_pid` too and liveness is an **or** — either alive and the
+entry stands, both gone and it is a corpse, which reads as not ours and is swept at the next
+`AgyGateServer.start`. The scope entries [AG-18](decisions.md#ag-18) added are swept by the same rule
+and cost one wrinkle to get it: a scope claim is published *before* `agy` exists, so it has no agent to
+name until `AgyGateServer.claim` writes the pid onto it — which is also the entry where reaping on the
+host pid alone would have cost the most, because an abandoned unit is exactly where an orphan still
+sits. 28 tests, on a pid that is really dead rather than monkeypatched; three limits are stated rather
+than solved, and whether a real `agy` outlives a SIGKILLed host is still cited from the other engine
+rather than measured here. See [`delivery.md` § The pid that was written and never
+read](delivery.md#the-pid-that-was-written-and-never-read-2026-09-10).
+
 **Status (2026-09-10, later):** **a subagent's row is now a row you can open, and the rule for reading
 it was wrong until 121 transcripts said so.** Yesterday's `subagent_rows` put a delegation in the live
 strip on the `agy` transport; a row you cannot open is a worse offer than no row, so this is the other
@@ -48,12 +67,12 @@ log:** `probe_agy_subagent_gate.py` re-run with `AgyGateServer.claim` stubbed to
 parent and the subagent still put all eight tool calls to the dialog and the deny still left the target
 byte-identical, so conversation claims were inert and cgroup identity carried the load alone. Matching
 is against the units this host registered, never the name's shape, so [AG-R-12](risks.md#ag-r-12)'s
-isolation holds on a stronger footing than before. **The third residue closed the same day, and the fix
-this register recommended for it was the wrong one** — it said to treat a dead host's entry as absent,
-which is a change to what the *gate answers*, and an `agy` outliving its host sits inside a scope of
-ours under `--dangerously-skip-permissions`, so passing its calls through is worse than the denial
-being complained about. `registry.reap()` collects the garbage at startup instead, `lookup` is
-untouched, and a test is named for that. **What is left open is one thing and it is a per-platform
+isolation holds on a stronger footing than before. **The third residue closed the same day, and not in
+the form this register recommended for it** — it said to treat a dead host's entry as absent, which is a
+change to what the *gate answers*, and an `agy` outliving its host sits inside a scope of ours under
+`--dangerously-skip-permissions`, so passing its calls through is worse than the denial being
+complained about. Liveness is asked of two pids instead and only a corpse is released; the status above
+has it. **What is left open is one thing and it is a per-platform
 gap:** this is Linux-and-systemd, so on the macOS and Windows artefacts phase 7 publishes everything
 degrades to conversation-id routing with the first two residues intact — stated in `scope.py` and in
 AG-18, with the choice for those platforms (the capability-reducing deny, or the residue) deliberately
@@ -63,7 +82,8 @@ reported itself `stale` — which makes `AgySession` refuse to start. Only the i
 forgiven now, and not by resolving both paths, which would have called two different checkouts the same
 install. 4,708 tests green. See
 [`delivery.md` § Identity by cgroup](delivery.md#identity-by-cgroup-not-by-claim-2026-09-10) and
-[§ The third residue](delivery.md#the-third-residue-and-the-fix-this-directory-recommended-against-itself-2026-09-10).
+[§ The pid that was written and never
+read](delivery.md#the-pid-that-was-written-and-never-read-2026-09-10).
 
 **Status (2026-09-09):** **a subagent's tool calls were never reaching the permission gate, and now
 they are** ([AG-R-14](risks.md#ag-r-14)). The hook routes by conversation id and passes through

@@ -71,8 +71,11 @@ where ``sys.executable`` is the frozen binary rather than a Python:
 ``<binary> -m aic_dc.agy.hook …`` exits 2 with *"unrecognized
 arguments"*, so `agy` took the fallback on every call — of a session this
 host *was* running and *did* own. An ungated agent, reporting itself
-gated, because :func:`status` judges "current" by comparing the command
-string and the string was the one we meant to write.
+gated, because :func:`status` judged "current" by comparing the command
+string and the string was the one we meant to write. (That comparison has
+since been loosened to *one interpreter spelled two ways* — see
+:func:`_same_command` — which does not weaken this paragraph: the frozen
+form is a different argument list, not a different spelling.)
 
 Two changes close it, and they are deliberately at different layers:
 
@@ -251,6 +254,12 @@ def status(
       by its other name. Found by ``probe_agy_cgroup_identity.py``'s setup
       on a machine where the gate was live; see
       [AG-R-14](../../../specs5/plan-ag/risks.md#ag-r-14).
+
+      **The consequence was larger than a wrong label**, which is why it is
+      recorded here rather than as a cosmetic note:
+      ``AgyService.connect`` answers ``gate_not_installed`` on a stale state
+      and ``AgyConsultant.available`` goes false with it, so the whole engine
+      refuses to start and ``second_opinion`` disappears.
     - ``unreadable`` — the file exists and will not parse, so nothing can
       be said and nothing will be written.
     """

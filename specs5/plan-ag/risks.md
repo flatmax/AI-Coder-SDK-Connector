@@ -712,8 +712,9 @@ same day, and all three residues were closed on 2026-09-10.** Two of them by cha
 *is*: on a systemd platform the gate no longer depends on anyone registering a conversation before it
 speaks — `agy` runs in a cgroup of ours and the hook asks the kernel ([AG-18](decisions.md#ag-18)).
 Where that is unavailable the original mechanism and those two residues stand, which is a per-platform
-gap rather than a design one. The third was closed on every platform and **not** by the fix this entry
-recommended for it, which would have converted a stale claim into a way past the gate.
+gap rather than a design one. The third was closed on every platform and **not in the form this entry
+recommended**: reading the one pid it named would have turned an *orphaned agent's* claim into a way
+past the gate, so liveness is asked of two pids and only a corpse is released.
 
 > **Outcome, 2026-09-10: the registry was switched off and the gate still held.**
 > `probe_agy_subagent_gate.py`, re-run with `AgyGateServer.claim` replaced by a no-op for **both**
@@ -889,29 +890,35 @@ routing.
   the outcome quoted at the top of this entry, and it is the reason these two residues are marked
   closed rather than mitigated. See [AG-18](decisions.md#ag-18).
 
-  **One incidental finding, from the probe's own setup.** It reported the installed gate as `stale`
-  before the run, on a machine where it was working: `install.status` compares command *strings*,
-  and the same interpreter spelled `.venv/bin/python3` in the file and `.venv/bin/python` by
-  `sys.executable` is two strings for one program. A stale reading makes `AgySession` refuse to
-  start, so an install that works can present as a broken one after nothing more than a different
-  entry point resolving the interpreter by its other name.
+  **One incidental finding, from the probe's own setup — fixed 2026-09-10.** It reported the installed
+  gate as `stale` before the run, on a machine where it was working: `install.status` compared command
+  *strings*, and the same interpreter spelled `.venv/bin/python3` in the file and `.venv/bin/python` by
+  `sys.executable` is two strings for one program. **The consequence was larger than "a wrong label":**
+  `AgyService.connect` answers `gate_not_installed` on a stale state and `AgyConsultant.available` goes
+  false, so the whole engine refuses to start and `second_opinion` disappears — after nothing more than
+  a different entry point resolving the interpreter by its other name.
 
-  **Fixed 2026-09-10.** String equality still answers first, and one difference is now forgiven:
-  same directory, same file, different name. **Resolving both paths would have been the wrong fix and
-  the tests say so** — every venv's `python` resolves to the *system* interpreter, so a bare
-  `samefile` would call two different checkouts the same install, which is the case `stale` exists to
-  report. So the parent directories are compared first (through `realpath`, so a checkout reached by
-  a symlink is still itself) and only then the interpreters themselves. Four tests: the other
-  spelling reads `current`, a second checkout is still `stale`, a different `config_dir` with the
-  same interpreter is still `stale` — only the interpreter is forgiven, never the arguments — and an
-  interpreter that has been deleted is `stale` rather than an exception thrown at a Settings caller.
-- **A stale claim now costs more. Closed 2026-09-10, by collecting the garbage rather than by
-  changing the answer.** `registry.claim` records a `pid` and `registry.lookup` has never
-  read it, so a killed session's entries are indistinguishable from live ones and the hook denies on
-  them — it refuses whatever it cannot reach. Before this fix that orphaned one entry per session;
-  now it orphans one per subagent as well. The recorded `pid` is the unused handle.
+  `_same_command` now compares the arguments exactly and the interpreter as a file: the command is cut
+  on the invocation `hook_command` itself writes, so the two halves are separated without guessing at
+  word boundaries. **Not by the interpreter's resolved target, which is the trap the fix nearly walked
+  into:** `.venv-a/bin/python` and `.venv-b/bin/python` are typically both symlinks to one system
+  interpreter and are *not* interchangeable, because a virtualenv is selected by the path used to invoke
+  it — so following the link would report another checkout's gate as ours, which is the case `stale`
+  exists to report. The test is same directory (through `realpath`, so a checkout reached by a symlink
+  is still itself) and the same file within it, which is exactly "one interpreter spelled two ways" and
+  nothing wider. Measured on this machine with the pair that caused it (`.venv/bin/python3` and
+  `.venv/bin/python` → `current`, `/usr/bin/python3` → still `stale`), and pinned by tests: the other
+  spelling reads `current`, a second checkout is still `stale`, a different `config_dir` with the same
+  interpreter is still `stale` — only the interpreter is forgiven, never the arguments — an interpreter
+  that has been deleted is `stale` rather than an exception thrown at a Settings caller, and an
+  unbalanced quote in a hand-edited entry is `stale` rather than a raise.
+- ~~**A stale claim now costs more.**~~ **Fixed 2026-09-10.** `registry.claim` recorded a `pid` and
+  `registry.lookup` had never read it, so a killed session's entries were indistinguishable from live
+  ones and the hook denied on them — it refuses whatever it cannot reach. Before the subagent fix that
+  orphaned one entry per session; after it, one per subagent as well. The recorded `pid` was the unused
+  handle.
 
-  **It is a prerequisite of the race fix rather than merely the cheap one.** A tentative hold makes
+  **It was a prerequisite of the race fix rather than merely the cheap one.** A tentative hold makes
   the hook *poll* an unclaimed conversation instead of passing it through, so a dead host's leftover
   entry stops being an annoyance and becomes a block: the poll finds a claim, the socket behind it
   answers nothing, and the hook denies. Whatever order the three are taken in, this one lands before
@@ -919,36 +926,57 @@ routing.
 
   **Its original argument expired on 2026-09-10.** The tentative hold was never built, because
   [AG-18](decisions.md#ag-18) closed the race a different way — so this is no longer a prerequisite of
-  anything. `registry.claim_scope` writes a `pid` that `scope_owner` does not read, exactly as `claim`
-  writes one that `lookup` does not, so AG-18 doubled the number of entry kinds with an unread handle
+  anything. `registry.claim_scope` wrote a `pid` that `scope_owner` did not read, exactly as `claim`
+  wrote one that `lookup` did not, so AG-18 doubled the number of entry kinds with an unread handle
   without changing what the handle was for.
 
-  **Fixed 2026-09-10, and the recommendation this entry carried for a day was wrong.** It said to
-  *"treat an entry whose process is gone as absent rather than as ours"* — which is a change to what
-  the gate **answers**, and it would have opened a hole this directory has argued against from the
-  start. `registry.py`'s own header states the trade: *a dead host makes our sessions un-runnable
-  rather than un-gated*. A host killed mid-turn can leave an `agy` still running inside a scope of
-  ours, and an absent entry passes its calls through — an agent under
+  **Fixed 2026-09-10, and the recommendation this entry carried for a day was wrong as written.** It
+  said to *"treat an entry whose process is gone as absent rather than as ours"* — which is a change to
+  what the gate **answers**, and on one pid it would have opened a hole this directory has argued
+  against from the start. `registry.py`'s own header states the trade: *a dead host makes our sessions
+  un-runnable rather than un-gated*. A host killed mid-turn can leave an `agy` still running inside a
+  scope of ours, and an absent entry passes its calls through — an agent under
   `--dangerously-skip-permissions` with no gate at all, which is strictly worse than the denial being
-  complained about. Denying whatever cannot be reached is not an accident of an unread field.
+  complained about.
 
-  So the fix is **garbage collection, not routing**. `registry.reap()` deletes entries whose recorded
-  pid is gone and is called from `AgyGateServer.start`, and `lookup` is untouched — pinned by a test
-  named for it, `test_a_dead_hosts_entry_still_denies_until_it_is_reaped`. **Startup is the safe
-  moment for the same reason the hook is not:** an `agy` whose host died loses the pipe it reads
-  prompts from, takes EOF and exits, so by the time a *later* host starts there is nothing left to
-  ungate — where reaping from the hook would run during precisely the window when something might
-  still be alive. "Cannot tell" is treated as "still running" throughout: no pid, a malformed entry, a
-  process owned by another user, all left alone, because the cost of a wrong reap is a live host
-  losing its claim. Seven tests, including a live sibling's entries being left alone — two windows of
-  this app share the registry directory and the pid check is the whole of what keeps them apart.
+  **So reading the pid was not the fix; reading *two* was.** `agy` is a child of this host and a child
+  outlives a killed parent, so a dead host with a live `agy` is an **orphaned agent**. `claim` now
+  records the conversation's `agy_pid` beside the host `pid` and `entry_is_live` is an **or**: either
+  alive and the entry stands and the hook goes on denying what it cannot reach, both gone and the file
+  is a *corpse*. Only a corpse reads as not ours — safe precisely because no process from that session
+  is left to un-gate — so `lookup` returns `None` for one, `owns_anything` stops counting one, and
+  `reap_stale` deletes one from `AgyGateServer.start`, beside the stale-socket unlink that has the same
+  cause. The sweep is keyed on liveness rather than on ownership, deliberately: "remove entries that are
+  not mine" would delete the live claims of a second host sharing the directory and un-gate its session.
 
-  **One claim made here on 2026-09-10 was overstated and is withdrawn.** This entry said a stale scope
-  entry is worse than a stale conversation entry because *"a unit name is something systemd can hand to
-  a later process"*. `scope.unit_name()` is `aic-dc-` plus twelve hex characters of `uuid4`, so a
-  recurrence is not a case worth designing against. The scope entry's real exposure is the orphaned
-  `agy` above — still inside the unit, still matching — and that is an argument for the denial, not
-  against it.
+  **The residue was written as tidiness and both of its real costs land on the user**, which is the
+  correction worth keeping. `owns_anything` counted *files* and is the tie-breaker for an unparseable
+  payload, so one unclean exit of ours made every junk payload from the *user's own* `agy` deny from
+  then on — a function whose docstring says it "fails toward the user's work" doing the opposite,
+  permanently. And `release`'s docstring had already named the second: a leftover claim intercepts a
+  later session of the user's that resumes that conversation ([AG-R-12](#ag-r-12)), which a killed host
+  reaches by a route no care in `stop()` can close.
+
+  **One claim made here on 2026-09-10 was overstated and is withdrawn — but the entry it was about
+  needed a change of its own.** This said a stale scope entry is worse than a stale conversation entry
+  because *"a unit name is something systemd can hand to a later process"*. `scope.unit_name()` is
+  `aic-dc-` plus twelve hex characters of `uuid4`, so a recurrence is not a case worth designing
+  against. The scope entry's real exposure is the orphaned `agy` above — still inside the unit, still
+  matching `scope_owner` — and that is an argument *for* the denial. Which is exactly why the two-pid
+  rule had to reach a scope entry too, and it cannot the way a conversation entry does: a scope claim is
+  published *before* `agy` exists, so its first write cannot name the process that would act.
+  `AgyGateServer.claim` rewrites it with the pid once the child is up, and until then the scope reads as
+  alive rather than as a corpse.
+
+  **Three limits are stated rather than solved**, in
+  [`delivery.md`](delivery.md#the-pid-that-was-written-and-never-read-2026-09-10): no liveness probe on
+  Windows (`os.kill(pid, 0)` is `TerminateProcess` there, so a probe would kill what it asks about —
+  the answer is "alive" and that platform keeps the old behaviour), a recycled pid reading as alive, and
+  an entry with no `agy_pid` never being a corpse. **And one thing unmeasured:** whether a real `agy`
+  outlives a SIGKILLed host is cited from `main.py`'s measurement of the *other* engine's CLI, not
+  measured here — `agy` on this machine is installed but not authenticated, so no session reaches
+  `init` and there is no child to orphan. The rule does not depend on the answer: an `agy` that exits on
+  stdin EOF makes the entry a corpse for the sweep, one that lingers keeps it standing and denying.
 
 **Two of the three were named by the consultant** (`second_opinion`, 2026-09-09) rather than by the
 author of the fix, which is the first time this feature has been used on this repository's own work

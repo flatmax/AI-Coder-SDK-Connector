@@ -22,8 +22,10 @@ absent ownership means somebody else's session and allows; present
 ownership with an unreachable host means ours and denies. A dead host
 makes our sessions un-runnable rather than un-gated.
 
-Everything runs offline. No ``agy``, no network, no subprocess except the
-one entry-point test, which runs this interpreter.
+Everything runs offline. No ``agy``, no network, and the only subprocesses
+are this interpreter: the entry-point test, and the ``dead_pid`` fixture,
+which runs one and reaps it so the liveness probe is exercised rather than
+monkeypatched.
 """
 
 from __future__ import annotations
@@ -215,79 +217,241 @@ class TestTheRegistry:
         assert ".gemini" not in str(registry.registry_dir(config_dir))
 
 
-class TestReapingWhatAKilledHostLeft:
-    """AG-R-14's third residue: a ``pid`` written and never read.
+@pytest.fixture
+def dead_pid():
+    """A pid that named a process and no longer does.
 
-    A host killed without running ``stop`` leaves entries pointing at a
-    socket nothing is listening on, and the hook denies on them — it
-    refuses whatever it cannot reach. That behaviour is *correct* and these
-    tests assert it is unchanged: the fix is collecting the garbage, not
-    passing the calls through. ``test_a_dead_hosts_entry_still_denies``
-    is the one that pins the distinction.
+    Run and reaped, so the kernel has genuinely let it go — the point is to
+    exercise the real probe rather than a monkeypatched one. Pid reuse
+    inside the remaining milliseconds of a test is the only way this lies,
+    and it would lie in the direction of "alive", which fails the test
+    rather than passing it wrongly.
+    """
+    proc = subprocess.Popen([sys.executable, "-c", ""])
+    proc.wait()
+    return proc.pid
+
+
+class TestAnEntryLeftByAHostThatIsGone:
+    """AG-R-14 residue 3: ``claim`` wrote a ``pid`` and nothing read it.
+
+    A killed host leaves a file behind, and until that pid was read the file
+    was indistinguishable from a live claim — so the hook went on denying
+    tool calls against a socket nobody was listening on, and
+    ``owns_anything`` counted the corpse forever.
+
+    The distinction these tests hold is the one that makes reading the pid
+    safe: **a dead host is not the same as a dead session.** Our ``agy`` is
+    a child, and a child outlives a killed parent, so an entry is only a
+    corpse when both are gone.
     """
 
-    #: A pid no process can hold. `os.kill(0, 0)` addresses the caller's own
-    #: process group rather than a process, so 0 is not usable here.
-    GONE = 2**22 - 1
+    def test_a_dead_hosts_entry_is_not_ours(self, config_dir, dead_pid):
+        registry.claim(
+            OURS, "/tmp/s.sock", config_dir=config_dir,
+            pid=dead_pid, agy_pid=dead_pid,
+        )
+        assert registry.lookup(OURS, config_dir=config_dir) is None
+        # Which is what the user meets: their own resumed conversation is
+        # waved through instead of denied against a socket that is gone.
+        assert hook.decide(payload(), config_dir=config_dir) == hook.ALLOW
 
-    def _entry(self, config_dir, name, pid):
-        registry.claim(name, "/tmp/dead.sock", config_dir=config_dir, pid=pid)
-        return registry.registry_dir(config_dir) / f"{name}.json"
+    def test_an_orphaned_agent_is_still_denied(self, config_dir, dead_pid):
+        """The case that makes "stale means allow" the wrong rule.
 
-    def test_a_dead_hosts_entry_is_removed(self, config_dir):
-        path = self._entry(config_dir, "old", self.GONE)
-        assert registry.reap(config_dir) == [path.name]
-        assert not path.exists()
-
-    def test_a_live_hosts_entry_is_left_alone(self, config_dir):
-        """A second window of this app is not garbage to the first."""
-        path = self._entry(config_dir, "theirs", os.getpid())
-        assert registry.reap(config_dir) == []
-        assert path.exists()
-
-    def test_an_entry_with_no_pid_is_left_alone(self, config_dir):
-        """Written before pids were recorded. Cannot tell, so does not act."""
-        directory = registry.registry_dir(config_dir)
-        directory.mkdir(parents=True, exist_ok=True)
-        path = directory / "ancient.json"
-        path.write_text('{"conversation_id": "ancient", "socket": "/tmp/s"}', "utf-8")
-        assert registry.reap(config_dir) == []
-        assert path.exists()
-
-    def test_a_half_written_entry_is_left_alone(self, config_dir):
-        """It belongs to a host that is mid-claim, not to one that is gone."""
-        directory = registry.registry_dir(config_dir)
-        directory.mkdir(parents=True, exist_ok=True)
-        path = directory / "midwrite.json"
-        path.write_text('{"conversation_id": "midw', encoding="utf-8")
-        assert registry.reap(config_dir) == []
-        assert path.exists()
-
-    def test_a_scope_entry_is_reaped_the_same_way(self, config_dir):
-        """The one that matters more, because a unit name can recur.
-
-        A conversation id is generated once by ``agy`` and never again, so a
-        stale entry for one is inert. A scope entry keys on a name *this*
-        app chooses, and the socket it names is dead.
+        Host killed, its ``agy`` still running: allowing here would put an
+        unreviewed write into the repository, which is the one thing this
+        transport has no second check for.
         """
-        registry.claim_scope("aic-dc-old", "/tmp/dead.sock", config_dir=config_dir, pid=self.GONE)
-        assert registry.reap(config_dir) == ["scope-aic-dc-old.json"]
-        assert registry.scope_owner("/user.slice/aic-dc-old.scope", config_dir=config_dir) is None
-
-    def test_reaping_an_empty_registry_is_not_an_error(self, config_dir):
-        assert registry.reap(config_dir) == []
-
-    def test_a_dead_hosts_entry_still_denies_until_it_is_reaped(self, config_dir):
-        """The residue's fix must not become a way through the gate.
-
-        Making ``lookup`` answer ``None`` for a dead host would pass the
-        call through, and an ``agy`` outliving its host runs under
-        ``--dangerously-skip-permissions``. So the entry stays ours while it
-        is on disk, and the hook goes on refusing what it cannot reach.
-        """
-        self._entry(config_dir, OURS, self.GONE)
+        registry.claim(
+            OURS, "/tmp/s.sock", config_dir=config_dir,
+            pid=dead_pid, agy_pid=os.getpid(),
+        )
         assert registry.lookup(OURS, config_dir=config_dir) is not None
-        assert hook.decide(payload(OURS), config_dir=config_dir)["decision"] == "deny"
+
+        def ask(*_args):
+            raise ConnectionRefusedError("the host that spawned it is gone")
+
+        result = hook.decide(payload(), config_dir=config_dir, ask=ask)
+        assert result["decision"] == "deny"
+
+    def test_a_live_host_whose_agy_died_still_owns_the_conversation(
+        self, config_dir, dead_pid
+    ):
+        """It is the host's to release; the gate is up and can be asked."""
+        registry.claim(
+            OURS, "/tmp/s.sock", config_dir=config_dir,
+            pid=os.getpid(), agy_pid=dead_pid,
+        )
+        assert registry.lookup(OURS, config_dir=config_dir) is not None
+
+    def test_an_entry_with_no_agy_pid_keeps_the_older_behaviour(
+        self, config_dir, dead_pid
+    ):
+        """Written by a version before this one, and read without inventing.
+
+        No ``agy_pid`` means the second question cannot be asked, and an
+        unanswerable liveness question leaves the entry standing rather than
+        guessing that nothing is running.
+        """
+        registry.claim(OURS, "/tmp/s.sock", config_dir=config_dir, pid=dead_pid)
+        assert registry.lookup(OURS, config_dir=config_dir) is not None
+
+    def test_owns_anything_stops_counting_a_corpse(self, config_dir, dead_pid):
+        """The tie-breaker's own version of this defect, and the worse half.
+
+        ``owns_anything`` decides an unparseable payload, and a payload with
+        no id may belong to anyone — so one unclean exit of ours used to
+        make every junk payload from *the user's* own ``agy`` deny, forever.
+        """
+        registry.claim(
+            OURS, "/tmp/s.sock", config_dir=config_dir,
+            pid=dead_pid, agy_pid=dead_pid,
+        )
+        assert registry.owns_anything(config_dir) is False
+        assert hook.decide(None, config_dir=config_dir) == hook.ALLOW
+
+    def test_owns_anything_counts_a_claim_still_being_written(self, config_dir):
+        """A half-written entry is a session of ours starting, not a corpse."""
+        registry.claim(OURS, "/tmp/s.sock", config_dir=config_dir)
+        path = registry.registry_dir(config_dir) / f"{OURS}.json"
+        path.write_text('{"conversation_id": "cd4', encoding="utf-8")
+        assert registry.owns_anything(config_dir) is True
+
+
+class TestReapingCorpses:
+    def test_it_removes_a_dead_hosts_entry_and_names_it(
+        self, config_dir, dead_pid
+    ):
+        registry.claim(
+            OURS, "/tmp/s.sock", config_dir=config_dir,
+            pid=dead_pid, agy_pid=dead_pid,
+        )
+        assert registry.reap_stale(config_dir) == [OURS]
+        assert not (registry.registry_dir(config_dir) / f"{OURS}.json").exists()
+
+    def test_it_leaves_another_live_hosts_entry_alone(self, config_dir, dead_pid):
+        """Two hosts share one registry directory.
+
+        The sweep is keyed on liveness rather than on ownership for exactly
+        this reason: "not mine" would delete the entry of a second host
+        running beside us and un-gate its session.
+        """
+        registry.claim(
+            OURS, "/tmp/a.sock", config_dir=config_dir,
+            pid=dead_pid, agy_pid=dead_pid,
+        )
+        registry.claim("other-host", "/tmp/b.sock", config_dir=config_dir)
+        assert registry.reap_stale(config_dir) == [OURS]
+        assert registry.lookup("other-host", config_dir=config_dir) is not None
+
+    def test_it_leaves_an_unreadable_entry_alone(self, config_dir):
+        """There is no liveness question to ask of it, and it denies nothing."""
+        directory = registry.registry_dir(config_dir)
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / f"{OURS}.json").write_text("{half", encoding="utf-8")
+        assert registry.reap_stale(config_dir) == []
+        assert (directory / f"{OURS}.json").exists()
+
+    def test_it_is_quiet_before_the_directory_exists(self, config_dir):
+        assert registry.reap_stale(config_dir) == []
+
+
+class TestAskingWhetherAProcessExists:
+    """Every unanswerable case answers "alive", and that is deliberate.
+
+    A live pid is a reason to leave an entry standing, and a standing entry
+    makes the hook deny. So the direction of every doubt below costs a
+    refusal rather than an unreviewed tool call.
+    """
+
+    @pytest.mark.parametrize("pid", [None, 0, -1, "1", True, 1.0, {}])
+    def test_a_pid_that_is_not_a_pid_reads_as_alive(self, pid):
+        assert registry.process_alive(pid) is True
+
+    def test_this_process_is_alive(self):
+        assert registry.process_alive(os.getpid()) is True
+
+    def test_a_reaped_process_is_not(self, dead_pid):
+        assert registry.process_alive(dead_pid) is False
+
+    def test_os_kill_is_never_called_off_posix(self, monkeypatch, dead_pid):
+        """On Windows ``os.kill`` is ``TerminateProcess``.
+
+        A liveness probe that killed the process it asked about would be a
+        worse bug than the one this function fixes, so there is no probe
+        there — the answer is "alive" and the entry stands.
+        """
+        def explode(*_args):
+            raise AssertionError("os.kill must not be reached off POSIX")
+
+        monkeypatch.setattr(registry.os, "name", "nt")
+        monkeypatch.setattr(registry.os, "kill", explode)
+        assert registry.process_alive(dead_pid) is True
+
+    def test_a_pid_owned_by_another_user_reads_as_alive(self, monkeypatch):
+        """It exists; it is simply not ours to signal."""
+        def refuse(*_args):
+            raise PermissionError("not yours")
+
+        monkeypatch.setattr(registry.os, "kill", refuse)
+        assert registry.process_alive(4242) is True
+
+
+class TestAScopeEntryIsSweptByTheSameRule:
+    """AG-18 doubled the kinds of entry a killed host can leave behind.
+
+    A scope entry is the one where getting this wrong costs more, and in the
+    opposite direction to the intuition: the unit an abandoned entry names is
+    exactly where an orphaned ``agy`` still sits — same unit, so
+    ``scope_owner`` still matches it — and it is under
+    ``--dangerously-skip-permissions``. So reaping on the host pid alone
+    would open the tree rather than tidy a file.
+    """
+
+    UNIT = "aic-dc-old"
+    CGROUP = "0::/user.slice/user-1000.slice/aic-dc-old.scope"
+
+    def test_a_scope_whose_host_and_agent_are_both_gone_is_reaped(
+        self, config_dir, dead_pid
+    ):
+        registry.claim_scope(
+            self.UNIT, "/tmp/dead.sock", config_dir=config_dir,
+            pid=dead_pid, agy_pid=dead_pid,
+        )
+        assert registry.reap_stale(config_dir) == [f"scope-{self.UNIT}"]
+        assert registry.scope_owner(self.CGROUP, config_dir=config_dir) is None
+
+    def test_a_scope_holding_an_orphaned_agent_is_kept(self, config_dir, dead_pid):
+        """The case that makes the second pid worth writing down.
+
+        Host killed, its ``agy`` still running inside the unit. The entry
+        stands, ``scope_owner`` goes on matching, and the calls go on being
+        denied — which is the AG-5 trade rather than a leak.
+        """
+        registry.claim_scope(
+            self.UNIT, "/tmp/dead.sock", config_dir=config_dir,
+            pid=dead_pid, agy_pid=os.getpid(),
+        )
+        assert registry.reap_stale(config_dir) == []
+        assert registry.scope_owner(self.CGROUP, config_dir=config_dir) is not None
+
+    def test_a_scope_claimed_before_its_agent_existed_is_kept(
+        self, config_dir, dead_pid
+    ):
+        """The first write of every scope entry has no ``agy_pid`` to give.
+
+        ``start`` publishes it before the child exists, on purpose, so
+        nothing can beat it onto disk. Until ``claim`` rewrites it the entry
+        cannot be read as a corpse — the same "cannot tell, so leave it
+        standing" the conversation entries use, arrived at by design rather
+        than by age.
+        """
+        registry.claim_scope(
+            self.UNIT, "/tmp/dead.sock", config_dir=config_dir, pid=dead_pid
+        )
+        assert registry.reap_stale(config_dir) == []
+        assert registry.scope_owner(self.CGROUP, config_dir=config_dir) is not None
 
 
 class TestTheProcessAlwaysPrints:

@@ -19,6 +19,9 @@ Offline. No ``agy``, no network.
 from __future__ import annotations
 
 import asyncio
+import os
+import subprocess
+import sys
 
 import pytest
 
@@ -325,6 +328,46 @@ class TestOwnershipLifecycle:
             await server.stop()
 
         asyncio.run(go())
+
+    def test_a_claim_records_the_agy_process(self, wired):
+        """So a reader after this host is gone can still tell what is running.
+
+        The pid is the caller's to supply — this class spawns nothing — and
+        it is what separates an entry we abandoned from one whose agent
+        outlived us (AG-R-14 residue 3).
+        """
+        _recorder, _gate, server, config_dir = wired
+        server.claim(OURS, agy_pid=4242)
+        entry = registry.lookup(OURS, config_dir=config_dir)
+        assert entry["agy_pid"] == 4242
+        assert entry["pid"] == os.getpid()
+
+    def test_starting_reaps_a_dead_hosts_claims(self, wired):
+        """The same cause as the stale socket above, one layer up.
+
+        A corpse entry costs the *user's* own sessions, not ours: it keeps
+        ``owns_anything`` true, so every unparseable payload from their own
+        ``agy`` denies. Start is where a host exists again to sweep.
+        """
+        _recorder, _gate, server, config_dir = wired
+        dead = subprocess.Popen([sys.executable, "-c", ""])
+        dead.wait()
+        registry.claim(
+            "abandoned", "/tmp/gone.sock", config_dir=config_dir,
+            pid=dead.pid, agy_pid=dead.pid,
+        )
+        live = registry.claim(
+            "other-host", "/tmp/live.sock", config_dir=config_dir
+        )
+
+        async def go():
+            await server.start()
+            await server.stop()
+
+        asyncio.run(go())
+        assert not (registry.registry_dir(config_dir) / "abandoned.json").exists()
+        # A second host's live claim shares the directory and survives.
+        assert live.exists()
 
 
 class TestTheRoundTrip:
