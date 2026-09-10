@@ -71,8 +71,11 @@ where ``sys.executable`` is the frozen binary rather than a Python:
 ``<binary> -m aic_dc.agy.hook …`` exits 2 with *"unrecognized
 arguments"*, so `agy` took the fallback on every call — of a session this
 host *was* running and *did* own. An ungated agent, reporting itself
-gated, because :func:`status` judges "current" by comparing the command
-string and the string was the one we meant to write.
+gated, because :func:`status` judged "current" by comparing the command
+string and the string was the one we meant to write. (That comparison has
+since been loosened to *one interpreter spelled two ways* — see
+:func:`_same_command` — which does not weaken this paragraph: the frozen
+form is a different argument list, not a different spelling.)
 
 Two changes close it, and they are deliberately at different layers:
 
@@ -93,6 +96,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -240,6 +244,11 @@ def status(
       interpreter. Usually another checkout, or a virtualenv that has
       moved. Still safe for the user thanks to the ``||`` fallback, but our
       own sessions would not be gated by *this* build.
+
+      "Different" is asked of the interpreter rather than of the string
+      (:func:`_same_command`): one venv spelled ``python`` in the file and
+      ``python3`` by ``sys.executable`` is one interpreter, and reading it as
+      two refused to start an engine whose gate was working.
     - ``unreadable`` — the file exists and will not parse, so nothing can
       be said and nothing will be written.
     """
@@ -256,7 +265,7 @@ def status(
 
     want = hook_command(config_dir, python)
     found = _installed_command(entry)
-    state = "current" if found == want else "stale"
+    state = "current" if _same_command(found, want) else "stale"
     return {
         "state": state,
         "path": str(target),
@@ -265,6 +274,61 @@ def status(
         "expected": want,
         "agy_present": shutil.which("agy") is not None,
     }
+
+
+def _same_command(found: str, want: str) -> bool:
+    """Whether two hook command strings name the same program and arguments.
+
+    :func:`status` compared the strings, and on 2026-09-09
+    ``scripts/probe_agy_cgroup_identity.py`` reported the gate ``stale`` on
+    a machine where it was working, for the oldest reason there is:
+    ``.venv/bin/python3`` in the file and ``.venv/bin/python`` from
+    ``sys.executable`` are two spellings of one interpreter. **That is not a
+    cosmetic misreading** — ``AgyService.connect`` refuses with
+    ``gate_not_installed`` and ``AgyConsultant.available`` goes false on a
+    stale state, so an install that works presents as a broken engine after
+    nothing more than a different entry point resolving the interpreter by
+    its other name.
+
+    Every token but the first must match exactly: the module or flag, the
+    config directory and the ``||`` fallback are all things a real
+    difference would show up in. The first is compared as a file.
+
+    **Not by its resolved target, which is the trap.** ``.venv-a/bin/python``
+    and ``.venv-b/bin/python`` are typically both symlinks to one system
+    interpreter, and they are *not* interchangeable: a virtualenv is chosen
+    by the path used to invoke it — ``pyvenv.cfg`` beside that path — so
+    resolving would call two different environments equal and report a gate
+    installed from another checkout as ours. The test is therefore **same
+    directory, and the same file within it**, which is exactly "one
+    interpreter, spelled two ways" and nothing wider.
+
+    A missing interpreter is not the same as anything, so it stays
+    ``stale`` — which is what :func:`status` documents it as, and what
+    :func:`hook_runs` is for at install time.
+    """
+    if found == want:
+        return True
+    try:
+        found_argv = shlex.split(found)
+        want_argv = shlex.split(want)
+    except ValueError:
+        # An unbalanced quote in somebody's hand-edited entry. Unparseable
+        # is not ours, and reporting `stale` names the file for them.
+        return False
+    if len(found_argv) != len(want_argv) or not found_argv:
+        return False
+    if found_argv[1:] != want_argv[1:]:
+        return False
+    found_exe, want_exe = Path(found_argv[0]), Path(want_argv[0])
+    if found_exe.parent.resolve() != want_exe.parent.resolve():
+        return False
+    try:
+        return found_exe.samefile(want_exe)
+    except OSError:
+        # One of them is gone, which is the other half of what `stale`
+        # means. The `||` fallback is what keeps that safe for the user.
+        return False
 
 
 def _installed_command(entry: dict[str, Any]) -> str:

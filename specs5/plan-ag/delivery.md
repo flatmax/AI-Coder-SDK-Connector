@@ -1852,6 +1852,18 @@ fact on disk and the decision is a question over a socket, and each fails safely
 | Payload unparseable, we own nothing | **allow** | Cannot be ours, and refusing would break a stranger's session on a bug of ours. |
 | Payload unparseable, we own something | **deny** | Might be ours. |
 
+**Amended 2026-09-10 — the third row was two situations wearing one description.** "Host unreachable"
+covered a host that is *running and not answering* and a host that **no longer exists**, and only the
+first is ours to deny. The rows now read:
+
+| Situation | Answer | Why |
+|---|---|---|
+| Entry present, host process gone, its `agy` gone too | **allow** | A corpse entry. Nothing from that session is left to gate, so the only thing it can still do is intercept a conversation the *user* resumes. Swept at the next `AgyGateServer.start`. |
+| Entry present, host process gone, its `agy` alive | **deny** | An orphaned agent — our child outliving us. This is the row that makes "stale means allow" wrong. |
+| Payload unparseable, every entry we hold is a corpse | **allow** | We own nothing that is running, so it cannot be ours. Before this, one unclean exit made the row below permanent. |
+
+See [§ The pid that was written and never read](#the-pid-that-was-written-and-never-read-2026-09-10).
+
 **The live tripwire passed, and its first version passed for the wrong reason.** The gate denied
 *everything*, so the model gave up before proposing a write — leaving "the file is unchanged" true and
 meaningless. That is the same shape as the AG-R-12 error two entries up, caught this time before it
@@ -4392,3 +4404,103 @@ when a claim fails. The twelfth reads the source of `stream_frames` and asserts 
 `_gate_subagents` appears before `yield frame`. That is the residue's size pinned as a test: the race
 window is a frame read, and a refactor that moved the claim into the translator or after the yield
 would widen it to the subagent's whole life without failing anything else.
+
+## The pid that was written and never read (2026-09-10)
+
+[AG-R-14](risks.md#ag-r-14) residue 3, and the one the consultant said had to land first: `claim`
+recorded a `pid` and `lookup` had never read it, so an entry left behind by a host that no longer
+exists was indistinguishable from a live claim.
+
+### What a stale entry actually costs, which is not what the residue said
+
+The residue was written as a tidiness problem — "it orphans one entry per subagent". Reading the two
+callers says otherwise, and both costs land on **the user's own work** rather than on ours:
+
+- `owns_anything` counts *files*, and it is the tie-breaker for a payload the hook cannot parse. One
+  unclean exit of ours therefore made "we own something" permanently true, and from then on every
+  unparseable payload from *the user's own* `agy` was denied. The function's docstring says it "fails
+  toward the user's work rather than toward silence"; with a corpse in the directory it did the
+  opposite, for good.
+- `AgyGateServer.release`'s docstring already named the other one: a claim left behind "would make this
+  host intercept a *later* session of the user's own that happened to resume that conversation" — the
+  interception `probe_agy_isolation.py` exists to hold. That was written about a claim we forgot to
+  release. A host that is killed cannot release anything, so the same breakage arrives by a route no
+  amount of care in `stop()` can close.
+
+### Liveness is two pids, because "stale" and "dead" are different questions
+
+The obvious fix — no host, so nothing to gate, wave it through — is wrong, and the case that makes it
+wrong is ours: `agy` is a **child** of this host, and a child outlives a killed parent. A dead host
+whose `agy` is still running is an **orphaned agent**, and allowing there would produce exactly the
+unreviewed write this transport has no second check for.
+
+So `claim` now records the conversation's `agy_pid` alongside the host `pid`, and `entry_is_live` is an
+**or**: either process alive, the entry stands and the hook goes on denying calls it cannot get an
+answer for. Only when both are gone is the file a corpse — and a corpse reads as *not ours*, which it
+can do safely because no process from that session is left to be un-gated. `lookup` returns `None` for
+one, `owns_anything` does not count one, and `reap_stale` deletes one.
+
+**The sweep runs from `AgyGateServer.start`, beside the stale-socket unlink that has the same cause.**
+Keyed on liveness rather than on ownership, deliberately: "remove entries that are not mine" would
+delete the live claims of a second host sharing the directory and un-gate its session.
+
+### Three things stated rather than solved
+
+- **There is no liveness probe on Windows.** `os.kill(pid, 0)` there is `TerminateProcess` for any
+  signal that is not a console event, so a probe would kill the process it asked about — worse than
+  the bug. Where the question cannot be asked the answer is "alive", so that platform keeps the
+  pre-2026-09-10 behaviour. Same shape as `next.md` § C8's POSIX-only teardown.
+- **A recycled pid reads as alive**, so a corpse can present as an orphan until something reaps it.
+  That is the direction that keeps our own tree gated. Closing it means comparing process start times,
+  which is `/proc`-shaped and would put a second Linux-only mechanism in this file.
+- **An entry with no `agy_pid`** — written by any earlier version — is never a corpse. The upgrade path
+  is "keep the old behaviour", not "guess".
+
+### What was not measured, and why
+
+**Whether a real `agy` survives its host being SIGKILLed is still a citation, not a measurement.**
+`main.py` measured the shape on the other engine — a Claude CLI reparented to init and still running 38
+seconds later — and the same argument is made here for `agy`. It was not confirmed: `agy` is installed
+on this machine but **not authenticated** (`Error: authentication required. Run 'agy' to log in`), so a
+session never reaches its `init` frame from here and there is no child to orphan. The specific unknown
+is whether `agy` exits promptly when its stdin pipe closes.
+
+**The two-pid rule does not depend on the answer**, which is the reason this is a residue rather than a
+blocker: if `agy` exits on EOF the entry becomes a corpse and the next sweep collects it, and if it
+lingers the entry stands and its calls are denied. Both branches are the intended behaviour. What an
+authenticated machine would add is the *distribution* — how long an orphan lives — which is the same
+measurement residue 1 wants for the race window.
+
+### The tests
+
+Twenty-four offline — 21 in `tests/test_agy_gate.py`, two in `tests/test_agy_gate_server.py`, one in
+`tests/test_agy_session.py` — and the pid in them is real: a subprocess run and reaped, so the probe is
+exercised rather than monkeypatched. The decision table — corpse is not ours, orphan still denies, live
+host with a dead `agy` still owns it, no `agy_pid` keeps the old behaviour — plus `owns_anything` no
+longer counting a corpse and still counting a half-written entry (a claim in flight is a session
+starting, not a corpse), the sweep sparing another host's live claim and an unreadable file, and the
+wiring: `AgyGateServer.claim` records what it is given, `AgySession` gives it the pid it spawned.
+
+One is about the platform rather than a behaviour: it monkeypatches `os.name` to `nt`, replaces
+`os.kill` with something that raises, and asserts the answer is still "alive". A liveness check that
+kills what it asks about would pass every other test in the file.
+
+### And the incidental finding beside it, which was not incidental
+
+The same risk entry recorded the cgroup probe reading the installed gate as `stale` on a machine where
+it worked, filed as a wrong label. It is not a label: **`AgyService.connect` returns
+`gate_not_installed` on a stale state and `AgyConsultant.available` goes false**, so the whole engine
+refuses to start and `second_opinion` disappears — because `.venv/bin/python3` in the file and
+`.venv/bin/python` from `sys.executable` are two spellings of one interpreter.
+
+`_same_command` compares every token exactly and the first one as a file. **The near-miss is the part
+worth keeping:** the obvious fix is to resolve both paths and compare targets, and that is wrong.
+A venv's `bin/python` is usually a symlink to the system interpreter, so `.venv-a/bin/python` and
+`.venv-b/bin/python` resolve to the same file while selecting different environments — a virtualenv is
+chosen by the path used to invoke it, `pyvenv.cfg` beside that path. Resolving would have reported
+another checkout's gate as ours, which is the failure this whole module exists to prevent, arrived at
+by fixing a cosmetic bug. The test is *same directory, same file within it*.
+
+Measured with the pair that caused it, on this machine: `.venv/bin/python3` and `.venv/bin/python` read
+`current`, `/usr/bin/python3` still reads `stale`. Four tests, including the two-venvs-one-binary case
+and an unbalanced quote in a hand-edited entry reading `stale` rather than raising.

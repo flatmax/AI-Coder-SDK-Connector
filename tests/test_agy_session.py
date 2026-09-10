@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
 import textwrap
 from pathlib import Path
@@ -133,6 +134,29 @@ class TestTheHandshake:
         claimed = asyncio.run(go())
         assert claimed is not None
         assert claimed["socket"].endswith("g.sock")
+
+    def test_the_claim_records_the_agy_process_that_was_spawned(self, wired):
+        """What makes the claim outlive this host without lying about it.
+
+        A registry entry is a file, and a killed host leaves it behind. The
+        host pid alone cannot say whether anything is still running, because
+        ``agy`` is our *child* and a child survives a killed parent — so the
+        child's pid goes in the entry too, and only both being gone makes it
+        a corpse (AG-R-14 residue 3).
+        """
+        session, _server, config_dir, _events = wired
+
+        async def go():
+            await session.start()
+            claimed = registry.lookup(CONV, config_dir=config_dir)
+            spawned = session._proc.pid
+            await session.close()
+            return claimed, spawned
+
+        claimed, spawned = asyncio.run(go())
+        assert claimed["agy_pid"] == spawned
+        assert claimed["pid"] == os.getpid()
+        assert registry.entry_is_live(claimed) is True
 
     def test_close_releases_the_claim(self, wired):
         session, _server, config_dir, _events = wired

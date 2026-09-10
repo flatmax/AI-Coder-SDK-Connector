@@ -1,5 +1,21 @@
 # Second Engine — Google Antigravity alongside Claude Code
 
+**Status (2026-09-10):** **the third of [AG-R-14](risks.md#ag-r-14)'s residues is closed — the `pid`
+the registry had always written is finally read.** A killed host left an entry no reader could tell
+from a live claim, and both costs fell on the *user's* own sessions rather than ours: one unclean exit
+made `owns_anything` permanently true, so every unparseable payload from their own `agy` was denied
+from then on, and a leftover claim intercepts a conversation they later resume — the interception
+[AG-R-12](risks.md#ag-r-12) exists to prevent, arriving by a route no care in `stop()` can close.
+**Reading one pid would have been the wrong fix:** `agy` is a child of this host and a child outlives a
+killed parent, so a dead host with a live `agy` is an *orphaned agent*, and waving it through is the
+unreviewed write this transport has no second check for. So the entry carries the `agy_pid` too and
+liveness is an **or** — either alive and the entry stands, both gone and it is a corpse, which reads as
+not ours and is swept at the next `AgyGateServer.start`. 24 tests, on a pid that is really dead rather
+than monkeypatched. **The two remaining residues are the spawn-to-announce race and nested delegation,
+and this is the one they were told to wait behind** — a tentative hold makes the hook poll a claim
+instead of passing it through, which turns a dead host's leftover from an annoyance into a block. See
+[`delivery.md` § The pid that was written and never read](delivery.md#the-pid-that-was-written-and-never-read-2026-09-10).
+
 **Status (2026-09-09):** **a subagent's tool calls were never reaching the permission gate, and now
 they are** ([AG-R-14](risks.md#ag-r-14)). The hook routes by conversation id and passes through
 whatever nobody has claimed — the property that keeps a stranger's `agy` session out of our dialog —

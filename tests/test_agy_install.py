@@ -105,6 +105,65 @@ class TestDetection:
         assert "/somewhere/else/python" in report["command"]
         assert report["expected"] != report["command"]
 
+    def test_one_interpreter_spelled_two_ways_is_not_stale(
+        self, hooks, cfg, tmp_path
+    ):
+        """The probe of 2026-09-09 read a working gate as ``stale``.
+
+        ``.venv/bin/python3`` in the file and ``.venv/bin/python`` from
+        ``sys.executable`` are one program, and calling them two refuses to
+        start the engine: ``connect`` answers ``gate_not_installed`` and the
+        consultant reports itself unavailable.
+        """
+        venv = tmp_path / "venv" / "bin"
+        venv.mkdir(parents=True)
+        real = venv / "python3"
+        real.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        real.chmod(0o755)
+        alias = venv / "python"
+        alias.symlink_to(real)
+
+        _write_entry(hooks, install.hook_command(cfg, str(real)))
+        assert install.status(cfg, path=hooks, python=str(alias))["state"] == "current"
+
+    def test_two_virtualenvs_are_stale_even_sharing_one_binary(
+        self, hooks, cfg, tmp_path
+    ):
+        """Which is why the resolved target is not the test.
+
+        A venv's ``bin/python`` is usually a symlink to the system
+        interpreter, so following the link would call two checkouts' gates
+        equal and report somebody else's install as ours. The comparison is
+        *same directory, same file within it* — one interpreter spelled two
+        ways, and nothing wider.
+        """
+        system = tmp_path / "python3"
+        system.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        system.chmod(0o755)
+        ours, theirs = tmp_path / "a" / "bin", tmp_path / "b" / "bin"
+        for where in (ours, theirs):
+            where.mkdir(parents=True)
+            (where / "python").symlink_to(system)
+
+        _write_entry(hooks, install.hook_command(cfg, str(theirs / "python")))
+        report = install.status(cfg, path=hooks, python=str(ours / "python"))
+        assert report["state"] == "stale"
+
+    def test_a_different_config_directory_is_still_stale(self, hooks, cfg, tmp_path):
+        """Only the interpreter is compared loosely; every other token is not.
+
+        The command names the config dir the hook must read the registry
+        from, and an entry naming another one would gate a different
+        registry — the same interpreter is not the same install.
+        """
+        _write_entry(hooks, install.hook_command(tmp_path / "other-cfg"))
+        assert install.status(cfg, path=hooks)["state"] == "stale"
+
+    def test_an_unbalanced_quote_reads_as_stale(self, hooks, cfg):
+        """Hand-edited and unparseable, so it is not claimed as ours."""
+        _write_entry(hooks, "'/usr/bin/python -m aic_dc.agy.hook /cfg")
+        assert install.status(cfg, path=hooks)["state"] == "stale"
+
     def test_unreadable_is_reported_rather_than_guessed(self, hooks, cfg):
         hooks.write_text("{ this is not json", encoding="utf-8")
         report = install.status(cfg, path=hooks)

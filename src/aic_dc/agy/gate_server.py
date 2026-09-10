@@ -236,11 +236,18 @@ class AgyGateServer:
         # the failure is at session start where it reads as "the engine
         # will not run" rather than as stale state.
         self._socket_path.unlink(missing_ok=True)
+        # The registry entries that same killed process left behind are the
+        # same problem one layer up, and worth sweeping from here for the
+        # same reason: this is the moment a host exists again to do it, and
+        # a corpse entry costs the *user's* own sessions rather than ours
+        # (`registry.owns_anything`). Only corpses go — a second host on
+        # this machine has live entries in the same directory.
+        registry.reap_stale(self._config_dir)
         self._server = await asyncio.start_unix_server(
             self._handle, path=str(self._socket_path)
         )
 
-    def claim(self, conversation_id: str) -> None:
+    def claim(self, conversation_id: str, *, agy_pid: int | None = None) -> None:
         """Take ownership of a conversation, so the hook stops passing it through.
 
         Called between ``init`` and the first prompt, which is the only
@@ -255,11 +262,20 @@ class AgyGateServer:
         conversation nobody has claimed, so a subagent's every tool call
         went ungated past a dialog the user had approved only the *spawn*
         through. Measured by ``scripts/probe_agy_subagent_gate.py``.
+
+        ``agy_pid`` is the process this conversation runs in, recorded so a
+        later reader can tell an entry this host abandoned from one whose
+        agent is still running without it. The caller supplies it because
+        this class never spawns anything — see
+        :func:`aic_dc.agy.registry.entry_is_live`.
         """
         if not conversation_id:
             return
         registry.claim(
-            conversation_id, self._socket_path, config_dir=self._config_dir
+            conversation_id,
+            self._socket_path,
+            config_dir=self._config_dir,
+            agy_pid=agy_pid,
         )
         self._claimed.add(conversation_id)
 
