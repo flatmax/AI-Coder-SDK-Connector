@@ -6,7 +6,7 @@ rather than from documentation, blog posts or recollection. Verified **2026-08-3
 | What | Version | Where it was read |
 |---|---|---|
 | `google-antigravity` | **0.1.15** when this was written; **0.1.16** installed since 2026-09-03 — *Development Status :: 3 - Alpha*, Apache-2.0 | `.venv/lib/python3.14/site-packages/google/antigravity/`, `google_antigravity-0.1.15.dist-info/METADATA` |
-| `agy` CLI | **1.1.22** (`agy --version`; released 2026-08-27), 208,429,312 bytes, stripped ELF. **Re-probed at 1.1.25 on 2026-09-03** for its hook surface — see [§ The `agy` hook surface](#the-agy-hook-surface--measured-2026-09-03). **1.1.26 installed since 2026-09-05**, which is what phase 8's live gate, write and isolation runs were driven against; nothing in this file was contradicted by that bump except as noted under the write-diversion amendment below | `~/.local/bin/agy` |
+| `agy` CLI | **1.1.22** (`agy --version`; released 2026-08-27), 208,429,312 bytes, stripped ELF. **Re-probed at 1.1.25 on 2026-09-03** for its hook surface — see [§ The `agy` hook surface](#the-agy-hook-surface--measured-2026-09-03). **1.1.26 installed since 2026-09-05**, which is what phase 8's live gate, write and isolation runs were driven against; nothing in this file was contradicted by that bump except as noted under the write-diversion amendment below. **1.2.0 installed 2026-09-10** — 212,304,128 bytes, self-updated at 17:26 local, *after* that day's subagent-transcript and registry work was measured — and **nothing in this file has been re-read against it.** Its flag surface has grown four options and two subcommands this file has never covered: `--sandbox`, `--effort`, `--mode`, `--json-schema`, `mic-serve`, and `remote-control`, which is the flag [§ *Not an entry point*](#not-an-entry-point---remote-control) describes now promoted to a subcommand. [AG-R-2](risks.md#ag-r-2) is written about the wheel and applies to the binary in the same words — an alpha breaks by renaming, not by erroring — and this transport has no `unclassified` bucket to fire when it does | `~/.local/bin/agy` |
 | `claude-agent-sdk` (for comparison) | 0.2.137 | `.venv/lib/python3.14/site-packages/claude_agent_sdk/` |
 
 > **Do not re-derive this by guessing.** The SDK is at 0.1.x and alpha; it will move faster than
@@ -561,6 +561,38 @@ server, which answer `400`/`404` to anything else. **There is no way to attach t
 session**, and that is architectural rather than a missing flag.
 
 ---
+
+## The `agy` process, measured rather than reasoned about — 2026-09-10
+
+Three facts about the process rather than the protocol, each of which a piece of shipped code
+depends on and none of which had been checked. `scripts/probe_agy_orphan.py` is the instrument; the
+consequences are in [`risks.md` AG-R-14](risks.md#ag-r-14).
+
+- **`systemd-run --user --scope` execs, so the pid is preserved.** `AgySession` records
+  `self._proc.pid`, and under [AG-18](decisions.md#ag-18) the program it spawns is `systemd-run`.
+  Measured: the recorded pid's `comm` is **`agy`** and its cgroup is
+  `/user.slice/user-1000.slice/user@1000.service/app.slice/aic-dc-<hex>.scope`. So one process enters
+  the scope and becomes `agy` — the registry's `agy_pid` names the agent, and the hook's
+  `/proc/self/cgroup` read has something to match.
+- **`agy` exits on stdin EOF, in ~0.3 s.** Closing the pipe with the host still alive ended the
+  process in **0.30 s**. This is what makes `AgySession.close()` cheap and it is why an abandoned
+  `agy` does not linger.
+- **It outlives a SIGKILLed host by under a second.** Three runs: alive and reparented to the user's
+  `systemd` 200 ms after the kill, gone at **0.60 s, 0.80 s, 0.80 s**. The orphan is real — which is
+  the case the two-pid rule exists for — and the 38-second figure this had been cited against is the
+  *Claude* CLI's, measured in `main.py`. Two different programs, two different reactions to a closed
+  pipe.
+
+### The tool table is behind the binary again — 1.2.0 (2026-09-10)
+
+Driving a real turn on 1.2.0 raised a permission dialog for **`schedule`** and for
+**`send_message`**, neither of which is in `src/aic_dc/agy/tools.py`'s `TOOL_CLASSES`. An unclassified
+name falls to `GATED_BY_DEFAULT.get(None, True)`, so the user is asked to approve a planning step that
+touches nothing, and a subagent reporting back to its parent. That is phase 4's *"every read-only call
+raises a modal"* arriving through the half of its fix that is a **table**: `pre_verdict` consults a
+classification, and a classification only knows the names somebody wrote down. The 57-tool inventory
+in this file was read at 1.1.2x; nothing has re-read it at 1.2.0, and this is
+[AG-R-2](risks.md#ag-r-2) in the binary rather than in the wheel.
 
 ## The `agy` transcript store, read whole — measured 2026-09-10
 

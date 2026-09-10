@@ -971,12 +971,41 @@ routing.
   **Three limits are stated rather than solved**, in
   [`delivery.md`](delivery.md#the-pid-that-was-written-and-never-read-2026-09-10): no liveness probe on
   Windows (`os.kill(pid, 0)` is `TerminateProcess` there, so a probe would kill what it asks about —
-  the answer is "alive" and that platform keeps the old behaviour), a recycled pid reading as alive, and
-  an entry with no `agy_pid` never being a corpse. **And one thing unmeasured:** whether a real `agy`
-  outlives a SIGKILLed host is cited from `main.py`'s measurement of the *other* engine's CLI, not
-  measured here — `agy` on this machine is installed but not authenticated, so no session reaches
-  `init` and there is no child to orphan. The rule does not depend on the answer: an `agy` that exits on
-  stdin EOF makes the entry a corpse for the sweep, one that lingers keeps it standing and denying.
+  the answer is "alive" and that platform keeps the old behaviour), a recycled pid reading as alive,
+  and an entry with no `agy_pid` never being a corpse. ~~**And one thing unmeasured:** whether a real
+  `agy` outlives a SIGKILLed host is cited from `main.py`'s measurement of the *other* engine's CLI,
+  not measured here — `agy` on this machine is installed but not authenticated.~~
+
+  **Measured 2026-09-10, later.** `scripts/probe_agy_orphan.py` kills a host it spawned and watches.
+  `agy` **does** outlive it — all three runs, reparented to the user's `systemd`, still there 200 ms
+  later — and it is gone in **0.60 s, 0.80 s, 0.80 s**. The mechanism is stdin EOF, isolated
+  separately: with the host *alive*, closing the pipe alone ended `agy` in **0.30 s**. So the orphan is
+  real and its window is sub-second, where the citation borrowed from the Claude CLI was 38 seconds —
+  the *direction* transfers between the two engines and the magnitude does not. The decision table ran
+  end to end on pids that were really dead: live → orphan → corpse, then `reap_stale` collecting the
+  conversation entry and its scope entry together. (The same run also settled that the recorded
+  `agy_pid` is `agy`'s own: `systemd-run --user --scope` execs, so the pid is preserved and the
+  process is inside `…/app.slice/aic-dc-<hex>.scope`.)
+
+  **The third limit is what that run found sitting on this machine: eight entries, every host dead,
+  every one reading `live`, and `owns_anything()` permanently `True`.** All eight predate the two-pid
+  fix, so none carries an `agy_pid`, and `process_alive(None)` answers `True` because the question
+  cannot be asked. This is the grandfather clause working exactly as written and reproducing the exact
+  defect the fix was for — the paragraph above, *"one unclean exit made every junk payload from the
+  user's own `agy` deny from then on"* — for every entry written before it, which on a machine that
+  ran the older version is all of them. The fix ended the defect for the population that does not have
+  it yet.
+
+  **The recommendation, and why it is safe now when it was not.** The clause exists so as not to guess
+  about an `agy` that might still be running under a host we can no longer ask about. That agent's
+  lifetime is measured now: under a second past its host. An entry with a dead host and no `agy_pid`
+  was written by a version older than this rule and names a process that ended long ago by any clock
+  this system has, so treating it as a corpse is the same claim the two-pid rule already makes, with
+  elapsed time doing the work the missing pid would have done. **Deliberately not folded into the
+  sitting that found it**: it changes what the gate answers, and this entry has already had to
+  withdraw one recommendation of that kind. **Tripwire:** `owns_anything()` answering true on a machine
+  with no live `agy` session — which is what a reader should check before believing the fix above is in
+  force on their own install.
 
 **Two of the three were named by the consultant** (`second_opinion`, 2026-09-09) rather than by the
 author of the fix, which is the first time this feature has been used on this repository's own work

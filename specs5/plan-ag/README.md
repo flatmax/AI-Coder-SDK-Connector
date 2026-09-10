@@ -1,5 +1,32 @@
 # Second Engine — Google Antigravity alongside Claude Code
 
+**Status (2026-09-10, latest):** **the two things this directory was carrying as owed are measured,
+and each corrected the entry that owed it.** The subagent tab has now been opened in a browser on a
+live `agy` turn — `scripts/probe_agy_subagent_tab.py`, ten checks, all passing: the descriptor read
+over the browser's own RPC, a delegation announced, a row with **no Stop button** because this
+transport has no halt frame, and the tab filling with **three tool cards off `agy`'s own store**
+(`view_file`, `view_file`, `send_message`, each marked *gated*). Its negative control is the
+containment gate over the wire — another real conversation on this machine refused by id, one line
+away from this session's own subagent answering — which had only ever been shown in process. So the
+one string this feature rests on, the browser's session id *being* the conversation id `agy` names
+its store by, is now demonstrated rather than argued. **And an `agy` orphan is real but sub-second:**
+`scripts/probe_agy_orphan.py` SIGKILLs a host and finds `agy` reparented and alive 200 ms later, gone
+at **0.60 s, 0.80 s, 0.80 s**, because it exits on stdin EOF — isolated at **0.30 s** with the host
+still alive. The 38-second figure this was cited from is the *other* engine's CLI: the direction
+transfers, the number does not. The same run put the two-pid table through live → orphan → corpse →
+reaped on pids that were really dead, and settled that `systemd-run --scope` execs, so the recorded
+`agy_pid` is `agy`'s own. **Three findings came with the sitting and none is fixed here.** Eight
+registry entries on this machine name dead hosts, carry no `agy_pid`, read `live` for ever and hold
+`owns_anything()` true — the grandfather clause reproducing the defect the two-pid fix was written to
+end, now safe to close because the orphan's lifetime is known ([AG-R-14](risks.md#ag-r-14)).
+`schedule` and `send_message` are absent from `agy/tools.py`'s `TOOL_CLASSES`, so an ordinary turn
+raises a dialog for a planning step that touches nothing. And the usage HUD titles an Antigravity
+session *"Claude Code"*, because `_modelLabel` falls back to that literal where this engine reports
+neither turn models nor context. The sitting also cost two instrument defects — a Deny button that
+only opened the reason row, and an unreaped zombie that inverted the first orphan reading — both the
+same lesson as AG-R-11's *assert on the file, not on the hook having fired*. See
+[`delivery.md` § The round trip, watched](delivery.md#the-round-trip-watched--and-what-the-browser-and-the-kernel-each-corrected-2026-09-10-later).
+
 **Status (2026-09-10, latest):** **the `pid` the registry had always written is finally read — and
 reading *one* would have been the wrong fix.** A killed host left an entry no reader could tell from a
 live claim, and both costs fell on the *user's* own sessions rather than ours: one unclean exit made
@@ -50,7 +77,8 @@ an unreadable-transcript notice, and Stop draws only on `live && task_id && supp
 66 new tests; 4,804 Python and 4,484 webapp green. The one string the whole feature rests on — the
 session id the browser holds *being* the conversation id `agy` names its own store by — is followed
 link by link off disk rather than assumed, and the containment gate is shown refusing another real
-conversation on this machine; what is **still owed** is the tab opened in a browser on a live turn. See
+conversation on this machine; ~~what is **still owed** is the tab opened in a browser on a live turn~~ —
+**owed for one day, and closed the same day by the status at the top of this file.** See
 [`delivery.md` § What a subagent did](delivery.md#what-a-subagent-did-read-off-agys-own-disk--and-the-pairing-rule-121-transcripts-overturned-2026-09-10)
 and [`sdk-surface.md` § The `agy` transcript store](sdk-surface.md#the-agy-transcript-store-read-whole--measured-2026-09-10).
 

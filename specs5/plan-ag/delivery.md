@@ -4822,6 +4822,8 @@ on this machine but **not authenticated** (`Error: authentication required. Run 
 session never reaches its `init` frame from here and there is no child to orphan. The specific unknown
 is whether `agy` exits promptly when its stdin pipe closes.
 
+**Corrected the same day, later: this machine can run `agy` after all.** The paragraph above reads the authentication error as a standing property of the machine, and it is not one — on 1.2.0, `agy models` fetched the live model list and `agy -p` returned its answer and exited 0 from a throwaway directory. What the error *was* a property of is unknown and is not guessed at here; the binary self-updated at 17:26 local, which is a candidate and not a measurement. **The consequence is scheduling rather than correctness.** The two-pid rule still does not depend on the answer, but the distribution this section wants — how long an orphan lives, and the sibling window [AG-R-14](risks.md#ag-r-14) residue 1 wants — is no longer blocked on hardware or credentials. Nothing in that direction has been run: what changed is only that it can be.
+
 **The two-pid rule does not depend on the answer**, which is the reason this is a residue rather than a
 blocker: if `agy` exits on EOF the entry becomes a corpse and the next sweep collects it, and if it
 lingers the entry stands and its calls are denied. Both branches are the intended behaviour. What an
@@ -4864,3 +4866,138 @@ by fixing a cosmetic bug. The test is *same directory, same file within it*.
 Measured with the pair that caused it, on this machine: `.venv/bin/python3` and `.venv/bin/python` read
 `current`, `/usr/bin/python3` still reads `stale`. Eight tests, including the two-venvs-one-binary case
 and an unbalanced quote in a hand-edited entry reading `stale` rather than raising.
+---
+
+## The round trip, watched — and what the browser and the kernel each corrected (2026-09-10, later)
+
+Two things this directory was carrying as owed, taken in one sitting because both need a live `agy`
+and the day's other work had just established that this machine has one. The first was named in the
+entry above it: *"nobody has opened the tab in a browser on a live `agy` turn."* The second was
+[§ What was not measured, and why](#what-was-not-measured-and-why) — whether a real `agy` outlives a
+SIGKILLed host, which had been argued from the other engine rather than measured here.
+
+**Both are now measured, and neither came back the way it was written.** The tab works end to end and
+the round trip is watched. The orphan exists — and lives for **under a second**, where the citation
+it was borrowed from was 38.
+
+### The tab, in a browser, on a live turn
+
+`scripts/probe_agy_subagent_tab.py`, ten checks, all passing on one delegation against the paid
+subscription. It starts a real server on a throwaway repository inside a trusted workspace, switches
+the engine through `switch_engine` the way the notice does, sends a prompt asking for a delegation,
+answers the dialogs it raises, and then **clicks the subagent's tab** and reads what arrives.
+
+The chain it closes is the one the entry above could not: the session id the browser holds being the
+conversation id `agy` names its own store by. That was followed link by link off disk and is now
+followed through the wire — the tab drew **three tool cards** (`view_file`, `view_file`,
+`send_message`), each marked *gated*, over the subagent's own prompt and closing sentence, from a
+store the browser never touches. Screenshot in `.aic-dc/live-probe/agy-subagent-tab.png`.
+
+Two of the checks are the guards `bb9846a1` shipped, and this is the first time either has been seen
+rendering rather than asserted:
+
+- The descriptor **as the browser reads it** answers `subagent_transcripts: supported` and
+  `subagent_stop: unbuilt` on this engine, read over the same RPC `engine-capabilities.js` uses.
+- The row in Main carries **no Stop button**. `agy` has no halt frame, so a button there would send a
+  call the router refuses.
+
+**The negative control is the containment gate, over the wire.** A real conversation on this machine
+that this session never announced is refused — *"01dab20c… is not a subagent of this conversation, so
+there is no transcript here to read"* — while the session's own subagent answers two messages, from
+the same browser, one line apart. In-process that pair was shown on the day the reader was built;
+what it had not been shown through is the RPC, which is the only route a request shaped like an
+attack would take.
+
+**What it does not cover.** Headless Chrome, so this is layout and script rather than a human's
+screen; one turn, one subagent, one delegation depth. The `⏹` half stays unbuilt and unmeasured, and
+a *nested* delegation — a subagent's own subagent — was not asked for.
+
+### The orphan is real, and it is sub-second
+
+`scripts/probe_agy_orphan.py` starts a host in a child process, brings a real `AgySession` to its
+`init` frame, SIGKILLs the host, and watches. Three runs, plus a fourth scenario that isolates the
+mechanism. It takes no model turn: it reaches `init` and stops.
+
+| What was asked | What was measured |
+|---|---|
+| Is the registry's `agy_pid` really `agy`'s? | **Yes.** `comm` is `agy` and the cgroup is `/user.slice/…/app.slice/aic-dc-<hex>.scope`, so `systemd-run --user --scope` **execs** rather than staying as a parent: the pid is preserved and the scope really applied. The two-pid rule is about `agy` because that pid *is* `agy`. |
+| Does `agy` survive its host being SIGKILLed? | **Yes**, all three runs. Reparented to the user's `systemd` at ppid 6583, still alive 200 ms later, with the registry reading the entry live — which is the orphan the rule exists to keep denying. |
+| For how long? | **0.60 s, 0.80 s, 0.80 s.** |
+| Why does it go? | **Its stdin closes.** With the host *alive*, closing the pipe alone ended `agy` in **0.30 s** — so the kill case is the same path plus the time to notice. |
+| Does the decision table hold on real dead pids? | **Yes.** live → orphan → corpse, and `reap_stale` then collected both the conversation entry and its scope entry, in each run. |
+
+**The citation it replaces was two orders of magnitude out.** `main.py` measured a Claude CLI
+reparented to init and still running 38 seconds later, and the same argument was made here. The
+*direction* transfers — our child does outlive a killed parent — and the *number* does not, because
+these are different programs with different reactions to EOF. An `agy` orphan is a sub-second window,
+not a condition a user would ever sit in.
+
+That is worth stating precisely, because it is the answer to "how long does a killed server leave a
+stale gate behind": **on Linux with a scope, under a second**, and then the next sweep collects it.
+
+### The finding underneath it, which is the same defect this rule was written to end
+
+Reading the registry on this machine after the runs: **eight entries, every one naming a host that is
+dead, every one reading `live`, and `owns_anything()` permanently `True`.**
+
+They are all pre-`f598638e` entries, so none carries an `agy_pid`, and
+[§ The pid that was written and never read](#the-pid-that-was-written-and-never-read-2026-09-10)
+states the rule that keeps them: *"An entry with no `agy_pid` … is never a corpse. The upgrade path is
+'keep the old behaviour', not 'guess'."* `process_alive(None)` answers `True` because the question
+cannot be asked, so `entry_is_live` is `True` for ever.
+
+**That is the intended behaviour producing exactly the defect the commit was written to fix.** Its own
+account of the cost: *"One unclean exit of ours therefore made 'we own something' permanently true,
+and from then on every unparseable payload from the user's own `agy` was denied."* The fix ended that
+for entries written after it and grandfathered the entire population that already had it — which, on
+the machine this was developed on, is all of them.
+
+**And today's measurement retires the caution that made the grandfather clause look safe.** It was
+written not to guess about an `agy` that might still be running under a host we can no longer ask
+about. That agent's lifetime is now known: it is under a second past its host. An entry whose host is
+gone, and which was written by a version that predates this file, describes a process that ended long
+ago by any measure this system can take. Recorded rather than fixed here, with the recommendation, in
+[`risks.md` AG-R-14](risks.md#ag-r-14) — the change touches what the gate answers, which is not a
+thing to slip into a verification sitting.
+
+### Two more, found by driving the app rather than by reading it
+
+**`schedule` and `send_message` raise a permission dialog on an ordinary `agy` turn.** Neither is in
+`agy/tools.py`'s `TOOL_CLASSES`, so `GATED_BY_DEFAULT.get(None, True)` gates them, and the user meets
+a modal for a planning step that touches nothing and for a subagent reporting back to its parent.
+This is phase 4's second defect — *"every read-only call raises a modal"* — arriving again through the
+half of its fix that is a table: `pre_verdict` consults a classification, and a classification only
+covers the names somebody wrote down. `agy` is at **1.2.0** here and the table was built against
+1.1.2x, which is [AG-R-2](risks.md#ag-r-2) in the transport rather than in the wheel.
+
+**The usage HUD titles an Antigravity session *"Claude Code"*.** `usage-hud.js::_modelLabel` falls
+back to that literal string when there are no turn models and no context model, and on this engine
+there are neither — both are `absent` in the descriptor, by decision. So every Antigravity session
+names the wrong product in its own HUD. It is not [AG-R-4](risks.md#ag-r-4) — nothing branches on an
+engine name — it is the shape underneath it: a default written when there was one engine, which now
+asserts which engine is answering. Visible in one frame of the screenshot above, invisible to 4,829
+green tests, and pinned by one of them (`usage-hud.test.js:840`).
+
+### The two instrument defects the sitting cost, and both are the same lesson
+
+**The deny button does not deny.** `answer_permission` clicked `button[data-decision="deny"]` and
+moved on; that button calls `_openDeny`, which opens the reason row, and the request is only answered
+by *Send denial* beside the field. So the first run clicked Deny, saw the same request still on
+screen, and clicked again — **26,417 times**, which read in the log exactly like an agent retrying a
+refused tool in a loop. It was not the agent. The harness now performs both halves of the gesture and
+then **waits for the request's own `permission_id` to leave the dialog**, so "the click did nothing"
+is a named failure rather than a spin.
+
+**A zombie reads as alive, and it inverted the first orphan reading.** The probe SIGKILLed a host it
+had spawned and never called `wait` on it, so the host stayed in `/proc` as a zombie; `os.kill(pid, 0)`
+succeeds on one. The registry then reported a live claim over two dead processes, and — worse — the
+30-second wait for the host to disappear ran to its ceiling, so the sample labelled *"200 ms after the
+kill"* was taken **thirty seconds** after it and reported `agy` as already gone. Both conclusions were
+wrong and the second was wrong in the interesting direction: it said there is no orphan, which is what
+the sitting was there to find out. Reaping the host inverts it, and the numbers above are from the
+reaped runs. `registry.process_alive` documents the zombie case and calls it a delay that "never
+inverts" a reap — true of that function, and not true of a caller that waits on the same pid.
+
+Both are the rule this directory keeps relearning: **assert on the thing, not on the gesture.**
+AG-R-11's *"assert on the file, not on the hook having fired"* is the same sentence about a different
+noun, and it is now recorded three times because it has been learned three times.

@@ -620,6 +620,198 @@ def wait_for_turn(page: Page, *, timeout: float = 300.0, poll: float = 1.0) -> d
 
 
 # ---------------------------------------------------------------------------
+# Answering the permission dialog
+# ---------------------------------------------------------------------------
+#
+# `wait_for_turn` above aborts on a dialog, and that stays the default: a probe
+# that stops at a gate it did not expect has found something, and answering it
+# silently would hide it. What follows is the opt-in for probes whose subject
+# is on the far side of one — a delegation on the `agy` transport is gated by
+# AG-5 and there is no posture that ungates it without also ungating the writes
+# the dialog exists for.
+#
+# The button is clicked rather than `_decide` being called, for the same reason
+# `send_turn` types into the composer: the settling interval, the disabled
+# state and the queue are all part of what a user meets, and a probe that
+# reached past them would be asserting about a code path nobody uses.
+
+DIALOG_JS = r"""
+(() => {
+  const walk = (root, depth) => {
+    if (!root || depth > 8 || !root.querySelectorAll) return null;
+    const hit = root.querySelector('aic-permission-dialog');
+    if (hit) return hit;
+    for (const el of root.querySelectorAll('*')) {
+      if (el.shadowRoot) {
+        const r = walk(el.shadowRoot, depth + 1);
+        if (r) return r;
+      }
+    }
+    return null;
+  };
+  return walk(document, 0);
+})()
+"""
+
+
+def permission_on_screen(page: Page) -> dict | None:
+    """The request the dialog is showing, or `None` if it is idle.
+
+    Read off `dialog.current` — the queue's own choice of which pending
+    request is in front — rather than off `_entries[0]`, so a probe answers
+    the one the user would be answering.
+    """
+    return page.eval("""
+      (() => {
+        const d = %s;
+        const p = d && d.current;
+        if (!p) return null;
+        return {
+          tool_name: p.tool_name || null,
+          tool_class: p.tool_class || null,
+          permission_id: p.permission_id || null,
+          queued: (d._entries || []).length,
+        };
+      })()
+    """ % DIALOG_JS)
+
+
+def answer_permission(
+    page: Page, action: str = "allow", *, timeout: float = 90.0
+) -> dict:
+    """Answer the dialog on screen the way a user does, and check it landed.
+
+    Two things this does not take on trust, both learned the expensive way.
+
+    **Deny is a two-step gesture.** The `Deny` button opens the reason row —
+    `_openDeny`, not `_decide` — and the request is only answered by the
+    *Send denial* button beside the field. A probe that clicked once and moved
+    on would leave the request pending, see it still on screen, and click
+    again: the first run of `probe_agy_subagent_tab.py` did exactly that
+    26,417 times and read as an agent retrying in a loop. The bug was on this
+    side, and the reason it looked like a finding is that nothing checked
+    whether the answer had been accepted.
+
+    **So the answer is confirmed rather than assumed.** The request's own
+    `permission_id` has to leave the dialog before this returns. That is what
+    turns "the click did nothing" from a hang into a failure with a name.
+
+    Waits out the settling interval rather than forcing past it: every
+    decision button is `disabled` while it runs, and a click on a disabled
+    button is a no-op that looks exactly like one that worked.
+    """
+    if action not in ("allow", "deny"):
+        raise ValueError(f"answer_permission takes allow or deny, not {action!r}")
+    deadline = time.time() + timeout
+    request = None
+    while time.time() < deadline:
+        request = permission_on_screen(page)
+        if request is None:
+            time.sleep(0.3)
+            continue
+        outcome = page.eval("""
+          (() => {
+            const d = %s;
+            if (!d) return 'no dialog';
+            const root = d.shadowRoot;
+            if (!root) return 'no shadow root';
+            const btn = root.querySelector(
+              'button.decision[data-decision=%s]');
+            if (!btn) return 'no button';
+            if (btn.disabled) return 'settling';
+            btn.click();
+            return 'clicked';
+          })()
+        """ % (DIALOG_JS, json.dumps(action)))
+        if outcome == "settling":
+            time.sleep(0.3)
+            continue
+        if outcome != "clicked":
+            raise RuntimeError(f"could not {action} the dialog: {outcome}")
+        if action == "deny":
+            _send_denial(page)
+        _await_answered(page, request.get("permission_id"), action)
+        return request
+    raise RuntimeError(
+        f"no permission dialog to {action} within {timeout:.0f}s "
+        f"(last seen: {request})"
+    )
+
+
+def _send_denial(page: Page, timeout: float = 20.0) -> None:
+    """Click *Send denial*, which is the button that actually denies."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        outcome = page.eval("""
+          (() => {
+            const d = %s;
+            const row = d && d.shadowRoot &&
+              d.shadowRoot.querySelector('.reason-row button.decision');
+            if (!row) return 'no reason row';
+            row.click();
+            return 'sent';
+          })()
+        """ % DIALOG_JS)
+        if outcome == "sent":
+            return
+        time.sleep(0.2)
+    raise RuntimeError("the deny reason row never appeared, so nothing was denied")
+
+
+def _await_answered(page: Page, permission_id, action: str, timeout: float = 30.0) -> None:
+    """Block until the request we answered is no longer the one on screen."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        current = permission_on_screen(page)
+        if current is None or current.get("permission_id") != permission_id:
+            return
+        time.sleep(0.2)
+    raise RuntimeError(
+        f"{action} was clicked and {permission_id} is still pending — the "
+        f"gesture did not answer the request"
+    )
+
+
+def wait_for_turn_answering(
+    page: Page,
+    decide,
+    *,
+    timeout: float = 600.0,
+    poll: float = 1.0,
+) -> tuple[dict, list[tuple[str, str]]]:
+    """`wait_for_turn`, with each dialog answered as it arrives.
+
+    `decide` takes the request and returns `"allow"` or `"deny"`. It is a
+    callback rather than an allowlist because the asymmetry is usually the
+    instrument — `probe_agy_subagent_gate.py` allows the delegation and denies
+    everything else, and that is what makes its file assertion mean anything.
+
+    Returns the turn's `stream-complete` record and the log of what was
+    answered, in order. The log is evidence: a run that asserts on a subagent
+    having done something needs to be able to show it was not denied into
+    doing nothing.
+    """
+    before = len(records(page, "stream-complete"))
+    answered: list[tuple[str, str]] = []
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        done = records(page, "stream-complete")
+        if len(done) > before:
+            return done[-1], answered
+        request = permission_on_screen(page)
+        if request is not None:
+            action = decide(request)
+            answer_permission(page, action)
+            answered.append((request.get("tool_name") or "?", action))
+            print(f"  dialog: {request.get('tool_name')} -> {action}")
+            continue
+        time.sleep(poll)
+    raise RuntimeError(
+        f"no stream-complete within {timeout:.0f}s (answered: {answered})"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Reporting
 # ---------------------------------------------------------------------------
 
