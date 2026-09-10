@@ -1156,3 +1156,51 @@ had.
   account. On a plan without that model, or after a rename, the consultation fails rather than
   silently downgrading — which is the right direction, and is the reason this is a note rather than
   a fallback.
+
+---
+
+## AG-R-16 — A `Stop` hook this app does not own can revive a turn it stopped
+
+**Severity: moderate. Likelihood: latent — the mechanism is documented and shipped; nothing on this
+machine uses it today.**
+
+`agy`'s shipped `hooks.md` (read 2026-09-10; see
+[`sdk-surface.md` § The hook contract is shipped](sdk-surface.md#the-hook-contract-is-shipped-not-inferred--read-2026-09-10))
+documents a `Stop` event that fires when the execution loop terminates, and a handler answering
+
+```json
+{"decision": "continue", "reason": "…"}
+```
+
+**blocks the stop and re-enters the loop**, with `reason` injected as a system message. The same doc
+states that multiple *named* hooks for one event *"are merged and executed sequentially"* — and
+`~/.gemini/config/hooks.json` is a file this app writes one entry into and does not own. A user's own
+`Stop` hook, or one arriving inside a plugin, sits beside `aic-dc-gate` and fires on **this app's**
+conversations too, exactly as `aic-dc-gate` fires on the user's.
+
+The consequence is specific to how ⏹ works here. This transport has no halt frame, so a stop
+*starves* the turn: the gate refuses every subsequent tool call and the agent is expected to wind
+down. A `Stop` hook returning `continue` re-enters the loop the moment the agent tries to finish —
+so a turn the user stopped, and the UI has settled, keeps invoking the model. The gate still refuses
+every tool call, which bounds the damage to spend and to prose rather than to the working tree, and
+that is the reason this is moderate rather than critical.
+
+**Mitigation.** Two, and the first is cheap. Register an `aic-dc-gate` `Stop` handler that returns
+`{}` — the doc says any decision other than `"continue"` allows the stop — so at least one voice in
+the merge is always for stopping; whether that *wins* against a concurrent `"continue"` is
+**unverified and worth a probe before relying on it**. Second, keep the `PreToolUse` refusal armed
+after the stop rather than clearing it at turn end, so a revived loop reaches the tree through a gate
+that is still saying no. `AgyGateServer.release` is called "when a new turn starts, never mid-turn"
+(`src/aic_dc/agy/gate_server.py`), which is already the right shape for this.
+
+**Measured 2026-09-10, which sharpens both the risk and the tripwire.** The `Stop` payload carries a
+`terminationReason`, and the values seen are `NO_TOOL_CALL` for an ordinary end and
+**`TERMINAL_CUSTOM_HOOK`** for a loop ended by a hook — so a host can tell *which* hook ended a turn,
+and [AG-19](decisions.md#ag-19) now depends on that distinction to render a user's stop honestly. It
+follows that the `Stop` handler AG-19 installs is the mitigation this risk asked for, arriving for a
+different reason: this app will be a voice in the merge on every turn rather than only when defending.
+
+**Tripwire.** A conversation whose `result` frame has been delivered and whose tab has settled emits
+a further `step_update`. The stream reader knows both facts and today does not compare them; a
+warning naming the conversation is enough, because the case is a user's hook fighting the stop
+button and the useful thing is to say so rather than to fix it silently.

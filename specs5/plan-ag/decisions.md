@@ -1012,6 +1012,110 @@ opinion. **`sdk` is worth naming explicitly rather than being the fallback only:
 *paid* key may want it, because the SDK consultant pins its model and an opinion whose model moved is
 not a second opinion.
 
+### A consultation cannot be continued, and that was never decided — 2026-09-10
+
+`AgyConsultant._run` is documented as *"Spawn, ask one thing, drain it, and shut down"*, and it is
+exactly that: a fresh :class:`~aic_dc.agy.session.AgySession` per call with **no ``resume``**, closed
+in a ``finally``. So two `second_opinion` calls in one Claude turn are two unrelated conversations,
+and the second one knows nothing about the first.
+
+**Measured, because the question was asked directly.** Two consultations held on 2026-09-10 landed in
+`~/.gemini/antigravity-cli/brain/` as `73489745-…` and `677ad626-…` — separate conversation
+directories, each with its own transcript. Nothing was carried between them under the hood; the
+follow-up worked only because the caller re-pasted twelve hundred words of context by hand.
+
+**Nothing technical prevents continuity.** `AgySession` already takes `resume=<conversation-id>` and
+turns it into `--conversation <id>`, which is how [AG-14](#ag-14)'s engine transport survives a server
+restart; `_conversation_id(frames)` already extracts the id the consultant would need to store. The
+`flock` on `presence/<id>.lock` that serialises turns is not an obstacle either, since consultations
+are sequential and each closes its process before the next begins.
+
+**What it would cost is the reason to think before wiring it.** Three things, and the first is not
+about tokens:
+
+- **A continued consultant stops being independent.** [AG-13](#ag-13) and
+  [AG-R-15](risks.md#ag-r-15) exist to keep a second opinion *second*; a conversation that accumulates
+  this app's framing across turns drifts toward agreeing with it, and agreement produced that way is
+  the manufactured-consent shape [AG-5](#ag-5) and [AG-R-3](risks.md#ag-r-3) are both written against.
+  Containment by `StaticPolicy` is unaffected — a resumed conversation still holds no tools — so this
+  is a question about *rhetoric*, not about safety, which is precisely why it is easy to miss.
+- **Every turn replays the whole conversation** as input tokens, on the account the user pays for.
+- **The caller cannot ask for it.** `second_opinion(question, context)` has no continuity parameter,
+  so wiring resume silently would change what the tool means without the model that calls it knowing.
+
+The honest statement of the current position is that one-shot was inherited from the SDK consultant's
+shape rather than chosen for this one.
+
+### The answer, after asking Antigravity and then measuring it — 2026-09-10
+
+The tentative answer above was an opt-in `continue` argument on the tool. **It was put to the
+consultant itself, which attacked it, and the attack is better than the proposal.**
+
+Its argument: `continue=True` is an attractive nuisance for the *calling* agent. The moment a
+consultant criticises the caller's work, the caller reaches for continuation to argue back — and a
+resumed reviewer concedes, because conceding is what conversational deference does. The caller then
+records "the second opinion approved it" when what happened is that it badgered a reviewer until it
+agreed. That is the manufactured-consent failure with an extra step, and an opt-in flag is exactly
+the wrong shape because the pressure to use it peaks precisely when independence matters most.
+
+**What it proposed instead is stateless re-review, and it costs nothing to adopt because it is
+already what this session did by hand.** A follow-up is assembled as a *fresh* cold start in which
+the prior exchange appears as third-party evidence rather than as the model's own dialogue history:
+
+    [Context: what the reviewer needs]
+    [Prior finding: an earlier reviewer flagged X]
+    [Proposed resolution: we changed Z]
+    [Question: does Z resolve X without introducing a regression?]
+
+A model reading that has no autoregressive obligation to defend the earlier critique and no rapport
+with its author. It is the same information with the deference removed, and it keeps `second_opinion`
+one-shot — so **the decision is that continuation stays unbuilt, deliberately, and this is now a
+choice rather than an inheritance.** What is worth building instead is guidance, in the tool
+description, that a follow-up be framed this way.
+
+**A third argument arrived later, from the binary rather than from either side of the debate.**
+`agy` compacts its own context — `AntigravityCompactionConfig`, `applyCompactionInfo`, and a log line
+about history being *"rewritten"* — and emits nothing on the stream when it does. A long consultation
+thread therefore has its early turns silently replaced by a summary the host never sees, so "the
+reviewer remembers what it said" is not merely undesirable here, it is **untrue in a way nothing can
+audit**. See [`sdk-surface.md` § `agy` compacts its own context](sdk-surface.md#agy-compacts-its-own-context-and-says-nothing-on-the-stream--2026-09-10).
+
+Two caveats kept rather than smoothed over. The consultant's answer to *"are you measurably more
+likely to agree with me if resumed"* was an emphatic yes, and **a model's introspective report about
+its own bias is not evidence** — the architectural conclusion is adopted because it agrees with
+[AG-13](#ag-13) and [AG-R-15](risks.md#ag-r-15) independently, not because the model said so. And the
+same answer confidently got two checkable facts wrong, which is why what follows was measured.
+
+### What was measured, and where the consultant was wrong
+
+- **`--continue` / `-c` is workspace-scoped, not machine-global.** Asked whether a host app could use
+  it, the consultant said *"absolutely not"* — that it scans for the most recently updated
+  conversation and would non-deterministically bind to whatever the user last ran. Measured: from a
+  fresh empty directory `agy --continue -p` **created a new conversation** (`5dd6f60e-…`) rather than
+  joining the machine's most recent one (`55174e75-…`); a second `--continue` in the *same* directory
+  rejoined `5dd6f60e-…`. The conclusion survives its wrong reasoning, and for a sharper reason:
+  this app's working directory is *the user's repository*, which is exactly where the user's own
+  `agy` sessions run. Explicit `--conversation <id>` remains the only correct call.
+- **Full-history replay is real and now has a number.** Those two trivial turns — "Reply with exactly:
+  OK", then "SECOND" — cost **13,558 then 27,322 input tokens**. A resumed consultation pays for its
+  whole history every turn, on the account the user pays for.
+- **`/fork` exists, and it is deliberately closed to us.** The binary carries `commands.forkCommand`,
+  `cortex.ForkRequest`, `checkForkPreconditions`, a `forkedFrom` provenance field, and an
+  `/exa.language_server_pb.LanguageServerService/ForkConversation` RPC — so a fork-per-question from
+  one shared briefing conversation, which would have given shared context without shared drift, is a
+  real primitive. The consultant judged it unreachable and internal. It is reachable — as a
+  first-class slash command — and **`agy` refuses it on this transport with a purpose-written
+  error**:
+
+      /fork is not available in print mode (a one-shot run has no conversation worth forking);
+      pass --disable-slash-commands to send /fork to the model as literal text
+
+  Measured in both `-p` and bidirectional `stream-json`, the latter *after* a completed turn — so the
+  parenthetical is inaccurate about the state and the block is on print mode as a category. Recorded
+  because it closes the design option rather than leaving it open: the better primitive exists and
+  the headless surface does not have it.
+
+
 ### Containment is the whole of the design, and it is not the SDK's
 
 The SDK consultant restricts itself by **enabling** only what a consultation needs — `FINISH`, plus
@@ -1250,6 +1354,36 @@ printing its own `/proc/self/cgroup`:
 
 The last two are precisely the escapes that kill the marker design and its ancestry variant.
 
+### The private config root, re-raised and re-rejected — 2026-09-10
+
+Recorded because it was proposed again the same day, by a consultation that did not know this table
+existed, and because the *measurements* that came with it are new even though the conclusion is not.
+
+`agy` has an undocumented `--gemini_dir <path>` flag — absent from `--help`, present in the binary's
+strings — and it works: `agy models` authenticated against a **fresh empty** directory, and hooks were
+discovered and executed from `<dir>/config/hooks.json`. Two of the objections usually raised against
+an app-owned config root do not survive measurement:
+
+- **Authentication does not break.** It authenticated from an empty directory even with
+  `DBUS_SESSION_BUS_ADDRESS=""`. Held as measured-on-one-machine, not as universal.
+- **Workspace trust is not an unknowable schema.** It is `trustedWorkspaces`, a plain list of absolute
+  paths, in `<gemini_dir>/antigravity-cli/settings.json` — a file with exactly three top-level keys
+  (`model`, `permissions`, `trustedWorkspaces`). Seeding it is one list entry.
+
+And the alternative that would make the flag unnecessary is confirmed dead at 1.2.0: identical probe
+hooks placed at `.agents/hooks.json`, `.gemini/config/hooks.json` and `.gemini/hooks.json` inside a
+git repo **never fired** under a headless run, and did not fire when the workspace was added to
+`trustedWorkspaces` either. `sdk-surface.md`'s 1.1.25 finding stands unchanged three releases later.
+
+**None of that touches the objection in the table above, which is the one that decides it.** A private
+config root means the hook *exists only for processes launched with the flag*, and the flag travels by
+argv. The two cases [AG-R-14](risks.md#ag-r-14) exists for — a subagent whose first call beats its own
+announcement, and a grandchild announced to nobody — are exactly the processes that may not carry it,
+and a shell-spawned `agy` inherits neither argv nor environment. The global hook plus kernel-enforced
+cgroup identity fires for *everything* and then decides; a private root does not fire at all for what
+escapes it, and cannot know it did not. **Ungated and undetectable is worse than gated and
+passed-through**, which is the whole reason identity moved to the kernel rather than to a config path.
+
 ### The three properties this turns on
 
 - **The registration precedes the thing it describes.** `AgyGateServer.start` publishes the unit → socket
@@ -1296,3 +1430,67 @@ the parent and the subagent**: all eight tool calls still reached the dialog, th
 included, and the deny still left the target file byte-identical. Conversation claims were inert and
 cgroup identity carried the load alone. A mechanism that is only ever measured with its predecessor
 running is a mechanism whose contribution has not been measured.
+
+---
+
+## AG-19 — The stop is a mechanism, not a request **(measured)**
+
+**Decided 2026-09-10 after three rounds of consultation with Antigravity and eleven live probes.**
+It amends [AG-14](#ag-14)'s cancellation story and reverses none of it.
+
+### What was wrong with the old stop
+
+`AgySession.cancel` starves a turn: from the moment ⏹ is pressed the gate refuses every tool call
+with a reason naming the user's stop, and the agent reads those refusals and winds down. That is
+honest about its own weakness — the module docstring says so — but the weakness is structural. **The
+agent choosing to stop is not the same as the turn stopping**, and a turn producing only prose asks
+permission for nothing and cannot be starved at all.
+
+### What replaced it
+
+The shipped `hooks.md` documents `PostInvocation`, which returns `terminationBehavior`. Measured
+rather than assumed, in an isolated `--gemini_dir` so nothing of the user's was touched:
+
+| Probe | Result |
+|---|---|
+| Do invocation hooks fire on a turn with no tools? | **Yes** — `PreInvocation`(0) → `PostInvocation`(0) → `Stop`, `terminationReason: NO_TOOL_CALL`, `fullyIdle: true` |
+| Order within one invocation | `PreInvocation` → `PreToolUse` → tool → `PostInvocation`. **The tool call is resolved before `PostInvocation` runs** |
+| Does `"terminate"` halt a loop? | **Yes.** Same prompt: 4 invocations without it (`run_command`, `find_by_name`, `view_file`), exactly 1 with it, ending `Stop / TERMINAL_CUSTOM_HOOK` |
+| Is the conversation usable afterwards? | **Yes.** A second user event into the *same process* answered normally, `num_turns: 2`, with coherent memory of the aborted turn |
+| `SIGINT` during prose | **Fatal** — `result status=ERROR`, EOF, exit 1, session gone |
+| Cost of respawning instead | **3,762 ms** cold, 3,697 ms resuming by `--conversation <id>` |
+
+So the stop is layered, and each layer does what only it can:
+
+1. **`PreToolUse` denial** keeps protecting the working tree. Unchanged.
+2. **`PostInvocation` returning `terminate`** ends the loop *mechanically*, whatever the agent
+   concludes. The gate already holds the latched stop state; this is a second handler on the same
+   socket reading the same flag.
+3. **Killing the process** is demoted to an explicit, user-initiated escalation — never automatic,
+   because it ends the session and costs 3.7 seconds to rebuild.
+
+### The residual gap, kept open deliberately
+
+`PostInvocation` fires *between* invocations, so **nothing stops token generation inside one
+invocation**. A single-invocation prose answer runs to its natural end. This is not closed, and
+closing it automatically would mean killing the process — 3.7s of dead session to save a few seconds
+of text from a turn that holds no locks, runs no commands and touches no files. The turn is read-only
+by construction; the honest handling is presentational: stop updating the view, badge it *stopped by
+user*, let the stream drain into the warm process, and offer a separate force-reset for a genuinely
+runaway generation.
+
+### Two corrections that came with it
+
+- **`status: "SUCCESS"` with an empty response must not render as a completed answer.** A turn ended
+  by the hook reports success — it means only that the loop exited without an unhandled error. The
+  host reads `terminationReason: "TERMINAL_CUSTOM_HOOK"` and synthesises a cancelled state.
+- **A stopped loop is not a stopped machine.** Termination does not cascade to detached child
+  processes or in-flight subagents, so nothing may treat "the loop ended" as "everything ended".
+
+### What this does *not* license
+
+A `PostInvocation` handler is a second way into the gate socket, and [AG-R-12](risks.md#ag-r-12)'s
+rule holds for it unchanged: every path prints, and none exits 0 with empty stdout. An invocation
+hook that fails silently does not fail closed — it lets the loop continue, which is the *opposite*
+direction from the tool gate's failure mode and the reason this is stated rather than assumed.
+

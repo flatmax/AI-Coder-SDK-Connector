@@ -5101,7 +5101,7 @@ had a name been classified in only the `agy` table while the merged read happene
 4,840 Python and 4,485 webapp tests green.
 ---
 
-## ⏹ on one subagent: the mechanism works and the handle arrives too late (2026-09-10, latest)
+## ⏹ on one subagent: the mechanism works and the handle arrives too late (2026-09-10)
 
 `subagent_stop` was the last unbuilt surface of the subagent trio, and the only one whose design was
 already written out — `capabilities.py` said what to build, named two limits in advance, and named one
@@ -5187,3 +5187,52 @@ through while asserting it had been stopped. `_check_localhost_only` reads `_col
 patches the wrong seam is a test that reports the code it did not exercise.
 
 4,857 Python and 4,485 webapp tests green.
+
+---
+
+## Asking `agy` how to drive `agy`: three consultations, eleven probes, one rejected proposal (2026-09-10, latest)
+
+The question was open-ended — *is there a better way to operate this transport, perhaps SDK-style?* —
+and the method is the finding as much as the answers are. Each round put the current design to
+Antigravity over the paid transport, took its objections seriously, **ran the probes it asked for**,
+and brought the measurements back. It was wrong often enough that this was not ceremony.
+
+### What it got wrong, and why that matters
+
+Round one advised migrating to `agy models --json`, which does not exist; a parallel instance with
+tool access claimed to have read `sdk.md` and `cli.md` from the shipped docs, of which there are six
+and neither is among them. Round two said `--continue` is machine-global and would bind to whatever
+the user last ran — it is workspace-scoped, measured. It said conversation forking is an internal
+primitive with no user-facing command — `/fork` is a real slash command, refused on this transport
+with a purpose-written error. Round three called transcript corruption the most severe risk of the
+proposed stop, and the measured lifecycle order refutes it.
+
+**None of that made the exercise a waste, and the reason is worth stating.** Every wrong answer was
+wrong in a *checkable* way, so the consultation's value was in generating claims worth probing rather
+than in being right. Three of its objections survived and were adopted; see [AG-19](decisions.md#ag-19).
+
+### What the probes found
+
+The single most useful discovery was not an answer but a file: **`agy` ships its own hook
+documentation**, extracted at `~/.gemini/antigravity-cli/builtin/skills/agy-customizations/docs/`,
+and `hooks.md` documents five lifecycle events where this app wires one. Everything
+[`sdk-surface.md`](sdk-surface.md) had recorded about hooks was measured by probing; it did not have
+to be. That file made the stop of [AG-19](decisions.md#ag-19) findable, and the rest of the round is
+in [`sdk-surface.md` § The hook contract is shipped](sdk-surface.md#the-hook-contract-is-shipped-not-inferred--read-2026-09-10).
+
+### The proposal that was right to reject
+
+Consultation converged on moving the permission gate into an app-owned `--gemini_dir`, and the
+measurements behind it were sound: the flag works, authentication survives an empty config directory
+even with the session bus cleared, workspace trust is one list of paths, and workspace-local hooks
+still do not load headlessly at 1.2.0. **The conclusion was still wrong**, and the record is what
+caught it: [AG-18](decisions.md#ag-18)'s table had already rejected a private config root, hours
+earlier the same day, for a reason neither side of the consultation had in view — the flag travels by
+argv, and the processes that escape it are exactly the ones [AG-R-14](risks.md#ag-r-14) exists for.
+
+The lesson is not that consultation is unreliable. It is that **a consultation given a stale
+description of the system will converge confidently on a regression**: the design was described to it
+as isolating by `conversationId`, which AG-18 had amended the same day. Where the record was current,
+the review sharpened it; where the description was stale, the review reproduced the staleness and
+added conviction to it.
+

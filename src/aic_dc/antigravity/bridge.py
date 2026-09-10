@@ -495,9 +495,15 @@ class ConsultantBridge:
             "Ask Google's Gemini, running as an independent agent, to review a "
             "question you have already formed a view on — a diff, a design "
             "choice, a diagnosis. Two models disagreeing is information; the "
-            "same model asked twice is not. It has no repository access, so "
-            "pass the code or context it needs in `context`. Costs a call on a "
-            "separate Google account.",
+            "same model asked twice is not. One call is one round, and a "
+            "first answer is rarely the answer: end each round by asking what "
+            "it needs next, run the checks it asks for, and bring the results "
+            "back until the positions converge or the disagreement is stated "
+            "plainly. It keeps no memory between calls, so carry the exchange "
+            "forward in `context`, attributing earlier answers to an earlier "
+            "reviewer rather than to it — a model shown its own words defends "
+            "them. It has no repository access either, so pass the code it "
+            "needs. Costs a call on a separate Google account.",
             {
                 "type": "object",
                 "properties": {
@@ -508,9 +514,10 @@ class ConsultantBridge:
                     },
                     "context": {
                         "type": "string",
-                        "description": "The code, diff or facts it needs. It "
-                        "cannot read the repository, so anything omitted here "
-                        "is unavailable to it.",
+                        "description": "The code, diff or facts it needs, "
+                        "including the earlier rounds of this consultation. It "
+                        "cannot read the repository and remembers nothing, so "
+                        "anything omitted here is unavailable to it.",
                     },
                 },
                 "required": ["question"],

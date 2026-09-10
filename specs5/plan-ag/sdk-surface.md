@@ -1109,6 +1109,144 @@ not say so.
 
 ---
 
+## The hook contract is shipped, not inferred — read 2026-09-10
+
+Everything this file records about hooks was **measured by probing**, which was the only route
+available when it was written. It was not the only route available at all: `agy` ships its own
+documentation for the surface, extracted on disk at
+
+```
+~/.gemini/antigravity-cli/builtin/skills/agy-customizations/docs/{hooks,json_configs,mcp_servers,plugins,rules,skills}.md
+```
+
+and embedded in the binary under `assets/external/skills/agy-customizations/docs/`. Six files, and
+**there is no `sdk.md` and no `cli.md`** — recorded because an Antigravity instance asked about this
+integration claimed to have read both, which is the standing reason this file measures rather than
+asks.
+
+`hooks.md` is 330 lines and it is the contract `aic_dc.agy.hook` implements. Reading it confirms the
+probed behaviour and adds four things the probe never saw.
+
+### There are five lifecycle events and this app wires one
+
+| Event | Fires | Structure | Returns |
+|---|---|---|---|
+| `PreToolUse` | before a tool step | grouped, `matcher` on tool name | `decision`, `reason`, `overwrite`, `permissionOverrides` |
+| `PostToolUse` | after a tool step | grouped | `{}` |
+| `PreInvocation` | **before the model is called** | flat | `injectSteps` |
+| `PostInvocation` | **after tool calls finish** | flat | `injectSteps`, `terminationBehavior` |
+| `Stop` | when the execution loop terminates | flat | `decision`, `reason` |
+
+`PostInvocation`'s `terminationBehavior` takes `"force_continue"`, `"terminate"` or `""`, and
+`"terminate"` is documented as *"Forces the loop to stop"*. `Stop`'s `decision: "continue"` is its
+mirror: it *blocks* a stop and re-enters the loop with `reason` injected as a system message. Both
+matter to the ⏹ button and neither is wired — see § *What this changes* below and
+[AG-R-16](risks.md#ag-r-16).
+
+`PreInvocation` returns `injectSteps`, each one of `{"toolCall": …}`, `{"userMessage": …}` or
+`{"ephemeralMessage": …}`, the last being a transient system message. That is a supported channel
+for putting a sentence in front of the model before every invocation, which is what
+`agy_tools.WRITE_GUIDANCE` currently does by prepending text to the user's own prompt.
+
+### Four details the probe did not have
+
+- **`permissionOverrides`** — an array of temporary grants (`command(npm test)`, and the
+  `read_file(<path>)` / `write_file(<path>)` / `file(<glob>)` forms § *Defence in depth* records)
+  returnable **from the hook**, beside `decision`. Not used here, and worth knowing exists before
+  someone reaches for a settings file to do the same job.
+- **Tool names are derived, and the derivation is stated**: *"lowercasing the step type and removing
+  the `CORTEX_STEP_TYPE_` prefix"*. That is the whole explanation of § *One call, two vocabularies* —
+  the hook's names are the step-type enum's, not the SDK's.
+- **`timeout` defaults to 30 seconds** and the hook command's **working directory is the directory
+  containing `hooks.json`** — for this app, `~/.gemini/config/`. The install writes `3600`, so the
+  default never applies here, but a hook that silently inherited 30s would fail closed on the first
+  dialog a human read slowly.
+- **`transcriptPath` and `artifactDirectoryPath` are common fields on every payload**, and the doc
+  names the per-product directory that differs: `antigravity-cli/` for the CLI, `antigravity/` for
+  Antigravity 2.0, `antigravity-ide/` for the IDE. `aic_dc.agy.subagents` derives that path by hand;
+  the payload carries it.
+
+**`workspacePaths` is documented as a common field and is empty here anyway.** § *Two limits that
+remain* recorded it empty in every captured payload and called `conversationId` the sound isolation
+key. The doc does not contradict that measurement, it explains it: `hooks.md` is the *shared* Cortex
+hook specification across the CLI, the IDE and Antigravity 2.0, and the IDE is the surface that
+passes multi-root folder URIs at initialization. Read the doc as a family contract, not as a CLI one.
+
+### `SIGINT` ends the session — measured 2026-09-10
+
+The one cancellation question this file left open, now closed. A bidirectional session was given a
+prose-only prompt, allowed to stream 23 `text_delta` fragments, and sent `SIGINT`:
+
+```
+result  status=ERROR  response=""
+EOF
+returncode 1        stderr: error: interrupted
+```
+
+The process does **not** survive to take another turn. That matches 1.1.28's changelog — *"interrupts
+such as Ctrl+C still exit non-zero"* — and it settles :mod:`aic_dc.agy.session`'s docstring claim
+with a measurement rather than an inference. Two further reads on the same question:
+
+- `strings` over the binary carries `warning: ignoring unsupported stream input message event %q` and,
+  beside it, `stream input content block type %q is not supported (only %q)`. There is no `cancel`,
+  `interrupt`, `stop` or `halt` input event. Content blocks are typed too.
+- `agy models --json` **does not exist** — `agy models` accepts only `-h`/`--help`, and `--json` fails
+  with `flags provided but not defined: -json`. The two-column human output remains the only model
+  discovery surface, so the parser stays.
+
+### A failed turn reports the previous turn's usage — measured 2026-09-10
+
+Found while probing `/fork`. A bidirectional session ran one real turn and then a turn `agy` refused:
+
+```
+turn 1  status=SUCCESS  duration_seconds=1.840465383  input_tokens=5423
+turn 2  status=ERROR    duration_seconds=1.840465383  input_tokens=5423   output_tokens=1
+```
+
+The refused turn's `result` frame **echoes the previous turn's `usage` and `duration_seconds`
+verbatim**. `AgyTranslator._absorb_usage` takes last-wins rather than summing — deliberately, since
+later frames carry running totals — so this does not double the bill. What it does instead is report
+a turn that ran nothing as having cost 5,423 input tokens and taken 1.84 seconds. A misreport rather
+than a multiplication, and in the same family as [AG-R-6](risks.md#ag-r-6): a cost number that is
+wrong in a way nothing in the UI can distinguish from right. The fix, if it is wanted, is to skip
+absorption on a non-`SUCCESS` status.
+
+### `agy` compacts its own context, and says nothing on the stream — 2026-09-10
+
+Read from the binary, and it bears directly on whether a long-lived conversation is a good idea:
+
+```
+AntigravityCompactionConfig      applyCompactionInfo
+"Context summary serialization truncated history: start step index moved from %d to %d.
+ This will break prompt cache reuse."
+"...appended to it while context compaction was rewriting it"
+```
+
+So context management is `agy`'s, not the host's — a resumed conversation does not grow without
+bound, because the harness rewrites its own early history into a summary. **No frame announces it.**
+The stream vocabulary is `init | step_update | result`, and none of them carries a compaction event,
+so a host driving a long conversation cannot tell which turns are still verbatim and which have been
+replaced by a summary it never saw. For the engine transport that is a feature and costs nothing. For
+a *reviewer* it is the argument in [AG-16](decisions.md#ag-16) arriving as a measurement: at turn ten
+you are talking to something whose memory of turn one is lossy in a way neither side can audit.
+
+### What this changes
+
+**Nothing about the gate**, which the doc confirms in every particular the probe found — including
+that `"ask"` prompts the user (uselessly, headlessly) and that `overwrite` is a shallow top-level
+merge whose result *"is what actually executes and is recorded"*.
+
+**The cancellation story gets one lever and keeps its hole.** `PostInvocation` fires *after* the model
+generation and its tool calls have concluded, so `"terminate"` cannot interrupt prose already
+streaming — the hole in § *Cancellation is where this transport is genuinely weaker* is real and
+`SIGINT` does not close it. What `"terminate"` does close is the *loop*: today ⏹ starves a turn and
+then depends on the agent choosing to wind down after reading the refusals, which is a model's
+judgement standing where a mechanism should be. A `PostInvocation` handler consulting the same gate
+state would end the loop whatever the agent concluded. That is a strictly better stop and it is
+unbuilt.
+
+---
+
 ## Verified, inferred, unknown
 
 Stated explicitly, because a stated unknown is more useful than a confident guess.
