@@ -285,17 +285,54 @@ class TestAnEntryLeftByAHostThatIsGone:
         )
         assert registry.lookup(OURS, config_dir=config_dir) is not None
 
-    def test_an_entry_with_no_agy_pid_keeps_the_older_behaviour(
+    def test_a_legacy_conversation_entry_with_a_dead_host_is_a_corpse(
         self, config_dir, dead_pid
     ):
-        """Written by a version before this one, and read without inventing.
+        """The grandfather clause, closed 2026-09-10 by measuring the orphan.
 
-        No ``agy_pid`` means the second question cannot be asked, and an
-        unanswerable liveness question leaves the entry standing rather than
-        guessing that nothing is running.
+        A conversation entry is written when ``init`` names the conversation,
+        so the host already has a child to name and every version that
+        records an ``agy_pid`` records it here. A missing one therefore dates
+        the file rather than describing it — and the agent it would have
+        named outlives its host by under a second
+        (``scripts/probe_agy_orphan.py``). Left immortal, these were what
+        kept ``owns_anything`` permanently true on any machine that had ever
+        lost a host uncleanly: eight of them on the development machine, one
+        per unclean exit, each denying the user's own unparseable payloads
+        from then on.
         """
         registry.claim(OURS, "/tmp/s.sock", config_dir=config_dir, pid=dead_pid)
+        assert registry.lookup(OURS, config_dir=config_dir) is None
+        assert registry.owns_anything(config_dir) is False
+        assert registry.reap_stale(config_dir) == [OURS]
+
+    def test_a_legacy_entry_whose_host_is_alive_is_untouched(self, config_dir):
+        """The host is the first question and it still answers.
+
+        Age is only ever the *second* argument: an old entry belonging to a
+        process that is still running is a live claim, and reaping it would
+        un-gate a session that is happening right now.
+        """
+        registry.claim(OURS, "/tmp/s.sock", config_dir=config_dir, pid=os.getpid())
         assert registry.lookup(OURS, config_dir=config_dir) is not None
+        assert registry.reap_stale(config_dir) == []
+
+    def test_a_scope_entry_with_no_agy_pid_is_never_a_corpse(
+        self, config_dir, dead_pid
+    ):
+        """The asymmetry, and the reason the age argument must not reach here.
+
+        A scope claim is published *before* ``agy`` exists — that is the whole
+        of AG-18 — so an absent ``agy_pid`` is the normal state of a session
+        that is starting rather than a mark of an old file. Reaping one on the
+        host pid alone would release the unit an orphaned agent is still
+        sitting in, under ``--dangerously-skip-permissions``.
+        """
+        unit = "aic-dc-starting"
+        registry.claim_scope(unit, "/tmp/s.sock", config_dir=config_dir, pid=dead_pid)
+        cgroup = f"0::/user.slice/user-1000.slice/{unit}.scope"
+        assert registry.scope_owner(cgroup, config_dir=config_dir) is not None
+        assert registry.reap_stale(config_dir) == []
 
     def test_owns_anything_stops_counting_a_corpse(self, config_dir, dead_pid):
         """The tie-breaker's own version of this defect, and the worse half.

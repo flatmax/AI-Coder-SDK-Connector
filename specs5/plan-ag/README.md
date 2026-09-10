@@ -1,6 +1,32 @@
 # Second Engine — Google Antigravity alongside Claude Code
 
-**Status (2026-09-10, latest):** **the two things this directory was carrying as owed are measured,
+**Status (2026-09-10, latest):** **the three findings the verification sitting turned up are fixed,
+and one of the fixes was corrected by its own test before it shipped.** *(1)* The registry's
+grandfather clause is closed: a **conversation** entry with a dead host and no `agy_pid` is now a
+corpse, because the orphan's lifetime was measured this evening and is under a second, so such an
+entry names a process that ended long ago. A **scope** entry is deliberately not covered — it is
+written before `agy` exists, so an absent pid there is a session starting rather than an old file, and
+that asymmetry is the whole of the change. On this machine the tripwire flipped: eight entries that
+read `live` for ever now read as corpses and `owns_anything()` is `False`
+([AG-R-14](risks.md#ag-r-14)). *(2)* **`agy` 1.2.0 advertises 57 tools and our table knew 14 of them.**
+`scripts/probe_agy_tool_inventory.py` reads the list off the `init` frame — free, no model turn — and
+is the tripwire [AG-R-2](risks.md#ag-r-2) has always specified for the wheel and never had for the
+binary. Ten names were added to the write seam, and `sed_file` is the one to notice: AG-R-11 exists
+because an agent refused an edit reached for `sed -i` through `run_command`, and this release makes
+that a **tool of its own** that the seam did not name. Three more spellings of spawning
+(`define_subagent`, `manage_subagents`, `browser_subagent`) joined it on AG-5's reasoning. **Nothing
+was classified in the loosening direction**, because the `init` frame carries bare names with no
+descriptions and `read` is the only class that *removes* a dialog; the remaining 33 are declared in
+`SEEN_UNCLASSIFIED` so the probe's bucket is empty by declaration rather than by neglect. *(3)* The
+usage HUD no longer titles an Antigravity session *"Claude Code"* — the literal was a fallback written
+when there was one engine, and this engine reports neither of its two sources. **The correction worth
+recording is inside (2):** the first cut declared `finish` unclassified and said the user meets a
+modal for it, and a new invariant test refuted both — `finish` is `read` in the *SDK* half of the
+merged table, which is the table that actually decides. The probe was asking the wrong one. 4,840
+Python and 4,485 webapp tests green. See
+[`delivery.md` § Three findings, closed](delivery.md#three-findings-closed--and-the-one-that-was-wrong-before-it-shipped-2026-09-10-latest).
+
+**Status (2026-09-10, evening):** **the two things this directory was carrying as owed are measured,
 and each corrected the entry that owed it.** The subagent tab has now been opened in a browser on a
 live `agy` turn — `scripts/probe_agy_subagent_tab.py`, ten checks, all passing: the descriptor read
 over the browser's own RPC, a delegation announced, a row with **no Stop button** because this
@@ -27,7 +53,7 @@ only opened the reason row, and an unreaped zombie that inverted the first orpha
 same lesson as AG-R-11's *assert on the file, not on the hook having fired*. See
 [`delivery.md` § The round trip, watched](delivery.md#the-round-trip-watched--and-what-the-browser-and-the-kernel-each-corrected-2026-09-10-later).
 
-**Status (2026-09-10, latest):** **the `pid` the registry had always written is finally read — and
+**Status (2026-09-10, afternoon):** **the `pid` the registry had always written is finally read — and
 reading *one* would have been the wrong fix.** A killed host left an entry no reader could tell from a
 live claim, and both costs fell on the *user's* own sessions rather than ours: one unclean exit made
 `owns_anything` permanently true, so every unparseable payload from their own `agy` was denied from

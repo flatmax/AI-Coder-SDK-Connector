@@ -583,16 +583,40 @@ consequences are in [`risks.md` AG-R-14](risks.md#ag-r-14).
   *Claude* CLI's, measured in `main.py`. Two different programs, two different reactions to a closed
   pipe.
 
-### The tool table is behind the binary again — 1.2.0 (2026-09-10)
+### The tool inventory at 1.2.0 — read off the `init` frame, 2026-09-10
 
 Driving a real turn on 1.2.0 raised a permission dialog for **`schedule`** and for
-**`send_message`**, neither of which is in `src/aic_dc/agy/tools.py`'s `TOOL_CLASSES`. An unclassified
-name falls to `GATED_BY_DEFAULT.get(None, True)`, so the user is asked to approve a planning step that
-touches nothing, and a subagent reporting back to its parent. That is phase 4's *"every read-only call
-raises a modal"* arriving through the half of its fix that is a **table**: `pre_verdict` consults a
-classification, and a classification only knows the names somebody wrote down. The 57-tool inventory
-in this file was read at 1.1.2x; nothing has re-read it at 1.2.0, and this is
-[AG-R-2](risks.md#ag-r-2) in the binary rather than in the wheel.
+**`send_message`**, neither of which was in `src/aic_dc/agy/tools.py`'s `TOOL_CLASSES`. Reading the
+whole list rather than patching those two names is what showed the size of it: the `init` frame
+advertises **57 tools and the table classified 14**. An unclassified name falls to
+`GATED_BY_DEFAULT.get(None, True)`, so nothing was ungated — but the seam that enumerates *what can
+change the tree* did not know most of the ways to.
+
+The inventory is **free to read**: `init` arrives before any prompt is sent, so
+`scripts/probe_agy_tool_inventory.py` takes no model turn. Still 57 tools, as at 1.1.2x, and the
+composition has moved — nineteen `browser_*` entries, four spellings of spawning, and `sed_file`.
+
+**`sed_file` is the entry that matters.** [AG-R-11](risks.md#ag-r-11) was raised because an agent
+refused an `edit_file` reached for `sed -i` through `run_command`; on 1.2.0 that is a tool of its own.
+It is in the write seam now, with `delete_knowledge`, `execute_browser_javascript`,
+`notebook_execution`, `send_command_input`, `call_mcp_tool`, `define_subagent`, `manage_subagents` and
+`browser_subagent`.
+
+**Nothing was classified in the loosening direction**, because this frame carries bare names — no
+descriptions, no schemas — and `read` is the only class that *removes* a dialog. The other 33 are
+declared in `SEEN_UNCLASSIFIED`, which changes nothing about how a call is treated and lets the probe's
+bucket be empty by declaration. What stays open is the dialog they raise: `wait`, `schedule` and
+`command_status` each stop a turn for a human, which is phase 4's modal defect for the names its fix
+could not know.
+
+**One name in the table is no longer on the binary:** `codebase_search`. Left rather than pruned —
+gating a tool nobody has costs nothing — and reported by the probe so a *rename* is never mistaken for
+a removal.
+
+**The reader's trap, paid for once.** The table the gate consults is
+`antigravity/permissions.py::TOOL_CLASSES`, which folds the SDK's vocabulary in underneath `agy`'s. A
+first cut of the probe asked `agy/tools.py` alone and reported `finish` as unclassified when it has
+been `read` all along. Ask the merged table.
 
 ## The `agy` transcript store, read whole — measured 2026-09-10
 

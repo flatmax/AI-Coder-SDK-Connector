@@ -5001,3 +5001,101 @@ inverts" a reap — true of that function, and not true of a caller that waits o
 Both are the rule this directory keeps relearning: **assert on the thing, not on the gesture.**
 AG-R-11's *"assert on the file, not on the hook having fired"* is the same sentence about a different
 noun, and it is now recorded three times because it has been learned three times.
+---
+
+## Three findings, closed — and the one that was wrong before it shipped (2026-09-10, latest)
+
+The entry above found three things and fixed none of them, deliberately: a verification sitting that
+starts changing what the gate answers stops being one. Taken here in the order of what they cost a
+user.
+
+### 1. The registry's grandfather clause, closed by the measurement that made it unnecessary
+
+`entry_is_live` now asks **which kind of entry** it is holding when there is no `agy_pid` to ask
+about, because the two kinds get there for opposite reasons:
+
+- A **conversation** entry is written when the `init` frame names the conversation, by which time the
+  host has a child to name. So a missing `agy_pid` *dates* the file rather than describing it. With
+  the host also gone it is a corpse — the agent it would have named outlives its host by under a
+  second, and these files are hours old.
+- A **scope** entry is written *before* `agy` exists, on purpose ([AG-18](decisions.md#ag-18)). An
+  absent pid there is the normal state of a session that is **starting**, and reaping it would release
+  the unit an orphaned agent is still sitting in under `--dangerously-skip-permissions`. It keeps the
+  old answer.
+
+That asymmetry is the whole change, and it is why "age" is an argument that must not be generalised:
+it is available for the entry kind that cannot legitimately lack a pid, and unavailable for the one
+that can.
+
+**Measured on the machine it was found on.** The eight entries that read `live` for ever now read as
+corpses, and `owns_anything()` is `False` — the tripwire [AG-R-14](risks.md#ag-r-14) states. They will
+be swept at the next `AgyGateServer.start`, beside the stale-socket unlink that has the same cause.
+
+Three tests replace the one that pinned the old behaviour, and they are the decision table rather than
+the change: a legacy conversation entry with a dead host is reaped, one whose host is **alive** is
+untouched (age is only ever the second question), and a scope entry with no `agy_pid` is never a
+corpse.
+
+### 2. The tool table was four releases behind the binary, and nobody could have known
+
+`agy` 1.2.0 advertises **57 tools**. `agy/tools.py` classified **14** of them. The rest fell to
+`GATED_BY_DEFAULT.get(None, True)`, which is why nothing was ungated — but the seam that is supposed
+to enumerate *what can change the tree* did not know most of the ways to.
+
+**`sed_file` is the one to read twice.** [AG-R-11](risks.md#ag-r-11) exists because an agent refused
+an `edit_file` went after the same change with `sed -i` through `run_command`, unprompted, on both
+probe runs. On 1.2.0 that is a **first-class tool**. It still asked — everything unknown asks — but it
+asked as an unclassified call: no diff, no path chip, no `acceptEdits` reasoning, and no shape for the
+`always allow` control to take. Ten names went into the write seam, including three more spellings of
+spawning (`define_subagent`, `manage_subagents`, `browser_subagent`) on AG-5's own reasoning that a
+child inherits the tool set, and `call_mcp_tool`, which is arbitrary tool use by proxy.
+
+**Nothing was classified in the other direction, and that is the decision rather than the omission.**
+The `init` frame carries bare names — no descriptions, no schemas — so the only evidence available is
+the spelling. `read` is the single class that *removes* a dialog, and this directory does not spend
+that on a guess. The remaining **33** are declared in `SEEN_UNCLASSIFIED`, which changes nothing about
+how a call is treated and everything about whether the next reader can tell "seen and left" from "never
+looked". `derive_rules` returns nothing for an unrecognised class, so a user cannot grant one of them a
+standing permission either — checked rather than assumed, because an over-broad always-allow on
+`sed_file` would have been the real hole.
+
+**`scripts/probe_agy_tool_inventory.py` is the tripwire [AG-R-2](risks.md#ag-r-2) has always specified
+and never had here.** That risk's mitigation is a probe whose `unclassified` bucket is empty *by
+declaration*; one exists for the wheel and the binary — the transport that reaches the paid
+subscription — had none. It reads the inventory off the `init` frame, so it costs no model turn, and
+it reports a second bucket the wheel's probe does not need: names in our table that the binary no
+longer offers. Today that is `codebase_search`, one name, left rather than pruned on the reasoning that
+gating a tool nobody has costs nothing.
+
+**What is still open, and it is the half a user feels.** Thirty-three tools raise a dialog that says
+nothing — `wait`, `schedule`, `command_status`. That is phase 4's *"every read-only call raises a
+modal"* for the names its fix could not know, and closing it needs the binary's own account of what
+each tool does, which is not on this channel. Dialog fatigue is not cosmetic on a transport whose only
+containment is a human reading dialogs.
+
+### 3. The HUD named the wrong product
+
+`usage-hud.js::_modelLabel` fell back to the literal `'Claude Code'`, written when there was one
+engine and the only way to have no model was a HUD that had not loaded yet. This engine reports
+*neither* source — per-model usage and the context read-back are both `absent` by decision — so every
+Antigravity session carried the wrong vendor's name in the one place a user looks to see what is
+answering. The label is now empty and the tooltip says why. **The engine's name is not the fix**:
+`get_engine_capabilities` deliberately carries no engine identity ([AG-R-4](risks.md#ag-r-4)), and the
+panel that does name the engine is already on screen saying so.
+
+### The correction, which arrived from a test rather than from a reviewer
+
+The first cut of (2) declared `finish` unclassified and said in as many words that a user meets a modal
+for it. A new invariant test — *every declared name is unclassified in the table that decides* —
+refuted both halves at once: `finish` is `read` in the **SDK** half of
+`antigravity/permissions.py::TOOL_CLASSES`, which folds the two vocabularies into the table the gate
+actually reads. The probe had been asking `agy/tools.py` alone, so it reported a name as unclassified
+that has never reached a dialog.
+
+The number moved with it — 43 unclassified became 33 declared plus ten classified, against a merged
+table of 31 rather than an `agy` table of 24 — and the shape of the mistake is the one worth keeping:
+**a probe that asks a narrower question than the code does will report differences that are not there,
+and the false positives are the polite failure mode.** The same asymmetry could have hidden a real one,
+had a name been classified in only the `agy` table while the merged read happened elsewhere.
+
+4,840 Python and 4,485 webapp tests green.

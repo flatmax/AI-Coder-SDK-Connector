@@ -73,6 +73,18 @@ a red gate attached rather than a dependency refresh.
 none of `handled` / `declined` / `pending` is the only state that means the package moved and nobody
 looked.
 
+**The `agy` binary is the same risk and had no tripwire until 2026-09-10**, which is the more
+consequential half: it is the transport that reaches the paid subscription, it self-updates, and its
+tool set is not something a `pyproject.toml` pin can hold still. It had moved to 1.2.0 and was
+advertising **57 tools where `agy/tools.py` classified 14** — found not by an audit but by a live turn
+raising a dialog for `schedule`. `scripts/probe_agy_tool_inventory.py` now reads the inventory off the
+`init` frame, which costs no model turn, and gives this transport the same *empty by declaration*
+bucket: `TOOL_CLASSES` for what is classified, `SEEN_UNCLASSIFIED` for what has been looked at and
+deliberately left to the default gate. It reports a second bucket the wheel's probe does not need —
+names in our table the binary no longer offers, which is where a **rename** would show up as a silently
+emptied write seam. See
+[`delivery.md` § Three findings, closed](delivery.md#three-findings-closed--and-the-one-that-was-wrong-before-it-shipped-2026-09-10-latest).
+
 ---
 
 ## AG-R-3 — A write can be silently diverted out of the repo
@@ -996,16 +1008,24 @@ routing.
   ran the older version is all of them. The fix ended the defect for the population that does not have
   it yet.
 
-  **The recommendation, and why it is safe now when it was not.** The clause exists so as not to guess
-  about an `agy` that might still be running under a host we can no longer ask about. That agent's
-  lifetime is measured now: under a second past its host. An entry with a dead host and no `agy_pid`
-  was written by a version older than this rule and names a process that ended long ago by any clock
-  this system has, so treating it as a corpse is the same claim the two-pid rule already makes, with
-  elapsed time doing the work the missing pid would have done. **Deliberately not folded into the
-  sitting that found it**: it changes what the gate answers, and this entry has already had to
-  withdraw one recommendation of that kind. **Tripwire:** `owns_anything()` answering true on a machine
-  with no live `agy` session — which is what a reader should check before believing the fix above is in
-  force on their own install.
+  **Fixed the same day, and the argument is the measurement above.** The clause existed so as not to
+  guess about an `agy` that might still be running under a host we can no longer ask about. That
+  agent's lifetime is known now: under a second past its host. So a **conversation** entry with a dead
+  host and no `agy_pid` was written by a version older than this rule and names a process that ended
+  long ago by any clock this system has, and `entry_is_live` treats it as a corpse — the same claim the
+  two-pid rule already makes, with elapsed time doing the work the missing pid would have done.
+
+  **A scope entry is deliberately not covered, and that asymmetry is the change.** It is published
+  before `agy` exists, so an absent `agy_pid` there is the normal state of a session that is *starting*
+  rather than the mark of an old file; reaping one on the host pid alone would release the unit an
+  orphaned agent is still sitting in. The age argument is available only for the entry kind that cannot
+  legitimately lack a pid, and generalising it would undo the paragraph above.
+
+  **Measured on the machine that had it:** the eight entries now read as corpses and `owns_anything()`
+  is `False`. Three tests replace the one that pinned the old behaviour, and they are the table rather
+  than the change — a legacy entry with a dead host is reaped, one whose host is **alive** is untouched,
+  and a scope entry with no `agy_pid` is never a corpse. **Tripwire:** `owns_anything()` answering true
+  on a machine with no live `agy` session.
 
 **Two of the three were named by the consultant** (`second_opinion`, 2026-09-09) rather than by the
 author of the fix, which is the first time this feature has been used on this repository's own work

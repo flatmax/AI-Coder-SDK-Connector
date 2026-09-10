@@ -68,15 +68,32 @@ Two limits, stated rather than mitigated. **A recycled pid reads as
 alive**, so a corpse can present as an orphan until something reaps it —
 the direction that keeps our own tree gated. And **where liveness cannot
 be asked, the answer is "alive"**: Windows has no safe probe (see
-:func:`process_alive`), and an entry written before this change carries no
-``agy_pid``, so both keep the pre-2026-09-10 behaviour instead of
-inventing an answer.
+:func:`process_alive`), so that platform keeps the pre-2026-09-10
+behaviour instead of inventing an answer.
+
+**A third limit was stated here and has since been closed by measuring the
+thing it was cautious about.** An entry carrying no ``agy_pid`` used to be
+immortal for the same reason — the question could not be asked — and that
+grandfathered every entry written before this rule existed, which on a
+machine that had run the older version is *all* of them. Read against
+:func:`owns_anything`, that reproduced the exact defect this rule was
+written to end: eight dead hosts on the development machine, every entry
+reading live, and every unparseable payload from the user's own ``agy``
+denied from then on. The caution was about an ``agy`` that might still be
+running under a host we can no longer ask about, and
+``scripts/probe_agy_orphan.py`` has since measured that agent's lifetime:
+it outlives its host by **0.60–0.80 s** and exits 0.30 s after its stdin
+closes. So a **conversation** entry with a dead host and no ``agy_pid``
+names a process that ended long ago by any clock this system has, and it
+is a corpse. A **scope** entry is not, and that asymmetry is the point —
+see below.
 
 The same reading covers a **scope** entry ([AG-18](../../../specs5/plan-ag/decisions.md#ag-18)),
 with one wrinkle it creates: a scope claim is deliberately written *before*
 ``agy`` exists, so its first version cannot name the process that would
-act. It therefore reads as alive — the limit above, arrived at by design
-rather than by age — until
+act. It therefore reads as alive — by design rather than by age, which is
+why the age argument above does not reach it and must not be made to —
+until
 :meth:`~aic_dc.agy.gate_server.AgyGateServer.claim` rewrites it with the
 pid. That matters more here than for a conversation entry, because a unit
 this host abandoned is exactly where an orphaned ``agy`` still sits: same
@@ -219,12 +236,35 @@ def entry_is_live(entry: Any) -> bool:
     in this module's § *A claim outlives the process that made it*; the
     short form is that a dead host with a live agent is an orphan, and an
     orphan must keep being denied rather than released into the tree.
+
+    **An entry with no ``agy_pid`` is judged by which kind of entry it is**,
+    because the two get there for opposite reasons:
+
+    - A **conversation** entry is written when the ``init`` frame names the
+      conversation, by which time the host has a child to name — so a
+      missing ``agy_pid`` dates the file rather than describing it. Every
+      version that has ever recorded one records it here. With the host
+      also gone, this is a corpse: the agent it would have named outlives
+      its host by under a second (``probe_agy_orphan.py``, 2026-09-10), and
+      these files are hours old. Leaving them immortal is what kept
+      :func:`owns_anything` permanently true on a machine that had ever
+      lost a host uncleanly.
+    - A **scope** entry is written *before* ``agy`` exists, on purpose, so
+      an absent ``agy_pid`` is the normal state of a session that is
+      starting. It keeps the old answer — alive — because the process it
+      cannot name may be seconds from its first tool call, which is
+      precisely the orphan the two-pid rule exists to keep denying.
+
+    Anything that is neither reads as alive, which is the direction that
+    costs a refusal rather than an unreviewed write.
     """
     if not isinstance(entry, dict):
         return True
     if process_alive(entry.get("pid")):
         return True
-    return process_alive(entry.get("agy_pid"))
+    if entry.get("agy_pid") is not None:
+        return process_alive(entry.get("agy_pid"))
+    return entry.get("conversation_id") is None
 
 
 def reap_stale(config_dir: Path | str | None = None) -> list[str]:

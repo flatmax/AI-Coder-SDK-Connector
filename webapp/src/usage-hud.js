@@ -897,18 +897,38 @@ export class UsageHud extends RpcMixin(LitElement) {
    * between turns would make the context figure disagree with it. The
    * busiest model leads, so the `+n` hides subagents rather than the
    * model that did the work.
+   *
+   * **Nothing, when neither knows.** This returned the literal
+   * `'Claude Code'` until 2026-09-10, written when there was one engine and
+   * the only way to have no model was a HUD that had not loaded yet. There
+   * is a second engine now which reports *neither* source — per-model usage
+   * and the context read-back are both `absent` in its descriptor, by
+   * decision — so that fallback put the wrong product's name on every
+   * Antigravity session's HUD, in the one place a user looks to see what is
+   * answering. Caught by eye in `probe_agy_subagent_tab.py`'s screenshot,
+   * not by the sixty tests over this component.
+   *
+   * The engine's name is not the fix either: `get_engine_capabilities`
+   * deliberately carries no engine identity ([AG-R-4](../../specs5/plan-ag/risks.md#ag-r-4)),
+   * and the panel that *does* name the engine is the chat panel's notice,
+   * which is already on screen saying it. An empty label is the honest
+   * rendering of "this turn reported no model", and the section's own
+   * heading still says what the panel is.
    */
   _modelLabel() {
     const models = this._turn?.models || [];
     if (models.length === 1) return models[0];
     if (models.length > 1) return `${models[0]} +${models.length - 1}`;
-    return this._context?.model || 'Claude Code';
+    return this._context?.model || '';
   }
 
   _modelTitle() {
     const models = this._turn?.models || [];
     if (models.length > 1) return `Models used this turn: ${models.join(', ')}`;
-    return this._modelLabel();
+    // The tooltip says why the label is empty rather than repeating the
+    // emptiness: a blank `title` on a blank span is two ways of saying
+    // nothing, and this is a state a user can reasonably ask about.
+    return this._modelLabel() || 'This engine does not report which model answered';
   }
 
   /**
