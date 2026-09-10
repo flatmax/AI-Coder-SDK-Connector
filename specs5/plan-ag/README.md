@@ -13,15 +13,22 @@ log:** `probe_agy_subagent_gate.py` re-run with `AgyGateServer.claim` stubbed to
 parent and the subagent still put all eight tool calls to the dialog and the deny still left the target
 byte-identical, so conversation claims were inert and cgroup identity carried the load alone. Matching
 is against the units this host registered, never the name's shape, so [AG-R-12](risks.md#ag-r-12)'s
-isolation holds on a stronger footing than before. **Two things are open and both are stated rather
-than hidden:** this is Linux-and-systemd, so on the macOS and Windows artefacts phase 7 publishes
-everything degrades to conversation-id routing with both residues intact — and the third residue, a
-stale claim nothing reaps, now orphans a *unit name* as well as a conversation id. **The probe's own
-setup found one more, and it is fixed:** `install.status` compared command strings, so one venv's
-`python3` and `python` read as two installs and a live gate reported itself `stale` — which makes
-`AgySession` refuse to start. Only the interpreter's spelling is forgiven now, and not by resolving
-both paths, which would have called two different checkouts the same install. 4,701 tests green. See
-[`delivery.md` § Identity by cgroup](delivery.md#identity-by-cgroup-not-by-claim-2026-09-10).
+isolation holds on a stronger footing than before. **The third residue closed the same day, and the fix
+this register recommended for it was the wrong one** — it said to treat a dead host's entry as absent,
+which is a change to what the *gate answers*, and an `agy` outliving its host sits inside a scope of
+ours under `--dangerously-skip-permissions`, so passing its calls through is worse than the denial
+being complained about. `registry.reap()` collects the garbage at startup instead, `lookup` is
+untouched, and a test is named for that. **What is left open is one thing and it is a per-platform
+gap:** this is Linux-and-systemd, so on the macOS and Windows artefacts phase 7 publishes everything
+degrades to conversation-id routing with the first two residues intact — stated in `scope.py` and in
+AG-18, with the choice for those platforms (the capability-reducing deny, or the residue) deliberately
+not made here. **The probe's own setup found one more defect, and it is fixed:** `install.status`
+compared command strings, so one venv's `python3` and `python` read as two installs and a live gate
+reported itself `stale` — which makes `AgySession` refuse to start. Only the interpreter's spelling is
+forgiven now, and not by resolving both paths, which would have called two different checkouts the same
+install. 4,708 tests green. See
+[`delivery.md` § Identity by cgroup](delivery.md#identity-by-cgroup-not-by-claim-2026-09-10) and
+[§ The third residue](delivery.md#the-third-residue-and-the-fix-this-directory-recommended-against-itself-2026-09-10).
 
 **Status (2026-09-09):** **a subagent's tool calls were never reaching the permission gate, and now
 they are** ([AG-R-14](risks.md#ag-r-14)). The hook routes by conversation id and passes through

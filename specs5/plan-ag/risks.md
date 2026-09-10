@@ -708,10 +708,12 @@ managed file needs the merge or it needs a file of its own.
 ## AG-R-14 — A subagent's tool calls do not reach the gate
 
 **Severity: critical. Likelihood: MEASURED — it happened on 2026-09-09, the main case was fixed the
-same day, and the two residues that mattered were closed on 2026-09-10 by changing what identity
-*is*.** On a systemd platform the gate no longer depends on anyone registering a conversation before
-it speaks: `agy` runs in a cgroup of ours and the hook asks the kernel. Where that is unavailable the
-original mechanism and its residues stand, which is a per-platform gap rather than a design one.
+same day, and all three residues were closed on 2026-09-10.** Two of them by changing what identity
+*is*: on a systemd platform the gate no longer depends on anyone registering a conversation before it
+speaks — `agy` runs in a cgroup of ours and the hook asks the kernel ([AG-18](decisions.md#ag-18)).
+Where that is unavailable the original mechanism and those two residues stand, which is a per-platform
+gap rather than a design one. The third was closed on every platform and **not** by the fix this entry
+recommended for it, which would have converted a stale claim into a way past the gate.
 
 > **Outcome, 2026-09-10: the registry was switched off and the gate still held.**
 > `probe_agy_subagent_gate.py`, re-run with `AgyGateServer.claim` replaced by a no-op for **both**
@@ -739,13 +741,14 @@ asks* column with the reason "a subagent inherits the tool set". The subagent do
 set; what it did not inherit was the gate — so gating the spawn bought a dialog on the word
 "delegate" and no review of anything done under it.
 
-### The three residues — two closed on systemd, one open everywhere
+### The three residues — two closed on systemd, the third closed everywhere
 
 **Read the two closures as conditional.** [AG-18](decisions.md#ag-18) removes the premise both of the
 first two residues rest on, and it removes it *where `systemd-run --user --scope` works*. Where it does
 not, `scope.available()` answers `False`, the gate falls back to the conversation-id routing described
 below, and these bullets describe the live behaviour rather than the history. They are kept in the
-present tense for that reason. Residue 3 is unmitigated on every platform.
+present tense for that reason. Residue 3 is closed on every platform, because it was never about
+routing.
 
 - **The spawn-to-announce race. Closed on systemd (2026-09-10).** The scope entry is published before
   `agy` is spawned, so a child's first call arrives inside a group that was registered before the
@@ -902,7 +905,8 @@ present tense for that reason. Residue 3 is unmitigated on every platform.
   spelling reads `current`, a second checkout is still `stale`, a different `config_dir` with the
   same interpreter is still `stale` — only the interpreter is forgiven, never the arguments — and an
   interpreter that has been deleted is `stale` rather than an exception thrown at a Settings caller.
-- **A stale claim now costs more.** `registry.claim` records a `pid` and `registry.lookup` has never
+- **A stale claim now costs more. Closed 2026-09-10, by collecting the garbage rather than by
+  changing the answer.** `registry.claim` records a `pid` and `registry.lookup` has never
   read it, so a killed session's entries are indistinguishable from live ones and the hook denies on
   them — it refuses whatever it cannot reach. Before this fix that orphaned one entry per session;
   now it orphans one per subagent as well. The recorded `pid` is the unused handle.
@@ -913,18 +917,38 @@ present tense for that reason. Residue 3 is unmitigated on every platform.
   answers nothing, and the hook denies. Whatever order the three are taken in, this one lands before
   the hold does. Named by the consultant on 2026-09-09.
 
-  **Its original argument expired on 2026-09-10 and it got a better one.** The tentative hold was
-  never built, because [AG-18](decisions.md#ag-18) closed the race a different way — so this is no
-  longer a prerequisite of anything, and it is *more* exposed rather than less. `registry.claim_scope`
-  writes a `pid` that `scope_owner` does not read, exactly as `claim` writes one that `lookup` does
-  not. The difference is what gets orphaned. A stale conversation entry holds an id `agy` generated
-  and will never generate again, so a dead host's leftovers are inert until someone resumes that
-  conversation. A stale **scope** entry holds a *unit name* — and a unit name is something systemd
-  can hand to a later process, so an entry left behind by a crash would route a stranger's scope of
-  that name into a socket that answers nothing, and the hook would deny it. `release_scope` runs at
-  `stop()` and covers the ordinary path; a crash is the case with nothing behind it. **The fix is
-  unchanged and now overdue: read the pid that is already on disk**, and treat an entry whose process
-  is gone as absent rather than as ours.
+  **Its original argument expired on 2026-09-10.** The tentative hold was never built, because
+  [AG-18](decisions.md#ag-18) closed the race a different way — so this is no longer a prerequisite of
+  anything. `registry.claim_scope` writes a `pid` that `scope_owner` does not read, exactly as `claim`
+  writes one that `lookup` does not, so AG-18 doubled the number of entry kinds with an unread handle
+  without changing what the handle was for.
+
+  **Fixed 2026-09-10, and the recommendation this entry carried for a day was wrong.** It said to
+  *"treat an entry whose process is gone as absent rather than as ours"* — which is a change to what
+  the gate **answers**, and it would have opened a hole this directory has argued against from the
+  start. `registry.py`'s own header states the trade: *a dead host makes our sessions un-runnable
+  rather than un-gated*. A host killed mid-turn can leave an `agy` still running inside a scope of
+  ours, and an absent entry passes its calls through — an agent under
+  `--dangerously-skip-permissions` with no gate at all, which is strictly worse than the denial being
+  complained about. Denying whatever cannot be reached is not an accident of an unread field.
+
+  So the fix is **garbage collection, not routing**. `registry.reap()` deletes entries whose recorded
+  pid is gone and is called from `AgyGateServer.start`, and `lookup` is untouched — pinned by a test
+  named for it, `test_a_dead_hosts_entry_still_denies_until_it_is_reaped`. **Startup is the safe
+  moment for the same reason the hook is not:** an `agy` whose host died loses the pipe it reads
+  prompts from, takes EOF and exits, so by the time a *later* host starts there is nothing left to
+  ungate — where reaping from the hook would run during precisely the window when something might
+  still be alive. "Cannot tell" is treated as "still running" throughout: no pid, a malformed entry, a
+  process owned by another user, all left alone, because the cost of a wrong reap is a live host
+  losing its claim. Seven tests, including a live sibling's entries being left alone — two windows of
+  this app share the registry directory and the pid check is the whole of what keeps them apart.
+
+  **One claim made here on 2026-09-10 was overstated and is withdrawn.** This entry said a stale scope
+  entry is worse than a stale conversation entry because *"a unit name is something systemd can hand to
+  a later process"*. `scope.unit_name()` is `aic-dc-` plus twelve hex characters of `uuid4`, so a
+  recurrence is not a case worth designing against. The scope entry's real exposure is the orphaned
+  `agy` above — still inside the unit, still matching — and that is an argument for the denial, not
+  against it.
 
 **Two of the three were named by the consultant** (`second_opinion`, 2026-09-09) rather than by the
 author of the fix, which is the first time this feature has been used on this repository's own work

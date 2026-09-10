@@ -4481,12 +4481,7 @@ module docstring rather than left to be discovered, and the choice for those pla
 capability-reducing deny, or an unclosed residue — is open. See [AG-18](decisions.md#ag-18)
 § *What it costs on the platforms that cannot*.
 
-**The third residue is untouched and now has a second reason to matter.** `registry.claim_scope`
-records a `pid` that nothing reads, exactly as `claim` has since AG-14, so a killed host leaves an
-entry the hook will route to and then deny on. For a conversation entry that orphans an id `agy`
-generated and will never generate again; for a *scope* entry it orphans a **unit name**, and a name is
-something systemd could hand to a later process. The window is small and the fix is the one already
-named: read the pid that is already being written.
+**The third residue was untouched when this entry was first written** and is closed below.
 
 ### The incidental finding, which was a working gate reporting itself broken
 
@@ -4520,3 +4515,69 @@ inside our scope is gated (the residues' case), a stranger in their own scope is
 (AG-R-12), a claimed conversation still wins, and **no scope means no change at all** — the tripwire
 that says this is additive to the shipped gate rather than a replacement of it. Plus publish-before-
 spawn, release-on-stop, and argv wrapped and unwrapped.
+
+---
+
+## The third residue, and the fix this directory recommended against itself (2026-09-10)
+
+[AG-R-14](risks.md#ag-r-14)'s last residue: `registry.claim` has recorded a `pid` since AG-14 and
+`registry.lookup` has never read it, so a host killed without running `stop` leaves entries that are
+indistinguishable from live ones. AG-18 doubled the kinds of entry with an unread handle without
+changing what the handle was for.
+
+### The recommendation in the risk register was wrong, and finding that out was the work
+
+The entry said to *"treat an entry whose process is gone as absent rather than as ours"*. Read that as
+a change to what the **gate answers**, because that is what it is: absent means the hook passes the
+call through. And `registry.py`'s own module header has argued the opposite since AG-14 — *a dead host
+makes our sessions un-runnable rather than un-gated* — with the reasoning spelled out, which is why
+the contradiction was visible before anything was built rather than after.
+
+The case that settles it is the one AG-18 created. A host killed mid-turn can leave an `agy` **still
+running inside a scope of ours**: same unit, so `scope_owner` still matches, and the process is under
+`--dangerously-skip-permissions` with our hook as the only thing between it and the tree. Passing its
+calls through because our socket stopped answering hands it an unreviewed repository. The denial that
+this residue was written to complain about is the thing preventing that.
+
+So the residue was misdiagnosed rather than merely unfixed. It is not "the hook denies on stale
+entries" — the hook *should* deny on stale entries. It is that the entries accumulate, and that
+`owns_anything` counts them, so a crashed host's leftovers make an unparseable payload read as ours
+long after there is nothing to protect.
+
+### Collection, not routing
+
+`registry.reap()` deletes entries whose recorded pid is gone and returns what it removed;
+`AgyGateServer.start` calls it. `lookup` and `scope_owner` are untouched, and there is a test named
+for that — `test_a_dead_hosts_entry_still_denies_until_it_is_reaped` asserts the entry is still ours
+and the hook still denies, so a later reading of this residue cannot re-derive the fix that was
+rejected.
+
+**Startup is the safe moment, and the hook is not, for a reason that is about `agy` rather than about
+us.** An `agy` whose host has died loses the pipe it reads prompts from, takes EOF and exits — so by
+the time some later host starts, the orphan is gone and its entry is genuinely garbage. Reaping from
+the hook would run during exactly the window in which the orphan may still be alive and making calls.
+The same clock that makes the residue harmless is what makes the collection safe, which is the sort of
+thing worth writing down because nothing in the code says it.
+
+**Every "cannot tell" is treated as "still running".** No pid recorded (an entry from before the field
+existed), a malformed entry (a host mid-claim), a process owned by another user, a platform that will
+not answer `kill(pid, 0)` — all left alone. The asymmetry is deliberate and it is not the usual
+fail-closed argument: a wrong reap costs a *live* host its claim, which ungates a session that is
+running right now.
+
+### One claim withdrawn
+
+The risk entry, written earlier the same day, ranked a stale scope entry above a stale conversation
+entry because "a unit name is something systemd can hand to a later process". `scope.unit_name()` is
+`aic-dc-` plus twelve hex characters of `uuid4`, so a recurrence is not a case worth designing
+against, and the sentence is withdrawn rather than left to be inherited. The scope entry's real
+exposure is the orphaned `agy` — which is an argument *for* the denial.
+
+### The tests
+
+Seven, offline, in `tests/test_agy_gate.py`. A dead host's entry is removed; **a live sibling's is
+left alone**, because two windows of this app share one registry directory and the pid is the whole of
+what tells them apart; an entry with no pid is left alone; a half-written entry is left alone; a scope
+entry is reaped the same way and `scope_owner` stops matching it; an empty registry is not an error;
+and the one that pins the shape of the fix rather than its behaviour — a dead host's entry still
+denies while it is on disk. 4,708 green.

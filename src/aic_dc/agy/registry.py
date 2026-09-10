@@ -245,6 +245,88 @@ def scope_owner(
     return None
 
 
+def _host_is_gone(pid: Any) -> bool:
+    """Whether the process that wrote an entry has exited.
+
+    ``False`` for everything it cannot establish — a pid that is not a
+    positive integer, an entry from before pids were recorded, a process
+    owned by another user. "I cannot tell" and "still running" get the same
+    answer deliberately, because the only caller deletes entries and the
+    cost of a wrong ``True`` is losing a live host's claim.
+    """
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except OSError:
+        # Alive but not signallable by us, or a platform that will not say.
+        return False
+    return False
+
+
+def reap(config_dir: Path | str | None = None) -> list[str]:
+    """Delete entries whose host has exited. Returns the names removed.
+
+    The third residue of
+    [AG-R-14](../../../specs5/plan-ag/risks.md#ag-r-14): :func:`claim` and
+    :func:`claim_scope` have always recorded a ``pid`` and nothing has ever
+    read it, so a host killed without running :meth:`stop` leaves entries
+    that are indistinguishable from live ones.
+
+    **What this does not do is change the hook's answer, and that is the
+    whole of the design.** The tempting fix is to have :func:`lookup` treat
+    a dead host's entry as absent, so the call is passed through instead of
+    denied. It is wrong, for the reason this module's own header gives: *a
+    dead host makes our sessions un-runnable rather than un-gated*. A host
+    killed mid-turn can leave an ``agy`` still running under a scope of
+    ours, and passing its calls through would hand an agent with
+    ``--dangerously-skip-permissions`` an unreviewed tree. Denying whatever
+    we cannot reach is the AG-5 trade, not an accident of an unread field.
+
+    So the fix is garbage collection rather than routing. It runs **at
+    startup**, where the orphan case has resolved itself: an ``agy`` whose
+    host is gone loses the pipe it reads prompts from, gets EOF and exits,
+    so by the time a *later* host starts there is nothing left to ungate.
+    Reaping from the hook instead would run it during exactly the window
+    when something might still be alive.
+
+    Two hosts sharing a machine share this directory, and the pid check is
+    what keeps them apart: a live sibling's entries are never touched.
+    """
+    directory = registry_dir(config_dir)
+    removed: list[str] = []
+    try:
+        entries = sorted(directory.glob("*.json"))
+    except OSError:
+        return removed
+    for path in entries:
+        try:
+            entry = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            # Unreadable already reads as "not ours" everywhere else, and a
+            # half-written entry belongs to a host that is mid-claim. Left
+            # alone rather than guessed at.
+            continue
+        if not isinstance(entry, dict) or not _host_is_gone(entry.get("pid")):
+            continue
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:  # noqa: BLE001 - startup must not fail on cleanup
+            logger.exception("Could not reap the agy registry entry %s", path.name)
+            continue
+        removed.append(path.name)
+    if removed:
+        logger.info(
+            "Reaped %d agy registry entr%s left by a host that is gone: %s",
+            len(removed),
+            "y" if len(removed) == 1 else "ies",
+            ", ".join(removed),
+        )
+    return removed
+
+
 def owns_anything(config_dir: Path | str | None = None) -> bool:
     """Whether this host claims **any** conversation right now.
 

@@ -260,6 +260,14 @@ class AgyGateServer:
         self._server = await asyncio.start_unix_server(
             self._handle, path=str(self._socket_path)
         )
+        # AG-R-14's third residue, and the same reasoning as the line above
+        # one directory over: entries belong to a host, a host can be killed
+        # without running `stop`, and what it leaves behind routes calls to a
+        # socket that answers nothing. Reaped here rather than in the hook
+        # because *here* is after an orphaned `agy` has lost its stdin and
+        # exited — see `registry.reap`, which argues why this is collection
+        # and not a change to what the gate answers.
+        registry.reap(self._config_dir)
         # AG-R-14. Published *before* `agy` is launched, which is what makes
         # it a fix rather than a narrower race: a conversation claim can be
         # late because the conversation exists before we are told its id,

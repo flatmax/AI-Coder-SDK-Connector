@@ -29,6 +29,7 @@ one entry-point test, which runs this interpreter.
 from __future__ import annotations
 
 import json
+import os
 import socket
 import subprocess
 import sys
@@ -212,6 +213,81 @@ class TestTheRegistry:
     def test_the_registry_is_not_written_under_the_google_tree(self, config_dir):
         """That tree belongs to Google's products; our state is ours."""
         assert ".gemini" not in str(registry.registry_dir(config_dir))
+
+
+class TestReapingWhatAKilledHostLeft:
+    """AG-R-14's third residue: a ``pid`` written and never read.
+
+    A host killed without running ``stop`` leaves entries pointing at a
+    socket nothing is listening on, and the hook denies on them — it
+    refuses whatever it cannot reach. That behaviour is *correct* and these
+    tests assert it is unchanged: the fix is collecting the garbage, not
+    passing the calls through. ``test_a_dead_hosts_entry_still_denies``
+    is the one that pins the distinction.
+    """
+
+    #: A pid no process can hold. `os.kill(0, 0)` addresses the caller's own
+    #: process group rather than a process, so 0 is not usable here.
+    GONE = 2**22 - 1
+
+    def _entry(self, config_dir, name, pid):
+        registry.claim(name, "/tmp/dead.sock", config_dir=config_dir, pid=pid)
+        return registry.registry_dir(config_dir) / f"{name}.json"
+
+    def test_a_dead_hosts_entry_is_removed(self, config_dir):
+        path = self._entry(config_dir, "old", self.GONE)
+        assert registry.reap(config_dir) == [path.name]
+        assert not path.exists()
+
+    def test_a_live_hosts_entry_is_left_alone(self, config_dir):
+        """A second window of this app is not garbage to the first."""
+        path = self._entry(config_dir, "theirs", os.getpid())
+        assert registry.reap(config_dir) == []
+        assert path.exists()
+
+    def test_an_entry_with_no_pid_is_left_alone(self, config_dir):
+        """Written before pids were recorded. Cannot tell, so does not act."""
+        directory = registry.registry_dir(config_dir)
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / "ancient.json"
+        path.write_text('{"conversation_id": "ancient", "socket": "/tmp/s"}', "utf-8")
+        assert registry.reap(config_dir) == []
+        assert path.exists()
+
+    def test_a_half_written_entry_is_left_alone(self, config_dir):
+        """It belongs to a host that is mid-claim, not to one that is gone."""
+        directory = registry.registry_dir(config_dir)
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / "midwrite.json"
+        path.write_text('{"conversation_id": "midw', encoding="utf-8")
+        assert registry.reap(config_dir) == []
+        assert path.exists()
+
+    def test_a_scope_entry_is_reaped_the_same_way(self, config_dir):
+        """The one that matters more, because a unit name can recur.
+
+        A conversation id is generated once by ``agy`` and never again, so a
+        stale entry for one is inert. A scope entry keys on a name *this*
+        app chooses, and the socket it names is dead.
+        """
+        registry.claim_scope("aic-dc-old", "/tmp/dead.sock", config_dir=config_dir, pid=self.GONE)
+        assert registry.reap(config_dir) == ["scope-aic-dc-old.json"]
+        assert registry.scope_owner("/user.slice/aic-dc-old.scope", config_dir=config_dir) is None
+
+    def test_reaping_an_empty_registry_is_not_an_error(self, config_dir):
+        assert registry.reap(config_dir) == []
+
+    def test_a_dead_hosts_entry_still_denies_until_it_is_reaped(self, config_dir):
+        """The residue's fix must not become a way through the gate.
+
+        Making ``lookup`` answer ``None`` for a dead host would pass the
+        call through, and an ``agy`` outliving its host runs under
+        ``--dangerously-skip-permissions``. So the entry stays ours while it
+        is on disk, and the hook goes on refusing what it cannot reach.
+        """
+        self._entry(config_dir, OURS, self.GONE)
+        assert registry.lookup(OURS, config_dir=config_dir) is not None
+        assert hook.decide(payload(OURS), config_dir=config_dir)["decision"] == "deny"
 
 
 class TestTheProcessAlwaysPrints:
