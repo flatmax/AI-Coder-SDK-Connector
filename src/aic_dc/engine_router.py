@@ -128,9 +128,15 @@ RPC_SURFACES: dict[str, str] = {
     "history_list": "transcript_history",
     "history_load": "transcript_history",
     "history_search": "transcript_history",
-    "get_subagent_transcript": "subagent_tabs",
-    "list_subagent_transcripts": "subagent_tabs",
-    "stop_task": "subagent_tabs",
+    # Two surfaces rather than one since 2026-09-10: reading a subagent's
+    # transcript and ending its run are different capabilities, and `agy`
+    # can do the first and not the second. Mapping them to one key would
+    # have to be wrong about one of them, and the direction it would be
+    # wrong in is the expensive one — a ⏹ that reports "stopping" and stops
+    # nothing.
+    "get_subagent_transcript": "subagent_transcripts",
+    "list_subagent_transcripts": "subagent_transcripts",
+    "stop_task": "subagent_stop",
     "rewind_files": "file_checkpointing",
 }
 

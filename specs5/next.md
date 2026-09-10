@@ -21,6 +21,14 @@ unbuilt). **Both were found by driving the app** — the source the table below 
 once for C10 on 2026-08-29 and responsible for every commit of the week of 2026-09-03. Neither would have
 been noticed by an audit of the tree, which is what the table's three rolling records are.
 
+**The inbox refilled and drained again on 2026-09-10**, which is worth a line only because this file
+claims all three of its rolling sources are empty and for one day that was false.
+[`known-issues.md`](known-issues.md) took a live-session report — the refresh ladder telling a user their
+login was broken when the token was fine — and it was fixed the same day without passing through § C,
+because the report arrived carrying its own measurement. Recorded in
+[`impl-history/work-log.md`](impl-history/work-log.md) § *Landed since*, not here: it is closed, and the
+third defect found underneath it (a degradation with no way to be withdrawn) is the part worth reading.
+
 **This file covers the Claude engine and the app around it. It does not cover the second engine.**
 [`plan-ag/`](plan-ag/) is a separate plan of record with its own decisions (`AG-n`), risks (`AG-R-n`)
 and [`delivery.md`](plan-ag/delivery.md), and it moved a long way between 2026-08-30 and 2026-09-03

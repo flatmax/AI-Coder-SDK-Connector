@@ -616,6 +616,27 @@ class EngineHealth:
         if text and text not in self.degradations:
             self.degradations.append(text)
 
+    def clear_degradation(self, sentence: str) -> None:
+        """Withdraw a degradation whose condition has stopped standing.
+
+        The counterpart :meth:`note_degradation` implies and did not have.
+        Most losses recorded here are settled at connect and last as long as
+        the session, but the access-token refresh is re-run every time the
+        watchdog wakes, so a failure at connect that succeeds twenty minutes
+        later would otherwise leave a sentence on screen that is no longer
+        true and that only a restart could dismiss — a stale banner being
+        the defect this pair exists to avoid, not a lesser version of it.
+
+        By exact text, which is why :meth:`note_degradation` deduplicates on
+        the same thing: a caller may only withdraw what it can name, so no
+        clearing path can retire another subsystem's sentence. Silent about
+        a sentence that was never noted — a caller withdrawing a condition
+        it does not have is the ordinary case rather than an error.
+        """
+        text = str(sentence).strip()
+        if text in self.degradations:
+            self.degradations.remove(text)
+
     def _escalated(self) -> bool:
         """Whether the gap count has passed what is tolerated.
 

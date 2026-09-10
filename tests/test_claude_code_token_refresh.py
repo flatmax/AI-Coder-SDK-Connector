@@ -31,18 +31,26 @@ import pytest
 
 from aic_dc.claude_code import token_refresh
 from aic_dc.claude_code.token_refresh import (
+    LOGIN_REQUIRED_DETAIL,
+    REFRESH_FAILED_DETAIL,
     REFRESH_MARGIN_SECONDS,
     ensure_fresh,
     needs_refresh,
     propagate,
     read_expiry,
+    read_refresh_expiry,
     seconds_remaining,
 )
 
 NOW_MS = 1_788_700_000_000
 
 
-def _creds(expires_at: int, *, refresh_token: str | None = "refresh-secret") -> str:
+def _creds(
+    expires_at: int,
+    *,
+    refresh_token: str | None = "refresh-secret",
+    refresh_expires_at: int | None = None,
+) -> str:
     oauth: dict[str, object] = {
         "accessToken": f"access-for-{expires_at}",
         "expiresAt": expires_at,
@@ -51,6 +59,8 @@ def _creds(expires_at: int, *, refresh_token: str | None = "refresh-secret") -> 
     }
     if refresh_token is not None:
         oauth["refreshToken"] = refresh_token
+    if refresh_expires_at is not None:
+        oauth["refreshTokenExpiresAt"] = refresh_expires_at
     return json.dumps({"claudeAiOauth": oauth})
 
 
@@ -90,6 +100,37 @@ def test_read_expiry_tolerates_every_shape_that_is_not_ours(
 
 def test_read_expiry_of_a_missing_file_is_none(tmp_path: Path) -> None:
     assert read_expiry(tmp_path / "nope.json") is None
+
+
+def test_read_refresh_expiry_returns_the_refresh_tokens_own_timestamp(
+    tmp_path: Path,
+) -> None:
+    path = _write(
+        tmp_path / ".credentials.json",
+        _creds(NOW_MS, refresh_expires_at=NOW_MS + 30 * 86_400_000),
+    )
+    assert read_refresh_expiry(path) == NOW_MS + 30 * 86_400_000
+
+
+def test_a_credential_without_the_refresh_expiry_reads_as_cannot_tell(
+    tmp_path: Path,
+) -> None:
+    """Absent is not lapsed. A file written by an older CLI need not carry
+    the field, and inventing an expired login from a missing one would be
+    the same false alarm this distinction exists to remove."""
+    path = _write(tmp_path / ".credentials.json", _creds(NOW_MS))
+    assert read_refresh_expiry(path) is None
+
+
+@pytest.mark.parametrize(
+    "content",
+    ["", "not json", json.dumps({"claudeAiOauth": {"refreshTokenExpiresAt": "soon"}})],
+    ids=["empty", "garbage", "wrong-type"],
+)
+def test_read_refresh_expiry_tolerates_the_shapes_read_expiry_does(
+    tmp_path: Path, content: str
+) -> None:
+    assert read_refresh_expiry(_write(tmp_path / ".credentials.json", content)) is None
 
 
 # ---------------------------------------------------------------------------
@@ -210,9 +251,38 @@ async def test_the_ladder_escalates_when_the_cheap_rung_does_not_refresh(
     assert [call["args"] for call in calls] == list(token_refresh.REFRESH_LADDER)
 
 
-async def test_a_ladder_that_never_refreshes_reports_the_remedy(
+async def test_a_ladder_that_moved_nothing_is_not_a_failure_while_the_token_lives(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """The defect reported on 2026-09-10, as a test.
+
+    Measurement says neither rung renews a token the CLI does not consider
+    due, and our margin is wider than the CLI's. So every connect landing in
+    the gap between the two ran the whole ladder, saw nothing move, and told
+    the user to go fix a credential with minutes of life still on it.
+    "Did not move" is not "could not refresh": the criterion is whether the
+    token is usable, and this one is.
+    """
+    path = _write(tmp_path / ".credentials.json", _creds(_inside_margin()))
+    calls = _spy_exec(monkeypatch, on_call=lambda n: None)
+
+    outcome = await ensure_fresh(
+        credential_path=path, config_dir=tmp_path, cli_path="/bin/claude"
+    )
+
+    assert outcome.ok is True
+    # The ladder did run — this is not the healthy-token early return.
+    assert outcome.attempted is True
+    assert len(calls) == len(token_refresh.REFRESH_LADDER)
+    # And nothing reaches the banner. A log line, not a wolf.
+    assert outcome.detail is None
+
+
+async def test_a_lapsed_token_the_ladder_cannot_move_reports_the_remedy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The failure that survives the fix above: past its own expiry, so the
+    next turn fails with the CLI's opaque authentication line."""
     path = _write(tmp_path / ".credentials.json", _creds(_expired()))
     _spy_exec(monkeypatch, on_call=lambda n: None)
 
@@ -222,10 +292,68 @@ async def test_a_ladder_that_never_refreshes_reports_the_remedy(
 
     assert outcome.ok is False
     assert outcome.attempted is True
-    assert outcome.detail is not None
+    assert outcome.detail == REFRESH_FAILED_DETAIL
     # The sentence names the thing that is known to work by hand.
-    assert "claude" in outcome.detail
-    assert "restart" in outcome.detail.lower()
+    assert "claude" in REFRESH_FAILED_DETAIL
+    assert "restart" in REFRESH_FAILED_DETAIL.lower()
+
+
+async def test_a_lapsed_refresh_token_asks_for_a_login_and_spawns_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The one failure here that no rung could ever repair, so no rung runs.
+
+    It is decided from the file, which is why it is the one degradation that
+    reports ``attempted=False``.
+    """
+    path = _write(
+        tmp_path / ".credentials.json",
+        _creds(_expired(), refresh_expires_at=_expired()),
+    )
+    calls = _spy_exec(monkeypatch, on_call=lambda n: None)
+
+    outcome = await ensure_fresh(
+        credential_path=path, config_dir=tmp_path, cli_path="/bin/claude"
+    )
+
+    assert outcome.ok is False
+    assert outcome.attempted is False
+    assert calls == []
+    assert outcome.detail == LOGIN_REQUIRED_DETAIL
+
+
+async def test_a_refresh_token_with_life_left_still_runs_the_ladder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The near case, which must not be read as the lapsed one: a refresh
+    token good for another month is the ordinary state of a working login."""
+    path = _write(
+        tmp_path / ".credentials.json",
+        _creds(_expired(), refresh_expires_at=_far_future()),
+    )
+    calls = _spy_exec(monkeypatch, on_call=lambda n: None)
+
+    outcome = await ensure_fresh(
+        credential_path=path, config_dir=tmp_path, cli_path="/bin/claude"
+    )
+
+    assert calls, "a live refresh token is not a reason to skip the ladder"
+    assert outcome.detail == REFRESH_FAILED_DETAIL
+
+
+def test_the_two_degradations_do_not_share_a_sentence() -> None:
+    """Why they are separated at all: the banner is the only thing the user
+    sees, and one of the two remedies does not work for the other. A restart
+    cannot recover a lapsed refresh token, and a re-login is not needed for
+    a CLI that merely declined to renew."""
+    assert REFRESH_FAILED_DETAIL != LOGIN_REQUIRED_DETAIL
+    assert "auth login" in LOGIN_REQUIRED_DETAIL
+    assert "auth login" not in REFRESH_FAILED_DETAIL
+    # Published as a set, because the caller withdraws them by name.
+    assert set(token_refresh.DEGRADATION_SENTENCES) == {
+        REFRESH_FAILED_DETAIL,
+        LOGIN_REQUIRED_DETAIL,
+    }
 
 
 async def test_the_probe_pins_the_real_config_dir(
@@ -385,3 +513,13 @@ def _far_future() -> int:
 
 def _expired() -> int:
     return token_refresh._now_ms() - 3600_000
+
+
+def _inside_margin() -> int:
+    """Alive, and close enough to expiry that a refresh is attempted.
+
+    The gap the reported false alarm lived in: inside AIC⚡DC's margin, so
+    the ladder runs, and outside the CLI's own narrower one, so no rung
+    renews anything.
+    """
+    return token_refresh._now_ms() + int((REFRESH_MARGIN_SECONDS - 60) * 1000)

@@ -772,10 +772,16 @@ class EngineSession:
     async def _refresh_access_token(self, cli_path: str) -> None:
         """Renew the subscription access token if it is close to lapsing.
 
-        Called once per connect, before options are built. Never raises:
-        a pre-flight check that could refuse a session which would have
-        worked is worse than the expiry it guards against, so a failure
-        becomes a health degradation and the connect continues.
+        Called once per connect, before options are built, and again on
+        every watchdog tick. Never raises: a pre-flight check that could
+        refuse a session which would have worked is worse than the expiry
+        it guards against, so a failure becomes a health degradation and
+        the connect continues.
+
+        Because it runs repeatedly, it also *withdraws* what it reported.
+        A refresh that works now is evidence against a sentence an earlier
+        one left standing, and the watchdog is the only thing in a position
+        to notice — see ``token_refresh.DEGRADATION_SENTENCES``.
         """
         try:
             outcome = await token_refresh.ensure_fresh(
@@ -794,6 +800,14 @@ class EngineSession:
                 logger.info("%s", outcome.detail)
             else:
                 self.health.note_degradation(outcome.detail)
+        if outcome.ok:
+            # A usable token retires both of this module's sentences, by
+            # name so that nothing else's is touched. Not folded into the
+            # branch above: the *refreshed* outcome carries a detail of its
+            # own, and it is the strongest evidence there is that an earlier
+            # failure has stopped standing.
+            for sentence in token_refresh.DEGRADATION_SENTENCES:
+                self.health.clear_degradation(sentence)
 
     async def _token_watchdog(self) -> None:
         """Keep a *running* session's access token from lapsing under it.

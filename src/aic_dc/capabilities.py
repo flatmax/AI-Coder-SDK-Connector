@@ -121,8 +121,9 @@ class Surface:
     #: the honest one: both reach the same product, so a surface the SDK
     #: cannot feed is one Antigravity cannot feed, whichever way it is
     #: driven. Only where the *transport* changes the answer does this
-    #: carry a value — which today is the transcript surfaces, because
-    #: ``agy`` writes a full conversation log to disk and the SDK does not.
+    #: carry a value — which today is the two subagent surfaces, because
+    #: ``agy`` announces a delegation on its stream and writes the
+    #: subagent's own conversation to disk, and the SDK does neither.
     agy: str | None = None
 
     def status_for(self, engine: str) -> str:
@@ -285,19 +286,45 @@ SURFACES: tuple[Surface, ...] = (
         "onto agent_id, and no pump there emits the announcement yet.",
     ),
     Surface(
-        key="subagent_tabs",
-        title="Subagent transcripts and ⏹, the RPC surface",
+        key="subagent_transcripts",
+        title="Read a subagent's transcript",
         claude=SUPPORTED,
         antigravity=UNBUILT,
-        note="What the router gates on this key is three methods — "
-        "get_subagent_transcript, list_subagent_transcripts and stop_task "
-        "— so it is the RPC half rather than the rendering. Kept as one "
-        "key while all three are unbuilt on Antigravity; the moment one of "
-        "them is honest and another is not, this splits again rather than "
-        "shipping a ⏹ that cannot stop anything. On agy the transcripts "
-        "are reachable — a subagent writes its own transcript.jsonl under "
-        "BRAIN_DIR/<conversation_id> — and whether one subagent can be "
-        "stopped is not yet measured, which is what holds this row.",
+        agy=SUPPORTED,
+        note="get_subagent_transcript and list_subagent_transcripts. Split "
+        "from subagent_tabs on 2026-09-10, which is what that key's own "
+        "note said would happen the moment one of its three methods was "
+        "honest and another was not — and it is the ⏹ that is not. What "
+        "made this half honest was reading the files rather than reasoning "
+        "about them: a subagent writes its own conversation under "
+        "BRAIN_DIR/<conversation_id>/.system_generated/logs/, addressed by "
+        "the same conversation_id the announcement already carries, and "
+        "transcript_full.jsonl there records tool arguments as objects "
+        "where transcript.jsonl double-encodes each one as a JSON string. "
+        "The SDK transport marks every step with trajectory_id and depth "
+        "and no reader has been written, so it stays unbuilt rather than "
+        "absent.",
+    ),
+    Surface(
+        key="subagent_stop",
+        title="⏹ one subagent, leaving the rest of the turn running",
+        claude=SUPPORTED,
+        antigravity=UNBUILT,
+        note="stop_task, and the half of subagent_tabs that was holding the "
+        "other half back. There is no halt frame on either Antigravity "
+        "transport: on agy the only mechanism is starvation "
+        "(AgyGateServer.refuse_all), and it is turn-wide rather than scoped "
+        "to a conversation, so wiring stop_task to it as it stands would "
+        "stop the parent as well as the subagent the user aimed at. "
+        "Scoping a refusal to one subagent's conversation is buildable — "
+        "the gate already claims each subagent's id — and two limits are "
+        "known before it is written: a subagent producing only prose has no "
+        "tool call to refuse and runs to its end, and a subagent's own "
+        "subagent has a conversation id of its own that an id-scoped "
+        "refusal would not match. Whether agy then reports the step "
+        "CANCELED — the amber LED the row would need — is unmeasured. "
+        "UNBUILT rather than ABSENT because the mechanism exists; what is "
+        "missing is the scoping and the measurement.",
     ),
     Surface(
         key="agent_questions",

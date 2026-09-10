@@ -1221,8 +1221,11 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
     // other rendered the router's refusal as red text at the top of every
     // preview: "list_subagent_transcripts serves the 'subagent_tabs'
     // surface, which the agy engine cannot feed." The refusal was right;
-    // asking at all was the bug. Found in a browser on 2026-09-05.
-    if (!supports(SURFACE.SUBAGENT_TABS)) {
+    // asking at all was the bug. Found in a browser on 2026-09-05. (That
+    // key was split into SUBAGENT_TRANSCRIPTS and SUBAGENT_STOP on
+    // 2026-09-10, and `agy` now feeds the half this guard reads — so the
+    // guard is here for the SDK transport, which still cannot.)
+    if (!supports(SURFACE.SUBAGENT_TRANSCRIPTS)) {
       this._subagents = [];
       this._subagentsError = '';
       return;

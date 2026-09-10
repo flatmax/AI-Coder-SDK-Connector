@@ -67,6 +67,30 @@ the cheapest-looking flag: its own help says "OAuth and keychain are never
 read", so a bare CLI would skip the very credential this module is trying
 to renew.
 
+"Did not move" is not "could not refresh"
+-----------------------------------------
+The re-read above answers *whether a rung refreshed*, and this module used
+to read it as whether the token was **all right** — so a ladder that ran
+and moved nothing reported a broken login. Measured on 2026-09-10 against
+a healthy token with 7.9 hours of life left: ``claude auth status --json``
+exits 0, prints account metadata and carries no expiry field at all, and
+``claude -p hi --max-turns 1`` exits 0 in about three seconds. Neither
+changed ``expiresAt`` by a byte. The CLI refreshes when *it* considers a
+refresh due, and its threshold is narrower than
+:data:`REFRESH_MARGIN_SECONDS`, so every connect landing in the gap between
+the two margins ran both rungs, saw nothing move, and told the user to go
+fix a credential that was fine.
+
+So the criterion is the token's *usability*, asked once after the ladder: a
+token still ahead of ``now`` has not failed, whoever renewed it or didn't.
+Two states remain degradations, and they are separated because they have
+different remedies — an access token past its own ``expiresAt`` that the
+ladder could not move (:data:`REFRESH_FAILED_DETAIL`), and a
+``refreshTokenExpiresAt`` in the past, which no invocation of any CLI can
+repair and which is therefore checked *before* a subprocess is spent on it
+(:data:`LOGIN_REQUIRED_DETAIL`). A banner that fires on ordinary restarts
+is the fastest way to teach a user to ignore the one that matters.
+
 Never fatal
 -----------
 A failed refresh does not fail the connect. The token may still be valid,
@@ -125,6 +149,31 @@ REFRESH_LADDER: tuple[tuple[str, ...], ...] = (
     ("-p", "hi", "--max-turns", "1"),
 )
 
+# The access token has lapsed and the ladder could not move it. The remedy
+# is the one observed to work by hand, and it is deliberately vague about
+# *why* the CLI would not refresh, because this branch does not know.
+REFRESH_FAILED_DETAIL = (
+    "The Claude subscription access token has expired and the CLI would not "
+    "renew it. Run `claude` in a terminal to renew it, then restart the engine."
+)
+
+# The refresh token itself has lapsed. A different failure with a different
+# fix: no rung of the ladder, and no restart, can recover this one — the
+# credential has to be signed in again.
+LOGIN_REQUIRED_DETAIL = (
+    "The Claude subscription login has expired: its refresh token has lapsed, "
+    "so nothing can renew it automatically. Run `claude auth login` in a "
+    "terminal to sign in again."
+)
+
+# What this module can put on the health banner. Held as constants and
+# published as a set because a degradation is a *standing* condition that
+# the record deduplicates and retires by its text: a caller that refreshes
+# successfully later has to be able to name what it withdrew. An
+# interpolated figure would make one standing condition read as a new one
+# on every watchdog tick.
+DEGRADATION_SENTENCES: tuple[str, ...] = (REFRESH_FAILED_DETAIL, LOGIN_REQUIRED_DETAIL)
+
 
 @dataclass(frozen=True)
 class RefreshOutcome:
@@ -133,34 +182,71 @@ class RefreshOutcome:
     ``detail`` is always safe to show a user and never contains a token.
     """
 
-    #: True when the parent's token is usable now — either it never needed
-    #: refreshing, or a rung moved ``expiresAt`` forward.
+    #: True when the parent's token is usable now: it never needed
+    #: refreshing, a rung moved ``expiresAt`` forward, or the ladder
+    #: changed nothing and the token is still ahead of the clock anyway.
+    #: False only for the two states a user has to act on.
     ok: bool
-    #: True when a refresh was actually attempted (a subprocess ran).
+    #: True when a refresh was actually attempted (a subprocess ran). A
+    #: lapsed refresh token is a failure with this ``False``: it is decided
+    #: from the file, because no subprocess could have changed the answer.
     attempted: bool
-    #: One sentence for the health banner, or ``None`` when nothing
-    #: noteworthy happened.
+    #: One sentence for the health banner, or ``None`` when there is
+    #: nothing a *user* should be told. A rung that ran and refreshed
+    #: nothing is logged, not banner-worthy.
     detail: str | None = None
+
+
+def _oauth_block(credential_path: Path) -> dict | None:
+    """The ``claudeAiOauth`` object in ``credential_path``, or ``None``.
+
+    ``None`` when the file is missing, unreadable, not JSON, or carries no
+    OAuth block — every one of which is a legitimate state (an API-key
+    machine has no such file) and none of which is this module's business
+    to complain about. Callers treat ``None`` as "not a subscription login
+    I can reason about" and do nothing.
+    """
+    try:
+        data = json.loads(credential_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
+        logger.debug("Cannot read %s for its OAuth block: %s", credential_path, exc)
+        return None
+    oauth = data.get("claudeAiOauth") if isinstance(data, dict) else None
+    return oauth if isinstance(oauth, dict) else None
 
 
 def read_expiry(credential_path: Path) -> int | None:
     """The ``claudeAiOauth.expiresAt`` in ``credential_path``, in ms.
 
-    ``None`` when the file is missing, unreadable, not JSON, or carries no
-    OAuth block — every one of which is a legitimate state (an API-key
-    machine has no such file) and none of which is this module's business
-    to complain about. The caller treats ``None`` as "not a subscription
-    login I can reason about" and does nothing.
+    ``None`` for every shape that is not a subscription login — see
+    :func:`_oauth_block` — and for an ``expiresAt`` that is not a number.
     """
-    try:
-        data = json.loads(credential_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError, ValueError) as exc:
-        logger.debug("Cannot read %s for its token expiry: %s", credential_path, exc)
-        return None
-    oauth = data.get("claudeAiOauth") if isinstance(data, dict) else None
-    if not isinstance(oauth, dict):
+    oauth = _oauth_block(credential_path)
+    if oauth is None:
         return None
     expires_at = oauth.get("expiresAt")
+    return expires_at if isinstance(expires_at, int) else None
+
+
+def read_refresh_expiry(credential_path: Path) -> int | None:
+    """The ``claudeAiOauth.refreshTokenExpiresAt`` in ``credential_path``, in ms.
+
+    The field that decides whose problem a failed refresh is. While it is in
+    the future, a refresh that did not happen is a refresh the CLI did not
+    consider due, and nothing is wrong; once it is in the past, no
+    invocation of any CLI can renew anything and only an interactive login
+    will do.
+
+    ``None`` means *cannot tell* — the field is absent, or is not a number —
+    and cannot tell is never reported as a failure. The observed file
+    carries it (see the module docstring's key list), but a credential
+    written by an older CLI need not, and inventing a lapsed login from a
+    missing field would be the same defect this distinction exists to fix.
+    """
+    oauth = _oauth_block(credential_path)
+    if oauth is None:
+        return None
+    expires_at = oauth.get("refreshTokenExpiresAt")
     return expires_at if isinstance(expires_at, int) else None
 
 
@@ -220,9 +306,23 @@ async def ensure_fresh(
     if not needs_refresh(before):
         return RefreshOutcome(ok=True, attempted=False)
 
+    # The one state no rung can repair, asked before a subprocess is spent
+    # finding that out. It is also the only failure here that is genuinely
+    # the user's to act on, and its remedy is not the other one's.
+    refresh_expiry = read_refresh_expiry(credential_path)
+    if refresh_expiry is not None and seconds_remaining(refresh_expiry) <= 0:
+        logger.warning(
+            "The refresh token in %s lapsed; only an interactive login can renew this credential",
+            credential_path,
+        )
+        return RefreshOutcome(ok=False, attempted=False, detail=LOGIN_REQUIRED_DETAIL)
+
     remaining = seconds_remaining(before) if before is not None else 0.0
+    # Neither this line nor the one below says "before connect", though both
+    # did: the watchdog calls this mid-session too, so half of every such
+    # sentence was wrong wherever it was read.
     logger.info(
-        "Access token in %s expires in %.0fs; refreshing before connect",
+        "Access token in %s expires in %.0fs; asking the CLI to renew it",
         credential_path,
         remaining,
     )
@@ -239,27 +339,36 @@ async def ensure_fresh(
                 return RefreshOutcome(
                     ok=True,
                     attempted=True,
-                    detail=f"Access token refreshed before connect (`claude {' '.join(rung)}`).",
+                    detail=f"Access token renewed (`claude {' '.join(rung)}`).",
                 )
         logger.debug("`claude %s` did not move the token expiry", " ".join(rung))
 
-    # Every rung ran and the expiry never moved. Said plainly, with the
-    # remedy that is known to work, because the alternative the user
-    # actually gets is the CLI's own opaque line half an hour later.
+    # Every rung ran and the expiry never moved, which is two different
+    # states wearing one face. Ask the only question that separates them:
+    # is the token usable now? Re-read rather than reasoned about, because
+    # the user's own terminal may have refreshed it while the ladder ran.
+    after = read_expiry(credential_path)
+    if after is not None and seconds_remaining(after) > 0:
+        # Nothing is wrong. The CLI did not consider a refresh due, which is
+        # what a token inside *our* margin and outside its own looks like —
+        # and the watchdog will ask again before it lapses.
+        logger.info(
+            "The CLI did not renew the access token in %s and did not need "
+            "to: %.0fs of life remain",
+            credential_path,
+            seconds_remaining(after),
+        )
+        return RefreshOutcome(ok=True, attempted=True)
+
+    # A token past its own expiry that the ladder could not move. Said
+    # plainly, with the remedy that is known to work by hand, because the
+    # alternative the user actually gets is the CLI's own opaque line.
     logger.warning(
-        "Could not refresh the access token in %s; the session may fail "
-        "with an authentication error when it expires",
+        "Could not refresh the lapsed access token in %s; turns will fail "
+        "with an authentication error until it is renewed",
         credential_path,
     )
-    return RefreshOutcome(
-        ok=False,
-        attempted=True,
-        detail=(
-            "The Claude subscription access token is expired or expiring and "
-            "could not be refreshed automatically. Run `claude` in a terminal "
-            "to renew it, then restart the engine."
-        ),
-    )
+    return RefreshOutcome(ok=False, attempted=True, detail=REFRESH_FAILED_DETAIL)
 
 
 async def _run_rung(

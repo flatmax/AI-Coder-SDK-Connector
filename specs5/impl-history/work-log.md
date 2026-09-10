@@ -574,6 +574,68 @@ The classification tests work because they refuse to be read past, and that is t
 
 ### Landed since
 
+- **The health banner that cried wolf about a token with fourteen minutes of life on it** — 2026-09-10.
+  Closes the entry [`../known-issues.md`](../known-issues.md) carried for one day, reported from a live
+  session: the banner said *"The Claude subscription access token is expired or expiring and could not be
+  refreshed automatically"*, the user ran `claude` in a terminal, typed `hi`, and everything worked.
+
+  **The report arrived with its own diagnosis, which is why it never needed triage.** `ensure_fresh`
+  decided a ladder rung had worked by re-reading `claudeAiOauth.expiresAt` and requiring it to have moved
+  forward. Measured against a healthy token with 7.9 h of life left: `claude auth status --json` exits 0,
+  prints account metadata and carries no expiry field at all; `claude -p hi --max-turns 1` exits 0 in ~3 s
+  and leaves `expiresAt` byte-identical. **The CLI refreshes when *it* considers a refresh due, and its
+  threshold is narrower than our fifteen-minute `REFRESH_MARGIN_SECONDS`** — so every connect landing in
+  the gap between the two margins ran both rungs, saw nothing move, and reported a broken login. The
+  sentence was indistinguishable from the real failure, which is the fastest way there is to teach a user
+  to ignore a banner.
+
+  **"Did not move" is not "could not refresh", and the fix is to ask the other question.** The criterion
+  is now the token's *usability*, asked once after the ladder: a token still ahead of the clock has not
+  failed, whoever renewed it or didn't. `attempted` still means a subprocess ran, so the log keeps the
+  distinction the banner no longer draws.
+
+  **Two failures were wearing one sentence, and they have different remedies.** An access token past its
+  own `expiresAt` that the ladder could not move is `REFRESH_FAILED_DETAIL` — renew it and restart. A
+  `refreshTokenExpiresAt` in the past is `LOGIN_REQUIRED_DETAIL`, and it is the only failure here a
+  restart cannot touch: nothing can renew that credential, so the sentence asks for `claude auth login`
+  instead. It is also decided from the file rather than from a subprocess, so it is checked *before* the
+  ladder runs and is the one degradation that reports `attempted=False`. **Absent is not lapsed**: a
+  missing or non-numeric field reads as *cannot tell* and never as a failure, because inventing an expired
+  login from an absent field is the same defect in the other direction. The field was confirmed present
+  on a real credential file the same day — `refreshTokenExpiresAt` with 24.3 days on it, read read-only,
+  beside an access token with 4.76 h — so the branch is measured rather than assumed.
+
+  **A third defect was underneath, and it is the one that would have kept the true banner wrong.**
+  `note_degradation` had no counterpart: a degradation is a standing condition, deduplicated on its text
+  and never removed. Every other loss recorded there is settled at connect and lasts as long as the
+  session, but the token refresh is re-run on every watchdog tick — so a failure at connect that succeeded
+  twenty minutes later left a sentence on screen that nothing but a restart could dismiss. Since the
+  remedy for the real failure is *"go fix it in a terminal"*, the banner survived the fix it asked for.
+  `EngineHealth.clear_degradation` withdraws by exact text, which is why `note_degradation` deduplicates
+  on the same thing — a caller may only retire what it can name, so no clearing path can silence another
+  subsystem's loss — and `_refresh_access_token` withdraws both of its sentences on every `ok` outcome,
+  including the *refreshed* one, which carries a detail of its own. A test names that case, because
+  folding the withdrawal into the reporting branch is the obvious shape and it misses exactly the outcome
+  that is strongest evidence the condition has stopped standing. **No webapp change**: the banner already
+  renders `degradations` as a list and hides when it empties. A mid-session withdrawal reaches the browser
+  on the next `engineHealth` broadcast or `get_engine_health` fetch rather than being pushed, which is a
+  stated limit and not a silent one.
+
+  **The ladder itself was left alone, deliberately.** Measurement says neither rung renews a token the CLI
+  does not consider due, so the `-p hi` turn is provably wasted inside the margin gap and the tempting
+  next edit is to stop escalating until the token has actually lapsed. That trades a tiny turn for a
+  window in which the child snapshots a token it cannot renew, and the watchdog's coverage of that window
+  depends on the CLI's own threshold — an unknown. A behaviour change resting on an unmeasured constant is
+  not part of fixing a wrong sentence.
+
+  **Two things the report named and this does not build.** Surfacing `claude auth login`'s flow in the
+  banner as a click rather than as an instruction, which is a UI feature rather than a correctness fix;
+  and `claude setup-token` / `apiKeyHelper`, the two standing ways to sidestep the ~8-hour cycle entirely.
+  Both are recorded here rather than queued. **And this fix is offline-tested only**: 13 tests across
+  `test_claude_code_token_refresh.py` and `test_claude_code_session.py`, 4,721 green, and the state the
+  bug was reported in — a real credential inside the margin — is reachable on demand only by waiting for
+  it. The regression test names the condition it stands in for.
+
 - **§ D is empty: ⏹ and the cost chip were both watched doing their job** — 2026-09-09. Closes § D1 and
   § D4 of [`../next.md`](../next.md), which leaves that file's verification debt with nothing in it. The
   findings are in [`../5-webapp/subagent-browser.md`](../5-webapp/subagent-browser.md) § *Amber Is

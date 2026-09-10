@@ -460,6 +460,38 @@ class TestConnect:
         assert "could not refresh" in session.health.degradations
         await session.disconnect()
 
+    async def test_a_working_refresh_withdraws_an_earlier_failure(
+        self, tmp_path, monkeypatch
+    ):
+        """This runs on every watchdog tick as well as at connect, so the
+        banner an earlier failure left has to be able to come down. A user who
+        renews the credential in a terminal fixes the condition and tells
+        nobody; the next refresh is the only thing in a position to notice.
+
+        The outcome under test carries a detail of its own — the *refreshed*
+        sentence — which is the case a withdrawal folded into the reporting
+        branch would have missed.
+        """
+
+        async def working(**kwargs):
+            return token_refresh.RefreshOutcome(
+                ok=True, attempted=True, detail="Access token renewed."
+            )
+
+        monkeypatch.setattr(token_refresh, "ensure_fresh", working)
+        session = EngineSession(tmp_path, EngineConfig())
+        session.health.note_degradation(token_refresh.REFRESH_FAILED_DETAIL)
+        session.health.note_degradation(token_refresh.LOGIN_REQUIRED_DETAIL)
+        session.health.note_degradation("The aic-dc repo tools did not start.")
+
+        await session.connect()
+
+        assert token_refresh.REFRESH_FAILED_DETAIL not in session.health.degradations
+        assert token_refresh.LOGIN_REQUIRED_DETAIL not in session.health.degradations
+        # And nothing else was swept up with them.
+        assert session.health.degradations == ["The aic-dc repo tools did not start."]
+        await session.disconnect()
+
     async def test_a_raising_refresh_still_connects(self, tmp_path, monkeypatch):
         async def boom(**kwargs):
             raise RuntimeError("credential store on fire")
@@ -1030,6 +1062,34 @@ class TestStartupDegradation:
         payload = h.to_dict()
         h.note_degradation("no hook")
         assert payload["degradations"] == ["no bridge"]
+
+    def test_a_condition_that_stops_standing_can_be_withdrawn(self):
+        """Most losses here are settled at connect and last the session. The
+        access-token refresh is re-run every watchdog tick, so a failure that
+        succeeds twenty minutes later has to be able to take its sentence
+        back — a banner nothing can clear is a stale banner."""
+        h = self.health()
+        h.note_degradation("could not refresh the token")
+        h.clear_degradation("could not refresh the token")
+        assert h.degradations == []
+
+    def test_withdrawing_touches_only_the_sentence_it_names(self):
+        """Why note and clear both key on the exact text: a caller may only
+        retire what it can name, so no clearing path can silence another
+        subsystem's loss."""
+        h = self.health()
+        h.note_degradation("no bridge")
+        h.note_degradation("could not refresh the token")
+        h.clear_degradation("could not refresh the token")
+        assert h.degradations == ["no bridge"]
+
+    def test_withdrawing_something_never_noted_is_not_an_error(self):
+        """The ordinary case: every successful refresh withdraws both of its
+        sentences, and on almost every one of them neither was ever there."""
+        h = self.health()
+        h.note_degradation("no bridge")
+        h.clear_degradation("could not refresh the token")
+        assert h.degradations == ["no bridge"]
 
 
 # ---------------------------------------------------------------------------
