@@ -65,6 +65,7 @@ import {
   toolLabel,
 } from './block-render.js';
 import { STYLES } from './styles.js';
+import { applyToolResult, makeTurnBlocks } from './blocks.js';
 
 // ---------------------------------------------------------------------------
 // Harness
@@ -2049,5 +2050,72 @@ describe('renderLiveUsage', () => {
     }));
     expect(host.querySelector('.turn-cost')).toBeNull();
     expect(host.textContent).not.toContain('$');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The engine → card contract for a tool result
+// ---------------------------------------------------------------------------
+
+describe('a tool result from the engine reaches the card', () => {
+  /**
+   * Every test above hands `renderToolCard` a hand-written `result`, which
+   * is how a divergence between what the engine *sends* and what this
+   * renders survived on both Antigravity transports until 2026-09-12: the
+   * `agy` pump sent the output as `content`, this reads `preview`, and
+   * `applyToolResult` spreads the payload onto the block without mapping
+   * anything. Every tool card on that transport drew "No output." over a
+   * payload carrying the output.
+   *
+   * So this one starts from the payload shape the server emits and goes
+   * through `applyToolResult`, which is the path the browser actually
+   * takes. See `specs5/plan-ag/risks.md` AG-R-17.
+   */
+  function applied(payload) {
+    const turn = makeTurnBlocks();
+    const block = toolBlock({});
+    turn.blocks.push(block);
+    turn.index.set(block.block_id, block);
+    expect(applyToolResult(turn, { tool_use_id: block.block_id, ...payload }))
+      .toBe(true);
+    return block;
+  }
+
+  function body(block) {
+    const panel = stubPanel();
+    panel._blockExpansion.set(block.block_id, true);
+    return draw(renderToolCard(panel, block));
+  }
+
+  it('renders the output the engine put in `preview`', () => {
+    const host = body(applied({ status: 'ok', preview: 'alpha\nbeta' }));
+    // Read off `textContent` rather than the `text()` helper, which
+    // collapses whitespace: a tool result's newlines are the shape of the
+    // output and the card renders it in a <pre> for exactly that reason.
+    expect(host.querySelector('.tool-result-body').textContent)
+      .toBe('alpha\nbeta');
+    expect(host.querySelector('.tool-result-empty')).toBeNull();
+  });
+
+  it('draws "No output." only when the engine really sent none', () => {
+    const host = body(applied({ status: 'ok', preview: '' }));
+    expect(text(host.querySelector('.tool-result-empty'))).toBe('No output.');
+  });
+
+  it('names the withheld size from the engine\'s own truncation fields', () => {
+    const host = body(applied({
+      status: 'ok', preview: 'first lines…', truncated: true, full_bytes: 2560,
+    }));
+    expect(text(host.querySelector('.tool-result-truncated')))
+      .toBe('Truncated — 2.5 KB in full. The engine sends a preview only.');
+  });
+
+  it('shows nothing for a payload that names the body anything else', () => {
+    // The defect, pinned as a fact about this renderer rather than as a
+    // rule about engines: a key it does not read is a key that is not
+    // there, and the card says so without erroring. That silence is why
+    // the server-side tripwire (AG-R-17) is where the rule lives.
+    const host = body(applied({ status: 'ok', content: 'alpha\nbeta' }));
+    expect(text(host.querySelector('.tool-result-empty'))).toBe('No output.');
   });
 });

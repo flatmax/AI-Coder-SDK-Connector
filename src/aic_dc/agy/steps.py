@@ -57,7 +57,11 @@ from typing import Any
 
 from aic_dc.agy import tools as agy_tools
 from aic_dc.antigravity.steps import TurnStats
-from aic_dc.claude_code.messages import Event, files_written_by
+from aic_dc.claude_code.messages import (
+    Event,
+    files_written_by,
+    truncate_tool_result,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -550,6 +554,22 @@ class AgyTranslator:
         for path in files:
             if path not in self.stats.files_modified:
                 self.stats.files_modified.append(path)
+        # `preview`/`truncated`/`full_bytes`, not `content` — the three
+        # fields `block-render.js` renders a result body from, and the
+        # same three the Claude and SDK pumps send. This sent `content`
+        # from the day it was written, and `renderToolResult` reads
+        # `result.preview` with an empty-string default, so **every tool
+        # card on this transport drew the literal "No output."** while the
+        # output sat unread in the payload beside it. Nothing failed:
+        # `applyToolResult` spreads the payload onto the block without
+        # mapping, and an absent key is a card with nothing in it rather
+        # than an error. AG-R-17.
+        #
+        # `truncate_tool_result` is the Claude pump's, shared rather than
+        # re-derived: two implementations of "how much of a tool result
+        # does a card show" would show a user different amounts on
+        # different engines for the same reason.
+        preview, truncated = truncate_tool_result(content)
         return events + [
             Event(
                 "toolResult",
@@ -557,7 +577,9 @@ class AgyTranslator:
                     "tool_use_id": call_id,
                     "name": name,
                     "status": "error" if failed else "success",
-                    "content": content,
+                    "preview": preview,
+                    "truncated": truncated,
+                    "full_bytes": len(content.encode("utf-8")),
                     "duration_ms": _duration_ms(step.get("duration_seconds")),
                     "agent_id": self._agent_id,
                     "files_modified": files,

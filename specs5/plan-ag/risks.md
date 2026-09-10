@@ -1185,13 +1185,50 @@ so a turn the user stopped, and the UI has settled, keeps invoking the model. Th
 every tool call, which bounds the damage to spend and to prose rather than to the working tree, and
 that is the reason this is moderate rather than critical.
 
-**Mitigation.** Two, and the first is cheap. Register an `aic-dc-gate` `Stop` handler that returns
-`{}` — the doc says any decision other than `"continue"` allows the stop — so at least one voice in
-the merge is always for stopping; whether that *wins* against a concurrent `"continue"` is
-**unverified and worth a probe before relying on it**. Second, keep the `PreToolUse` refusal armed
-after the stop rather than clearing it at turn end, so a revived loop reaches the tree through a gate
-that is still saying no. `AgyGateServer.release` is called "when a new turn starts, never mid-turn"
-(`src/aic_dc/agy/gate_server.py`), which is already the right shape for this.
+**Mitigation.** Two were proposed, and **the first one does not work.** It was: register an
+`aic-dc-gate` `Stop` handler returning `{}` — the doc says any decision other than `"continue"`
+allows the stop — so at least one voice in the merge is always for stopping. That shipped on
+2026-09-11 with [AG-19](decisions.md#ag-19), carrying this entry's own warning that whether it *wins*
+against a concurrent `"continue"` was **unverified and worth a probe before relying on it**.
+
+**Probed 2026-09-12, and it loses.** `scripts/probe_agy_stop_merge.py`, two hooks in one isolated
+`hooks.json`, the same turn, both key orders:
+
+| | Ours ran? | Turn | |
+|---|---|---|---|
+| rival `continue` alone | — | **held open** (17.6s against ~1.6s) | the harm, reproduced |
+| ours `{}` **first**, rival second | yes, 1× | **held open** (19.5s) | our vote is cast and ignored |
+| rival first, ours `{}` second | **no, 0×** | **held open** (18.6s) | our handler is never asked |
+
+So `continue` wins irrespective of order, and a `continue` **short-circuits the handlers after it** —
+being registered is not the same as being asked. The shipped `Stop` handler keeps its place for a
+different reason: the payload carries `terminationReason`, which is how this host tells a loop it
+ended from one a stranger's hook ended, and there is nowhere else to read it. It is a report, not a
+veto, and the docstrings that called it a vote have been corrected.
+
+**The second mitigation is therefore the load-bearing one, and it was already the behaviour:** keep
+the `PreToolUse` refusal armed after the stop rather than clearing it at turn end, so a revived loop
+reaches the tree through a gate that is still saying no. `AgyGateServer.resume` is called "when a new
+turn starts, never mid-turn" (`src/aic_dc/agy/gate_server.py`) — the right shape, and now pinned by
+`TestTheRefusalOutlivesTheTurnItStopped` rather than left as a property nobody asserted. This is why
+the risk stays **moderate**: a revived loop costs spend and prose, not the working tree.
+
+**Two things this probe did not settle**, recorded so neither is mistaken for closed:
+
+- **Whether `PostInvocation`'s `terminate` beats a concurrent `Stop` `continue`.** AG-19's mechanism
+  is a second lever on a revived loop and the two could plausibly ping-pong. Untested.
+- **Why `status` says `SUCCESS` for a turn that never finished.** A held-open turn returns
+  `status: "SUCCESS"` with partial output once `--print-timeout` expires, which is what made the
+  first two runs of the probe disagree with each other. A host reading `status` alone cannot tell a
+  completed turn from an abandoned one.
+
+**Three instrument defects came first, and they are the reason the measurement is trustworthy.** The
+rival hook's answer was built into a shell command where a backslash inside single quotes is literal,
+so it printed `{\"decision\":…}` and `agy` read no decision from it — the probe reported that
+`continue` does nothing, about a hook that had never said `continue`. Then an unhandled
+`TimeoutExpired` killed the run that first reproduced the harm. Then `status` was read as the signal.
+The probe now self-tests its own stimulus before trusting anything downstream of it, which is the
+check that would have caught the first and cost nothing.
 
 **Measured 2026-09-10, which sharpens both the risk and the tripwire.** The `Stop` payload carries a
 `terminationReason`, and the values seen are `NO_TOOL_CALL` for an ordinary end and

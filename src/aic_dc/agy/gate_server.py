@@ -594,6 +594,12 @@ class AgyGateServer:
         it. :func:`aic_dc.agy.hook.report_stop` does not forward this
         return value either, so both ends hold that property alone.
 
+        **It does not follow that our ``{}`` protects the stop.** Measured
+        2026-09-12: a hook this app does not own, answering ``continue``,
+        holds the turn open whichever order the two run in — and runs ours
+        not at all when it goes first. This handler's value is the reading
+        below, not a veto. See [AG-R-16](../../../specs5/plan-ag/risks.md#ag-r-16).
+
         What it does with the payload is tell one hook-ended loop from
         another. ``TERMINAL_CUSTOM_HOOK`` on a conversation
         :meth:`decide_invocation` never terminated means **somebody

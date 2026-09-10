@@ -10,8 +10,10 @@ together because they share a socket, an owner lookup and a process:
   finish. Answers ``terminationBehavior: "terminate"`` while ⏹ is latched,
   which ends the loop whatever the agent concluded
   ([AG-19](../../../specs5/plan-ag/decisions.md#ag-19)).
-- ``Stop`` — when the execution loop terminates. Always lets it, which is
-  this app's standing vote in a merge it does not control
+- ``Stop`` — when the execution loop terminates. Always lets it, and
+  **that is a report rather than a veto**: measured 2026-09-12, a rival
+  hook's ``continue`` holds the turn open whether ours runs before it or
+  not, and short-circuits ours entirely when it runs first
   ([AG-R-16](../../../specs5/plan-ag/risks.md#ag-r-16)).
 
 **The three fail in opposite directions, deliberately** — see § *Every
@@ -95,8 +97,10 @@ having asked the registry rather than the socket.
 Governing spec: ``specs5/plan-ag/`` — AG-14, AG-5, AG-19, and
 ``risks.md`` AG-R-12 and AG-R-16, whose mitigations are requirements of
 this file: a ``"*"`` matcher, never exit 0 silently, a ``Stop`` handler
-that never says ``continue``, and a tripwire that asserts the *file* is
-unchanged rather than that this hook fired.
+that never says ``continue`` — and a tripwire that asserts the *file* is
+unchanged rather than that this hook fired, which is the shape every claim
+here should have had: AG-R-16's own mitigation was believed for a day on
+the strength of the documentation, and measurement refuted it.
 """
 
 from __future__ import annotations
@@ -305,21 +309,36 @@ def report_stop(
     config_dir: Path | str | None = None,
     ask: Any = None,
 ) -> dict[str, Any]:
-    """Tell the host the loop ended, and always let it end. AG-R-16.
+    """Tell the host the loop ended, and never object to it. AG-R-16.
 
     ``agy``'s ``Stop`` contract accepts ``{"decision": "continue"}``, which
     **blocks the stop and re-enters the loop**. This app never sends it,
     and the return is a literal rather than anything derived from the
-    socket so that no failure and no host bug can reach that string. Ours
-    is therefore always a voice for stopping in a merge that may hold
-    somebody else's hook saying the opposite.
+    socket so that no failure and no host bug can reach that string.
 
-    The round trip to the host is made for its *side effect* — the payload
-    carries ``terminationReason``, which is how the host tells a loop it
-    ended from one a stranger's hook ended. The reply is read and
-    discarded, and reading it is not waste: ``agy`` is blocked on this
-    process, so waiting for the answer is what guarantees the host has
-    recorded the stop before the turn's ``result`` frame is emitted.
+    **What this is not is a vote.** It was written believing that one
+    handler answering ``{}`` would be enough to carry a stop through a
+    merged hooks file — the mitigation
+    [AG-R-16](../../../specs5/plan-ag/risks.md#ag-r-16) asked for, and
+    recorded there as unverified. ``scripts/probe_agy_stop_merge.py``
+    measured it on 2026-09-12 and it is false twice over: a rival
+    ``continue`` holds the turn open with ours in the merge, in **either**
+    key order, and when the rival runs first **this handler is not run at
+    all** — a ``continue`` short-circuits the handlers after it. Being
+    registered is not the same as being asked.
+
+    So its value is the *side effect*, and that is now the reason it
+    exists. The payload carries ``terminationReason``, which is how the
+    host tells a loop it ended from one a stranger's hook ended, and there
+    is nowhere else to read it. The reply is read and discarded, and
+    reading it is not waste: ``agy`` is blocked on this process, so waiting
+    for the answer is what guarantees the host has recorded the stop before
+    the turn's ``result`` frame is emitted.
+
+    The defence that does hold is one layer down — the gate's refusal stays
+    armed after a stopped turn ends, so a revived loop reaches the working
+    tree through a gate still saying no. See
+    :meth:`aic_dc.agy.gate_server.AgyGateServer.resume`.
     """
     asker = ask if ask is not None else ask_host
 

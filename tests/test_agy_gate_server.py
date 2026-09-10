@@ -730,3 +730,60 @@ class TestTheEventRoutesTheAnswer:
             return result
 
         assert asyncio.run(go())["decision"] == "allow"
+
+
+class TestTheRefusalOutlivesTheTurnItStopped:
+    """AG-R-16's surviving mitigation, pinned now that it is load-bearing.
+
+    The risk named two defences against a third-party `Stop` hook reviving
+    a stopped turn. The first — this app registering a `Stop` handler that
+    always permits the stop — shipped on 2026-09-11 and was **refuted by
+    measurement on 2026-09-12**: `scripts/probe_agy_stop_merge.py` shows a
+    rival `continue` holding the turn open in either key order, and
+    short-circuiting this app's handler entirely when it runs first.
+
+    That leaves the second, which was already the behaviour and had no
+    test: `resume` is called when a **new turn starts**, never when one
+    ends, so the gate goes on refusing between turns. A revived loop
+    therefore reaches the working tree through a gate that is still saying
+    no — the damage is bounded to spend and prose, which is why AG-R-16 is
+    moderate rather than critical.
+
+    Written as an assertion about the *gate*, not about the session,
+    because the property is that nothing clears the latch except the next
+    turn beginning.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_call_arriving_after_the_turn_ended_is_still_refused(self, wired):
+        _recorder, _gate, server, _cfg = wired
+        server.refuse_all("the user stopped this turn")
+        # The turn ends. Nothing calls `resume`, because nothing does until
+        # a new turn is sent.
+        answer = await server.decide(payload(conversation=OURS))
+        assert answer["decision"] == "deny"
+        assert answer["reason"] == "the user stopped this turn"
+
+    @pytest.mark.asyncio
+    async def test_a_revived_loop_is_terminated_again(self, wired):
+        """The same latch answers the revived loop's next `PostInvocation`.
+
+        Whether `terminate` beats a concurrent `continue` is **not** known —
+        it is the question the merge probe opened and did not close — so
+        this asserts only what this app does, which is to keep saying stop.
+        """
+        _recorder, _gate, server, _cfg = wired
+        server.refuse_all("the user stopped this turn")
+        server.decide_invocation(invocation())
+        assert server.decide_invocation(invocation(num=9)) == {
+            "terminationBehavior": "terminate"
+        }
+
+    def test_only_a_new_turn_clears_it(self, wired):
+        """Stated as the whole rule, because the mitigation *is* the timing."""
+        _recorder, _gate, server, _cfg = wired
+        server.refuse_all("stopped")
+        server.note_stop(stopped(reason="TERMINAL_CUSTOM_HOOK"))
+        assert server._refusal is not None
+        server.resume()
+        assert server._refusal is None

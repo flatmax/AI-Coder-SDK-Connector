@@ -195,14 +195,16 @@ class TestToolCards:
         t = AgyTranslator("r1")
         t.translate(frame(TOOL_ACTIVE))
         result = t.translate(frame(TOOL_DONE))[0].payload
-        assert result["content"] == ""
+        assert result["preview"] == ""
+        assert result["truncated"] is False
+        assert result["full_bytes"] == 0
         assert result["status"] == "success"
 
     def test_an_output_is_carried_when_there_is_one(self):
         t = AgyTranslator("r1")
         done = dict(TOOL_DONE)
         done["tool_info"] = dict(done["tool_info"], output="calc.py")
-        assert t.translate(frame(done))[1].payload["content"] == "calc.py"
+        assert t.translate(frame(done))[1].payload["preview"] == "calc.py"
 
     def test_an_errored_call_says_so(self):
         t = AgyTranslator("r1")
@@ -664,7 +666,7 @@ class TestAGeneratedImageIsCollected:
         landed = str(tmp_path / "repo" / "ai_test_pattern.jpg")
         assert result.payload["files_modified"] == [landed]
         assert translator.stats.files_modified == [landed]
-        assert landed in result.payload["content"]
+        assert landed in result.payload["preview"]
 
     def test_a_call_still_running_collects_nothing(self, tmp_path, monkeypatch):
         translator = self._translator(tmp_path, monkeypatch)
@@ -963,3 +965,55 @@ class TestARefusedTurnIsNotBilledForTheLastOne:
         # The status still reaches the browser: the turn failed, and
         # dropping the tokens must not also drop the reason.
         assert payload["stop_reason"] == "ERROR"
+
+
+class TestAToolResultIsPreviewedTheWayTheCardReadsIt:
+    """AG-R-17's fourth instance, and the most visible one.
+
+    This pump sent a tool's output as `content`. `block-render.js`
+    renders a result body from `result.preview`, with `''` as its default
+    and the literal string *"No output."* as its empty state — and
+    `applyToolResult` spreads the payload onto the block without mapping
+    anything. So every tool card on this transport drew "No output." over
+    a payload that was carrying the output the whole time.
+
+    Nothing failed, which is the point: a missing key renders as an empty
+    pane, never as an error.
+    """
+
+    def _done(self, output):
+        done = dict(TOOL_DONE)
+        done["tool_info"] = dict(done["tool_info"], output=output)
+        return frame(done)
+
+    def _result(self, translator, output):
+        events = translator.translate(self._done(output))
+        return [e for e in events if e.name == "toolResult"][-1].payload
+
+    def test_the_card_reads_the_body_off_preview(self):
+        payload = self._result(AgyTranslator("r1"), "alpha\nbeta")
+        assert payload["preview"] == "alpha\nbeta"
+        assert "content" not in payload
+
+    def test_a_long_result_truncates_like_the_other_engines(self):
+        """The *same* helper, not a second one.
+
+        Two implementations of "how much of a tool result does a card
+        show" would show a user different amounts on different engines for
+        the same output, which is the drift the shared function exists to
+        prevent.
+        """
+        from aic_dc.claude_code.messages import TOOL_RESULT_PREVIEW_LINES
+
+        output = "\n".join(f"line {n}" for n in range(TOOL_RESULT_PREVIEW_LINES + 50))
+        payload = self._result(AgyTranslator("r1"), output)
+        assert payload["truncated"] is True
+        assert payload["preview"].count("\n") == TOOL_RESULT_PREVIEW_LINES - 1
+        # The full size is the *untruncated* measurement, because that is
+        # what the card's marker names.
+        assert payload["full_bytes"] == len(output.encode("utf-8"))
+
+    def test_a_short_result_is_not_marked_truncated(self):
+        payload = self._result(AgyTranslator("r1"), "ok")
+        assert payload["truncated"] is False
+        assert payload["full_bytes"] == 2

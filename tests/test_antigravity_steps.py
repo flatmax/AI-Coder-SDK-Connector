@@ -24,6 +24,7 @@ and spawns nothing, which is most of why it is a separate module.
 
 from __future__ import annotations
 
+import ast
 import types as pytypes
 
 import pytest
@@ -743,3 +744,155 @@ class TestTheFooterSpellsFieldsTheClaudePumpsWay:
             ][-1].payload
             assert payload["tool_calls"] == 3
             assert payload["permission_prompts"] == 2
+
+
+class TestEveryPayloadFieldIsSpelledTheClaudePumpsWay:
+    """The same check as the footer's, widened to every shared event.
+
+    ``TestTheFooterSpellsFieldsTheClaudePumpsWay`` was written for
+    ``streamComplete`` because that is where three divergences were found.
+    Widening it the next day found a fourth, in ``toolResult`` — the `agy`
+    pump sent a tool's output as ``content`` where the browser renders
+    ``preview``, so **every tool card on that transport drew the literal
+    string "No output."** while the output sat unread in the payload.
+
+    That is the argument for checking the family rather than the instance:
+    the first three were found by reading one consumer, and reading one
+    consumer is how the fourth was missed.
+
+    **Read from source, not from a payload.** These pumps build most
+    payloads inside branches that a runtime test would have to reach one
+    at a time; the keys are literals, so the literals are what is
+    compared. Two limits, stated rather than discovered later:
+
+    - An event whose payload is assembled somewhere this cannot follow is
+      **skipped silently**, so this is a floor and not a ceiling.
+    - ``streamChunk`` is not compared at all. The Claude pump builds its
+      two chunk names in a conditional and passes the result as a
+      variable, so there is no ``Event("streamChunk", …)`` literal there to
+      compare against — the same gap ``TestVocabulary`` records for the
+      event *names*.
+    """
+
+    #: Per event, the keys an Antigravity pump may carry that the Claude
+    #: pump does not — each with the reason. An entry is a claim that the
+    #: browser does not need the key under the Claude spelling, and it is
+    #: the list a new divergence has to argue its way onto.
+    THEIRS_ALONE = {
+        "streamComplete": {
+            # Ours, not the browser's: it reads the request id from the RPC
+            # callback argument rather than from the payload.
+            "request_id",
+            # An open question, not a settled difference — the Claude pump
+            # says `terminal_reason`, which `computeTurnOutcome` turns into
+            # a red LED for anything neither empty nor `completed`. See
+            # AG-R-17.
+            "stop_reason",
+        },
+        "toolResult": {
+            # Read by `blocks.js` for card routing, and additive rather
+            # than a rename: nothing of the Claude pump's is displaced.
+            "agent_id",
+            # The tool's own name, which the card already has from
+            # `toolUse` via `tool_use_id`. Unread, and harmless — kept
+            # because removing a field nobody reads is not worth a
+            # migration.
+            "name",
+        },
+    }
+
+    def _payloads(self, module):
+        """``{event: {keys}}`` from ``Event("name", …)`` calls in a module.
+
+        Resolves a payload assigned to a local name just above the call,
+        which is how both the Claude pump and the SDK pump build their
+        larger ones.
+        """
+        import ast
+        from pathlib import Path
+
+        tree = ast.parse(Path(module.__file__).read_text(encoding="utf-8"))
+        found: dict[str, set[str]] = {}
+        functions = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        ]
+        for function in functions:
+            local: dict[str, set[str]] = {}
+            for node in ast.walk(function):
+                if isinstance(node, ast.Assign) and isinstance(node.value, ast.Dict):
+                    for target in node.targets:
+                        if isinstance(target, ast.Name):
+                            local[target.id] = self._literal_keys(node.value)
+            for node in ast.walk(function):
+                if not (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Name)
+                    and node.func.id == "Event"
+                    and len(node.args) >= 2
+                ):
+                    continue
+                name = node.args[0]
+                if not (isinstance(name, ast.Constant) and isinstance(name.value, str)):
+                    continue
+                payload = node.args[1]
+                if isinstance(payload, ast.Dict):
+                    keys = self._literal_keys(payload)
+                elif isinstance(payload, ast.Name) and payload.id in local:
+                    keys = local[payload.id]
+                else:
+                    continue
+                found.setdefault(name.value, set()).update(keys)
+        return found
+
+    @staticmethod
+    def _literal_keys(node):
+        return {
+            key.value
+            for key in node.keys
+            if isinstance(key, ast.Constant) and isinstance(key.value, str)
+        }
+
+    def _check(self, module, label):
+        import aic_dc.claude_code.messages as claude_messages
+
+        claude = self._payloads(claude_messages)
+        theirs = self._payloads(module)
+        divergent = {}
+        for event, keys in sorted(theirs.items()):
+            if event not in claude:
+                continue
+            extra = sorted(
+                keys - claude[event] - self.THEIRS_ALONE.get(event, set())
+            )
+            if extra:
+                divergent[event] = extra
+        assert not divergent, (
+            f"The {label} pump names fields the Claude pump does not, so the "
+            f"browser reads nothing for them: {divergent}. Either use the "
+            f"Claude pump's name or add each to THEIRS_ALONE with the reason "
+            f"it may differ. See AG-R-17."
+        )
+
+    def test_the_sdk_pump(self):
+        self._check(ag_steps, "SDK")
+
+    def test_the_agy_pump(self):
+        from aic_dc.agy import steps as agy_steps
+
+        self._check(agy_steps, "agy")
+
+    def test_the_comparison_is_reaching_the_events_it_claims_to(self):
+        """A guard on the instrument.
+
+        Every check above passes vacuously if the parse stops finding
+        payloads — a refactor moving one into a helper would silently
+        shrink the set this compares. So the events it *did* resolve are
+        asserted by name.
+        """
+        from aic_dc.agy import steps as agy_steps
+
+        for module in (ag_steps, agy_steps):
+            resolved = set(self._payloads(module))
+            assert {"toolUse", "toolResult", "streamComplete"} <= resolved

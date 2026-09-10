@@ -5386,3 +5386,80 @@ that whoever designs the mapping finds the claim rather than trusting it.
 **4,950 Python tests and 4,485 webapp tests green.** The webapp suite is not decoration here: these
 were changes to what the server sends the browser, and the fixtures on that side already used the
 Claude spelling — which is the other half of why the divergence was invisible.
+
+---
+
+## The tool cards that said "No output.", and a mitigation that did not mitigate (2026-09-12)
+
+Two pieces of work, and each is the same lesson from a different side: **a claim believed on the
+strength of a document, until something measured it.**
+
+### The fourth field-name divergence, found by widening yesterday's tripwire
+
+[AG-R-17](risks.md#ag-r-17) was raised on 2026-09-11 for three `streamComplete` fields the Antigravity
+pumps spelled their own way. The tripwire written with it covered that one event, because that is
+where the three were found. Widening it to every shared payload — an AST walk over the three pumps'
+`Event(name, …)` calls, compared against the Claude pump's — found a fourth, and a worse one:
+
+```
+agy/steps.py      sends  "content": <the tool's output>
+block-render.js   reads   result.preview,  default '',  empty state "No output."
+blocks.js         applyToolResult: block.result = { ...payload }   ← no mapping
+```
+
+**Every tool card on the `agy` transport drew the literal string "No output."** over a payload
+carrying the output the whole time. The pump also sent no `truncated` or `full_bytes`, so the
+truncation marker never appeared either. Fixed by emitting the three fields the card reads, through
+`truncate_tool_result` — the Claude pump's own helper, shared rather than re-derived, because two
+answers to *"how much of a tool result does a card show"* would show a user different amounts on
+different engines for the same output.
+
+**The sweep's other half is what it ruled out.** `toolUse`, `systemEvent`, `subagentEvent` and
+`turnUsage` are clean across all three pumps. `streamChunk` cannot be compared — the Claude pump
+builds its two chunk names in a conditional and passes the result as a variable, so there is no
+literal to compare against, the same gap `TestVocabulary` records for the event *names*. The tripwire
+says so in its docstring rather than implying coverage it does not have, and a third test asserts the
+comparison is still resolving the events it claims to, so a refactor cannot shrink it into passing
+vacuously.
+
+A webapp test now starts from the payload the server emits and goes through `applyToolResult` into
+the renderer, which is the path the browser actually takes — every other tool-card test hands the
+renderer a hand-written `result`, which is how the divergence survived on both transports.
+
+### AG-R-16's mitigation, refuted the day after it shipped
+
+[AG-R-16](risks.md#ag-r-16) said: register a `Stop` handler returning `{}` so at least one voice in
+the merged hooks file is always for stopping — *"whether that wins against a concurrent `continue` is
+unverified and worth a probe before relying on it."* It shipped on 2026-09-11 with
+[AG-19](decisions.md#ag-19). Relying on it is exactly what shipping it did.
+
+`scripts/probe_agy_stop_merge.py`, 2026-09-12: **it loses, both ways round.** A rival `continue` holds
+the turn open with ours in the merge whichever order the keys are in — 18–20 seconds against a 1.6
+second turn — and when the rival runs first, **this app's handler is not run at all**. A `continue`
+short-circuits the handlers after it. Being registered is not the same as being asked.
+
+What survives is the second mitigation, which was already the behaviour and had never been asserted:
+the gate's refusal outlives the turn it stopped, because `resume` runs when a new turn *starts*. A
+revived loop reaches the working tree through a gate still saying no, which is why the risk stays
+moderate. It now has a test.
+
+### What the probe cost to get right, and why that is in the record
+
+Three instrument defects, in order:
+
+1. The rival's answer was built into a shell command, where a backslash inside single quotes is
+   literal — so it printed `{\"decision\":…}` and `agy` read no decision from it. **The run reported
+   that `continue` does nothing, about a hook that had never said `continue`.**
+2. An unhandled `TimeoutExpired` killed the run that first reproduced the harm — the timeout *was*
+   the finding.
+3. `status` was read as the signal. A held-open turn returns `status: "SUCCESS"` with partial output
+   once `--print-timeout` expires, so two runs disagreed with each other for a reason that was in
+   neither of them.
+
+The probe now **self-tests its own stimulus** before trusting anything downstream — it runs the rival
+hook's command and checks the JSON it prints is the JSON intended. That check costs nothing and would
+have caught the first defect immediately. It is the same shape as the control in
+[§ Phase 12](delivery.md#phase-12--the-stop-becomes-a-mechanism-and-the-control-is-the-instrument-2026-09-11):
+an instrument that cannot show its own input arriving is measuring the input, not the system.
+
+**4,959 Python tests and 4,489 webapp tests green.**
