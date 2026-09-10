@@ -414,15 +414,16 @@ class TestTheTurnCloses:
         assert names(events) == ["turnUsage", "streamComplete"]
         payload = events[-1].payload
         assert payload["request_id"] == "r1"
-        assert payload["num_tool_calls"] == 1
+        assert payload["tool_calls"] == 1
         assert set(payload) == {
             "request_id",
             "stop_reason",
             "cancelled",
-            "num_tool_calls",
+            "tool_calls",
+            "permission_prompts",
             "files_modified",
             "usage",
-            "response_text",
+            "response",
         }
 
 
@@ -455,13 +456,13 @@ class TestTheSharedAccountingObject:
         assert t.stats.permission_prompts == 1
 
     def test_tool_calls_are_counted_on_the_same_object_the_stream_reports(self):
-        # One counter, not two. `num_tool_calls` used to read a private
+        # One counter, not two. The footer's count used to read a private
         # field that `stats` duplicated, which is the drift that lets a
         # HUD and a stream payload disagree about one turn.
         t = AgyTranslator("r1")
         t.translate(frame(TOOL_ACTIVE))
         assert t.stats.tool_calls == 1
-        assert t.stream_complete()[-1].payload["num_tool_calls"] == 1
+        assert t.stream_complete()[-1].payload["tool_calls"] == 1
 
 
 class TestADivertedWriteIsReported:
@@ -881,3 +882,84 @@ class TestAStoppedSubagentSaysStopped:
         assert t.subagents == frozenset()
         t.translate(frame(SUBAGENT_ACTIVE))
         assert t.subagents == frozenset({self.AGENT})
+
+
+class TestARefusedTurnIsNotBilledForTheLastOne:
+    """`agy` echoes the previous turn's usage on a result it refused.
+
+    Measured 2026-09-10 while probing `/fork`: one real turn cost 5,423
+    input tokens over 1.84s, and the turn `agy` then refused came back
+    `status: ERROR` carrying *the same* `input_tokens` and
+    `duration_seconds` with one output token. Nothing ran, and the footer
+    charged it for the work of the turn before it.
+
+    `_absorb_usage` takes last-wins rather than summing, so this never
+    doubled a bill — which is exactly why it survived. It is a misreport,
+    and a cost figure that is wrong in a way nothing in the UI can tell
+    from right is `risks.md` AG-R-6's family.
+    """
+
+    ERROR_RESULT = {
+        "event": "result",
+        "result": {
+            "conversation_id": "b1d377c5",
+            "status": "ERROR",
+            "response": "",
+            # The previous turn's numbers, verbatim. That is the defect.
+            "duration_seconds": 1.840465383,
+            "usage": {"input_tokens": 5423, "output_tokens": 1, "total_tokens": 5424},
+        },
+    }
+
+    def test_a_successful_turn_still_reports_its_usage(self):
+        t = AgyTranslator("r1")
+        t.translate(RESULT)
+        assert t.turn_usage()["input_tokens"] == 72286
+
+    def test_a_refused_turn_reports_nothing_rather_than_the_last_turns(self):
+        t = AgyTranslator("r1")
+        t.translate(self.ERROR_RESULT)
+        assert t.turn_usage() == {}
+
+    def test_a_turn_that_worked_before_failing_keeps_what_it_spent(self):
+        """The step frames are the turn's own measurement and stand.
+
+        Only the result frame's usage is dropped, because only the result
+        frame is the one carrying somebody else's numbers.
+        """
+        t = AgyTranslator("r1")
+        t.translate(
+            frame(
+                dict(
+                    TOOL_ACTIVE,
+                    usage={"input_tokens": 900, "total_tokens": 950},
+                )
+            )
+        )
+        t.translate(self.ERROR_RESULT)
+        usage = t.turn_usage()
+        assert usage["input_tokens"] == 900
+        assert usage["total_tokens"] == 950
+
+    def test_a_result_naming_no_status_is_still_absorbed(self):
+        """A frame that named no status is not a frame that named a
+        failure, and dropping its usage would lose a real measurement."""
+        t = AgyTranslator("r1")
+        t.translate(
+            {
+                "event": "result",
+                "result": {"response": "hi", "usage": {"total_tokens": 42}},
+            }
+        )
+        assert t.turn_usage() == {"total_tokens": 42}
+
+    def test_the_footer_carries_the_corrected_figure(self):
+        t = AgyTranslator("r1")
+        t.translate(self.ERROR_RESULT)
+        payload = [
+            e for e in t.stream_complete() if e.name == "streamComplete"
+        ][-1].payload
+        assert payload["usage"] == {}
+        # The status still reaches the browser: the turn failed, and
+        # dropping the tokens must not also drop the reason.
+        assert payload["stop_reason"] == "ERROR"

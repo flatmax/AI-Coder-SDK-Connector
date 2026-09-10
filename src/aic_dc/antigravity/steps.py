@@ -759,10 +759,22 @@ class StepTranslator:
         result = {
             "request_id": self.request_id,
             "stop_reason": self._stop_reason,
-            "num_tool_calls": self.stats.tool_calls,
+            # `tool_calls`, not `num_tool_calls` — see
+            # `aic_dc.agy.steps.AgyTranslator.stream_complete`. Nothing read
+            # the old spelling, on either Antigravity transport, so the turn
+            # footer's stat line was absent rather than wrong.
+            "tool_calls": self.stats.tool_calls,
+            "permission_prompts": self.stats.permission_prompts,
             "files_modified": list(self.stats.files_modified),
             "usage": self.turn_usage(),
-            "response_text": self.response_text(),
+            # `response`, not `response_text`. The settled assistant
+            # message takes its content from `result.response`
+            # (`chat-panel/streaming.js`), which is the Claude pump's
+            # spelling; the old key was read by nothing, so every turn
+            # on both Antigravity transports settled with empty
+            # content. The rendered blocks carried the prose, which is
+            # why it was invisible.
+            "response": self.response_text(),
         }
         return [
             Event("turnUsage", {"turn_model_usage": self.turn_usage()}),

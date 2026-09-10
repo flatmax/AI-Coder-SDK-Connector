@@ -1231,6 +1231,14 @@ than a multiplication, and in the same family as [AG-R-6](risks.md#ag-r-6): a co
 wrong in a way nothing in the UI can distinguish from right. The fix, if it is wanted, is to skip
 absorption on a non-`SUCCESS` status.
 
+**Fixed 2026-09-11.** `AgyTranslator._absorb_result` absorbs the result frame's usage only for
+`SUCCESS` and for a frame that named no status at all — a frame naming nothing is not a frame naming
+a failure, and dropping its usage would lose a real measurement. What a failed turn keeps is whatever
+its own **step** frames accumulated, which is the honest answer in both directions: a turn that did
+work before failing keeps the tokens it spent, and a turn that ran nothing reports nothing rather
+than reporting the previous turn's. See
+[`delivery.md` § Two numbers the footer was reading wrong](delivery.md#two-numbers-the-footer-was-reading-wrong-and-one-it-was-not-reading-at-all-2026-09-11).
+
 ### `agy` compacts its own context, and says nothing on the stream — 2026-09-10
 
 Read from the binary, and it bears directly on whether a long-lived conversation is a good idea:

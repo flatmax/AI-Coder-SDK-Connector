@@ -643,3 +643,103 @@ class TestCompletion:
         t.translate(text_step("hello", delta="hello"))
         t.translate(tool_step("list_directory", {"directory_path": "."}))
         assert t.response_text() == "hello"
+
+
+class TestTheFooterSpellsFieldsTheClaudePumpsWay:
+    """One vocabulary, and it goes one level deeper than the event names.
+
+    ``TestVocabulary`` above asserts no *event name* is invented, which is
+    the check AG-3 asked for. It passed throughout, while both Antigravity
+    pumps quietly named three **fields** on ``streamComplete`` differently
+    from the Claude pump — ``num_tool_calls`` for ``tool_calls``,
+    ``response_text`` for ``response``, and ``permission_prompts`` missing
+    altogether. The browser reads the Claude spelling, so it read nothing:
+    the chat panel's turn footer rendered no "N tool calls, M asked" line
+    on either transport, and every settled assistant message took empty
+    content.
+
+    **Nothing failed.** Each consumer has a default — `Number.isFinite`
+    guards, `typeof … === 'string'` guards — so a missing key renders as
+    an absent stat rather than as an error, on a payload nobody
+    cross-checks. That is why this is a test and not a comment: an event
+    name that drifts breaks a call site loudly, and a field name that
+    drifts goes missing in silence.
+
+    Checked against the Claude pump's source by quoted literal, the same
+    weaker-and-honest match ``TestVocabulary`` uses and for the same
+    reason.
+    """
+
+    #: Keys these pumps carry that the Claude pump does not, each with the
+    #: reason it is allowed to differ. An entry here is a claim that the
+    #: browser does not need the key, and it is the list a future
+    #: divergence has to argue its way onto.
+    THEIRS_ALONE = {
+        # Ours, not the browser's: it reads the request id from the RPC
+        # callback argument rather than from the payload.
+        "request_id",
+        # **An open question rather than a settled difference.** The Claude
+        # pump spells this `terminal_reason`, which `computeTurnOutcome`
+        # reads and turns into a red LED for anything that is neither
+        # empty nor `completed`. Renaming would therefore change what
+        # colour a failed `agy` turn draws, and `agy`'s status words
+        # (`ERROR`, `CANCELED`) are not the Claude pump's vocabulary — so
+        # it is a mapping to be designed rather than a spelling to be
+        # fixed. Recorded here so it is not mistaken for an oversight.
+        "stop_reason",
+    }
+
+    def _claude_source(self):
+        from pathlib import Path
+
+        import aic_dc.claude_code.messages as claude_messages
+
+        return Path(claude_messages.__file__).read_text(encoding="utf-8")
+
+    def _footer(self, translator):
+        events = translator.stream_complete()
+        payload = [e for e in events if e.name == "streamComplete"][-1].payload
+        return set(payload)
+
+    def _check(self, keys):
+        source = self._claude_source()
+        invented = sorted(
+            key
+            for key in keys
+            if key not in self.THEIRS_ALONE and f'"{key}"' not in source
+        )
+        assert not invented, (
+            f"These `streamComplete` fields are spelled differently from the "
+            f"Claude pump's, so the browser reads nothing for them: "
+            f"{invented}. Either use the Claude pump's name or add it to "
+            f"THEIRS_ALONE with the reason it may differ."
+        )
+
+    def test_the_sdk_pump(self):
+        self._check(self._footer(StepTranslator("r1")))
+
+    def test_the_agy_pump(self):
+        from aic_dc.agy.steps import AgyTranslator
+
+        self._check(self._footer(AgyTranslator("r1")))
+
+    def test_both_carry_the_two_the_turn_footer_renders(self):
+        """`renderTurnFooter` reads exactly these two for its stat line."""
+        from aic_dc.agy.steps import AgyTranslator
+
+        for translator in (StepTranslator("r1"), AgyTranslator("r1")):
+            footer = self._footer(translator)
+            assert {"tool_calls", "permission_prompts"} <= footer
+
+    def test_the_counts_are_the_shared_stats_object(self):
+        """Not a second counter that could disagree with the first."""
+        from aic_dc.agy.steps import AgyTranslator
+
+        for translator in (StepTranslator("r1"), AgyTranslator("r1")):
+            translator.stats.tool_calls = 3
+            translator.stats.permission_prompts = 2
+            payload = [
+                e for e in translator.stream_complete() if e.name == "streamComplete"
+            ][-1].payload
+            assert payload["tool_calls"] == 3
+            assert payload["permission_prompts"] == 2

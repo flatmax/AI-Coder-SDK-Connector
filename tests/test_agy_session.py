@@ -219,7 +219,7 @@ class TestATurn:
         ]
         # Deltas accumulated, so the browser's replace-by-id is correct.
         assert events[1].payload["content"] == "Reading the file."
-        assert events[-1].payload["response_text"] == "Reading the file."
+        assert events[-1].payload["response"] == "Reading the file."
         assert events[-1].payload["usage"]["total_tokens"] == 1234
 
     def test_the_context_is_held_across_turns(self, wired):

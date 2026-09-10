@@ -5321,3 +5321,68 @@ Three of the six items listed on 2026-09-10 are done. The remainder are unchange
 non-`SUCCESS` result, standing guidance via `PreInvocation` `ephemeralMessage`, and reading
 `transcriptPath` off the payload instead of deriving it. The last of those is now measured rather
 than documented — the payloads captured today carry it, on every event.
+
+---
+
+## Two numbers the footer was reading wrong, and one it was not reading at all (2026-09-11)
+
+Two items, taken together because they are the same file and the same kind of defect: a figure the
+user reads as true that is not.
+
+### A refused turn was billed for the turn before it
+
+[`sdk-surface.md` § A failed turn reports the previous turn's usage](sdk-surface.md#a-failed-turn-reports-the-previous-turns-usage--measured-2026-09-10)
+measured it on 2026-09-10: `agy`'s `result` frame for a turn it refused **echoes the previous turn's
+`usage` and `duration_seconds` verbatim**, with one output token. `_absorb_usage` takes last-wins
+rather than summing, so nothing was ever doubled — which is exactly why it survived a year of
+attention. It is a misreport, not a multiplication, and a cost figure wrong in a way nothing in the
+UI can distinguish from right is [AG-R-6](risks.md#ag-r-6)'s family.
+
+One condition, in `_absorb_result`. Two details in it are decisions rather than mechanics:
+
+- **A result naming no status is still absorbed.** A frame that named nothing is not a frame that
+  named a failure, and dropping its usage would lose a real measurement to a defensive default.
+- **Only the *result* frame's usage is dropped.** The turn's own step frames stand, so a turn that
+  did work before failing keeps the tokens it spent. Reporting zero for it would be the same class
+  of untruth pointed the other way.
+
+### Three field names the browser was never reading
+
+Found while checking the first fix: **both** Antigravity pumps spelled three `streamComplete` fields
+differently from the Claude pump, and the browser reads the Claude spelling.
+
+| Pumps said | Browser reads | What was missing |
+|---|---|---|
+| `num_tool_calls` | `tool_calls` | The turn footer's *"N tool calls"*, and the HUD's turn row |
+| *(absent)* | `permission_prompts` | *"M asked"* beside it |
+| `response_text` | `response` | Every settled assistant message's `content` |
+
+**`permission_prompts` is the one worth pausing on.** The shared `stats` object exists *because*
+`AntigravityService._note_permission_prompt` reaches into it to attribute a dialog to the turn that
+caused it — a defect fixed once already, when the attribute was missing and every dialog raised a
+swallowed `AttributeError`. The count was fixed, and then never put on the wire. It has been
+collected and discarded ever since.
+
+**None of this failed.** Every consumer guards its read, so a missing key renders as an absent stat
+or an empty string rather than as an error. `TestVocabulary` — the AG-R-4 tripwire — passed
+throughout, because it checks event *names* and this drifted one level down, in the fields. That gap
+is now [AG-R-17](risks.md#ag-r-17), with a tripwire asserting every key on either Antigravity footer
+is one the Claude pump emits, and a `THEIRS_ALONE` list where a divergence must carry the reason it
+is allowed.
+
+### The one that was not fixed, and why it is not an oversight
+
+`stop_reason` is still `stop_reason`, where the Claude pump says `terminal_reason`. It is on the
+allowlist rather than renamed because `computeTurnOutcome` turns any `terminal_reason` that is
+neither empty nor `completed` into a **red LED** — so renaming would change what colour a failed
+`agy` turn draws, and `agy`'s status words (`ERROR`, `CANCELED`) are not that vocabulary. It is a
+mapping to be designed, not a spelling to be corrected.
+
+Until it is, `AgyTranslator.stream_complete`'s docstring is describing a consumer the key does not
+reach: it says the browser reads an unrecognised reason as something worth a red badge, which is true
+of `terminal_reason` and true of nothing this field is connected to. Left in place, named here, so
+that whoever designs the mapping finds the claim rather than trusting it.
+
+**4,950 Python tests and 4,485 webapp tests green.** The webapp suite is not decoration here: these
+were changes to what the server sends the browser, and the fixtures on that side already used the
+Claude spelling — which is the other half of why the divergence was invisible.

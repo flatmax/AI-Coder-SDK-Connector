@@ -1218,3 +1218,45 @@ having answered `terminate`, and a `TERMINAL_CUSTOM_HOOK` on a conversation this
 logs a warning naming the conversation and this risk. That is a user's hook ending our loop, detected
 without waiting for the late `step_update` the paragraph above describes — and it is logged rather
 than acted on, because it is a fact about the user's own configuration.
+
+---
+
+## AG-R-17 — An engine may invent its own spelling of a shared field, and nothing says so
+
+**Severity: moderate. Likelihood: realised — three fields, on both Antigravity transports, from the
+day each was written until 2026-09-11.**
+
+[AG-R-4](#ag-r-4) says the browser must not learn engine names, and the tripwire built for it —
+`TestVocabulary` in `tests/test_antigravity_steps.py` — asserts that every **event name** an
+Antigravity pump emits is one the Claude pump also emits. It passed throughout. The drift was one
+level down, in the **fields** on `streamComplete`:
+
+| Antigravity pumps said | The Claude pump says, and the browser reads | What was lost |
+|---|---|---|
+| `num_tool_calls` | `tool_calls` | The turn footer's *"N tool calls"* — `chat-panel/block-render.js` `renderTurnFooter`, and the HUD's turn row |
+| *(absent)* | `permission_prompts` | *"M asked"* on the same line. **Counted and never sent** — the `stats` object was shared precisely so this could be attributed to a turn |
+| `response_text` | `response` | Every settled assistant message's `content` (`chat-panel/streaming.js`), which took `''` on both transports |
+
+**Nothing failed, and that is the risk rather than an aside.** Each consumer guards its read —
+`Number.isFinite`, `typeof … === 'string'` — so a missing key renders as an absent stat or empty
+string, never as an error. An event name that drifts breaks a call site loudly; a field name that
+drifts goes missing in silence, on a payload no test cross-checked. This is the same shape as the
+`read_only` defect (`AgySession` § *read_only*) and the `stats` `AttributeError` before it: a
+contract between two modules that neither module states.
+
+**Mitigation, shipped 2026-09-11.** `TestTheFooterSpellsFieldsTheClaudePumpsWay` asserts that every
+key on either Antigravity pump's `streamComplete` is a key the Claude pump's source also emits,
+checked by quoted literal — the same weaker-and-honest match `TestVocabulary` uses. Divergences must
+be added to `THEIRS_ALONE` **with the reason they may differ**, so the next one has to argue for
+itself rather than appear.
+
+**Two entries are on that list today**, and the second is an open question rather than a settled
+difference:
+
+- `request_id` — ours, not the browser's. It reads the request id from the RPC callback argument.
+- `stop_reason` — the Claude pump spells this **`terminal_reason`**, which `computeTurnOutcome`
+  reads and turns into a red LED for anything neither empty nor `completed`. So renaming it would
+  change what colour a failed `agy` turn draws, and `agy`'s own status words (`ERROR`, `CANCELED`)
+  are not that vocabulary. **It is a mapping to be designed, not a spelling to be fixed** — and
+  until it is, the `AgyTranslator.stream_complete` docstring's claim that *"the browser reads an
+  unrecognised reason as something worth a red badge"* describes a consumer this key does not reach.

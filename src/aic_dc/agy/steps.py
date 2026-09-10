@@ -616,11 +616,35 @@ class AgyTranslator:
         return str(destination)
 
     def _absorb_result(self, result: dict[str, Any]) -> list[Event]:
+        """The turn's last frame, and the one number in it that lies.
+
+        **A refused turn echoes the previous turn's usage verbatim.**
+        Measured 2026-09-10 while probing ``/fork``: one real turn cost
+        5,423 input tokens over 1.84 seconds, and the turn ``agy`` then
+        refused reported ``status: ERROR`` with *the same* ``input_tokens``
+        and ``duration_seconds`` and one output token. Nothing ran, and it
+        was billed for the work of the turn before it.
+
+        :meth:`_absorb_usage` takes last-wins rather than summing, so this
+        never doubled anything — which is why it survived: it is a
+        misreport rather than a multiplication, and a cost the UI cannot
+        distinguish from a real one is
+        [AG-R-6](../../../specs5/plan-ag/risks.md#ag-r-6)'s family.
+
+        So a non-``SUCCESS`` result contributes no usage at all. What
+        remains is whatever the turn's own step frames accumulated, which
+        is the honest answer in both directions: a turn that did work
+        before failing keeps the tokens it spent, and a turn that ran
+        nothing reports nothing rather than reporting somebody else's.
+        The empty status is included with ``SUCCESS`` because it is a
+        frame that named no status rather than one that named a failure.
+        """
         self._status = str(result.get("status") or "")
         response = result.get("response")
         if isinstance(response, str):
             self._response = response
-        self._absorb_usage(result)
+        if self._status in ("SUCCESS", ""):
+            self._absorb_usage(result)
         return []
 
     def _absorb_usage(self, payload: dict[str, Any]) -> None:
@@ -694,14 +718,36 @@ class AgyTranslator:
                     "request_id": self.request_id,
                     "stop_reason": stop_reason,
                     "cancelled": self._cancelled,
-                    "num_tool_calls": self.stats.tool_calls,
+                    # `tool_calls`, not `num_tool_calls`. Both Antigravity
+                    # translators spelled it the second way and **nothing
+                    # anywhere read it**: the chat panel's `renderTurnFooter`
+                    # and the HUD's turn row both read `tool_calls`, which is
+                    # what the Claude transport emits. So the footer's whole
+                    # "N tool calls, M asked" line was missing on this
+                    # transport and on the SDK one, silently, since each was
+                    # written. AG-R-4 cuts this way too: the browser must not
+                    # learn engine names, which means an engine may not
+                    # invent its own spelling of a shared field.
+                    "tool_calls": self.stats.tool_calls,
+                    # Counted since the `stats` object was shared and never
+                    # put on the wire — the dialog count the footer renders
+                    # beside the tool count. `_note_permission_prompt` was
+                    # fixed to *collect* this; this is where it arrives.
+                    "permission_prompts": self.stats.permission_prompts,
                     # The turn's files, accumulated per call rather than
                     # left empty: the footer lists what the turn touched,
                     # and an empty list said "nothing" for every turn that
                     # wrote something.
                     "files_modified": list(self.stats.files_modified),
                     "usage": self.turn_usage(),
-                    "response_text": self.response_text(),
+                    # `response`, not `response_text`. The settled assistant
+                    # message takes its content from `result.response`
+                    # (`chat-panel/streaming.js`), which is the Claude pump's
+                    # spelling; the old key was read by nothing, so every turn
+                    # on both Antigravity transports settled with empty
+                    # content. The rendered blocks carried the prose, which is
+                    # why it was invisible.
+                    "response": self.response_text(),
                 },
             ),
         ]

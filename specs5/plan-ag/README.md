@@ -585,16 +585,18 @@ been built — see the note under this paragraph)*. Recorded as a list because t
 above reads as finished — phases 0–11 are ✅ or ◑ — and because the reasoning for each of these
 lives with its decision rather than here, which makes the work itself easy to miss on a re-read.
 
-**Three of the six were built on 2026-09-11** and are struck through below rather than deleted, so
-that a reader who remembers the list can see which way it moved. See
-[`delivery.md` § Phase 12](delivery.md#phase-12--the-stop-becomes-a-mechanism-and-the-control-is-the-instrument-2026-09-11).
+**Four of the six were built on 2026-09-11** and are struck through below rather than deleted, so
+that a reader who remembers the list can see which way it moved. Three went with
+[`delivery.md` § Phase 12](delivery.md#phase-12--the-stop-becomes-a-mechanism-and-the-control-is-the-instrument-2026-09-11);
+the usage fix went with [§ Two numbers the footer was reading wrong](delivery.md#two-numbers-the-footer-was-reading-wrong-and-one-it-was-not-reading-at-all-2026-09-11),
+which also closed three field-name divergences nothing had noticed ([AG-R-17](risks.md#ag-r-17)).
 
 | What | Specified in | Size |
 |---|---|---|
 | ~~`PostInvocation` → `terminate` while ⏹ is latched~~ ✅ | [AG-19](decisions.md#ag-19) | A handler on the socket `AgyGateServer` already runs; `hook.py` gains an event argument, `install.py` a second registration |
 | ~~A `Stop` handler that always permits the stop~~ ✅ | [AG-R-16](risks.md#ag-r-16) | Same registration. Also this app's defence against a third-party `Stop` hook reviving a stopped turn |
 | ~~Render `terminationReason: "TERMINAL_CUSTOM_HOOK"` as cancelled~~ ✅ | [AG-19](decisions.md#ag-19) § *Two corrections* | `steps.py`. A hook-ended turn reports `status: "SUCCESS"` with empty prose and must not draw as a completed answer |
-| Skip usage absorption on a non-`SUCCESS` result | [`sdk-surface.md` § A failed turn reports the previous turn's usage](sdk-surface.md#a-failed-turn-reports-the-previous-turns-usage--measured-2026-09-10) | One condition in `AgyTranslator._absorb_usage`. A refused turn currently reports the *previous* turn's tokens as its own |
+| ~~Skip usage absorption on a non-`SUCCESS` result~~ ✅ | [`sdk-surface.md` § A failed turn reports the previous turn's usage](sdk-surface.md#a-failed-turn-reports-the-previous-turns-usage--measured-2026-09-10) | One condition in `AgyTranslator._absorb_usage`. A refused turn currently reports the *previous* turn's tokens as its own |
 | Standing guidance via `PreInvocation` `ephemeralMessage`, re-injected every invocation | [`sdk-surface.md` § There are five lifecycle events](sdk-surface.md#there-are-five-lifecycle-events-and-this-app-wires-one) | Replaces `agy_tools.WRITE_GUIDANCE` prepending text to the user's own prompt, which records guidance as though the user typed it. **Must fire on every `invocationNum`** — an ephemeral message evaporates after the invocation that received it |
 | Read `transcriptPath` from the hook payload | same § *Four details the probe did not have* | `subagents.py` derives it by hand today; the payload carries it, and carries the per-product directory name that differs. **Measured 2026-09-11** rather than only documented: it is on all three events' payloads |
 
