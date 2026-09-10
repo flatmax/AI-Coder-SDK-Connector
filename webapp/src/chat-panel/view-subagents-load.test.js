@@ -12,8 +12,9 @@
 //   - Staleness: a session resume mid-read abandons the tabs still to come
 //   - The read-only gate: no input surface on a transcript tab
 
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import { resetCapabilities, setCapabilities } from '../engine-capabilities.js';
 import {
   mountPanel,
   publishFakeRpc,
@@ -281,6 +282,68 @@ describe('view-subagents handler — unreadable transcripts', () => {
     await settle(p);
     expect(p._tabs.has('historical:agent_abc')).toBe(true);
     expect(p._tabs.get('historical:agent_def').messages).toHaveLength(2);
+  });
+});
+
+describe('view-subagents handler — an engine that cannot read one back', () => {
+  // The phase-5 defect, one level down. `subagent_rows` is supported on the
+  // `agy` transport, so a delegation gets a row and the row is clickable —
+  // and the click reached a `get_subagent_transcript` the router refuses,
+  // rendering the refusal as the tab's contents. Its own surface, because an
+  // engine can announce a subagent and be unable to say what it did.
+  afterEach(() => resetCapabilities());
+
+  const surface = (supported) => ({
+    title: '',
+    supported,
+    status: supported ? 'supported' : 'unbuilt',
+    note: '',
+  });
+
+  it('does not ask, and says so in the tab', async () => {
+    setCapabilities({ subagent_transcripts: surface(false) });
+    const read = vi.fn().mockResolvedValue(TRANSCRIPT);
+    publishFakeRpc({ 'ClaudeCodeService.get_subagent_transcript': read });
+    const p = mountPanel();
+    await settle(p);
+    ask(p, [agent('agent_abc', 'explore: x')]);
+    await settle(p);
+    expect(read).not.toHaveBeenCalled();
+    const tab = p._tabs.get('historical:agent_abc');
+    // The tab stays: the row is evidence the subagent ran, and a tab that
+    // vanished on click would read as "nothing happened".
+    expect(tab).toBeTruthy();
+    expect(tab.messages[0].content).toContain('cannot read back');
+    expect(tab.messages[0].system_event).toBe(true);
+  });
+
+  it('asks where the engine can read them', async () => {
+    setCapabilities({ subagent_transcripts: surface(true) });
+    const read = vi.fn().mockResolvedValue(TRANSCRIPT);
+    publishFakeRpc({ 'ClaudeCodeService.get_subagent_transcript': read });
+    const p = mountPanel();
+    await settle(p);
+    ask(p, [agent('agent_abc', 'explore: x')]);
+    await settle(p);
+    expect(read).toHaveBeenCalledOnce();
+  });
+
+  it('is not gated on whether the engine can stop one', async () => {
+    // The two halves of the old `subagent_tabs` key. On `agy` a transcript is
+    // a file on disk and there is no halt frame scoped to one subagent, so a
+    // reader gated on ⏹ would refuse the read this whole module exists for.
+    setCapabilities({
+      subagent_transcripts: surface(true),
+      subagent_stop: surface(false),
+    });
+    const read = vi.fn().mockResolvedValue(TRANSCRIPT);
+    publishFakeRpc({ 'ClaudeCodeService.get_subagent_transcript': read });
+    const p = mountPanel();
+    await settle(p);
+    ask(p, [agent('agent_abc', 'explore: x')]);
+    await settle(p);
+    expect(read).toHaveBeenCalledOnce();
+    expect(p._tabs.get('historical:agent_abc').messages).toHaveLength(2);
   });
 });
 

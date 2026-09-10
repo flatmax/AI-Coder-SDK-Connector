@@ -31,6 +31,7 @@
 import { render } from 'lit';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import { resetCapabilities, setCapabilities } from '../engine-capabilities.js';
 import { resetRepoRoot, setRepoRoot } from '../repo-path.js';
 
 import {
@@ -1620,6 +1621,57 @@ describe('renderSubagentRow', () => {
   it('cannot offer Stop without a task id to stop', () => {
     const host = draw(renderSubagentRow(stubPanel(), row({ task_id: null }), [], [], false));
     expect(host.querySelector('.subagent-stop')).toBeNull();
+  });
+
+  describe('Stop, on an engine that cannot stop one subagent', () => {
+    // A phase-5 defect, one level down. `subagent_rows` is supported on the
+    // `agy` transport — it announces a delegation — so the row draws, and the
+    // Stop button drew with it onto a `stop_task` the router refuses. The
+    // refusal arrived as a toast, which reads as a broken button rather than
+    // as a missing feature.
+    //
+    // Read off `subagent_stop`, which is a different key from the one the
+    // transcript button reads, because on that transport the two answers
+    // differ: what a subagent did is a file on disk, and there is no halt
+    // frame scoped to one subagent at all.
+    afterEach(() => resetCapabilities());
+
+    const surface = (supported) => ({
+      title: '',
+      supported,
+      status: supported ? 'supported' : 'unbuilt',
+      note: '',
+    });
+
+    it('withdraws Stop where stopping one subagent is unbuilt', () => {
+      setCapabilities({ subagent_stop: surface(false) });
+      const host = draw(renderSubagentRow(
+        stubPanel(), row({ status: 'running' }), [], [], false,
+      ));
+      expect(host.querySelector('.subagent-stop')).toBeNull();
+      // The row itself stays: it is a different surface, and this engine does
+      // announce its subagents.
+      expect(host.querySelector('.subagent-row')).not.toBeNull();
+    });
+
+    it('keeps the transcript button, which is the other key', () => {
+      setCapabilities({
+        subagent_stop: surface(false),
+        subagent_transcripts: surface(true),
+      });
+      const host = draw(renderSubagentRow(
+        stubPanel(), row({ status: 'running', agent_id: 'agent_7' }), [], [], false,
+      ));
+      expect(host.querySelector('.subagent-desc-button')).not.toBeNull();
+    });
+
+    it('still offers Stop where stopping is real', () => {
+      setCapabilities({ subagent_stop: surface(true) });
+      const host = draw(renderSubagentRow(
+        stubPanel(), row({ status: 'running' }), [], [], false,
+      ));
+      expect(host.querySelector('.subagent-stop')).not.toBeNull();
+    });
   });
 
   it('shows usage only when the subagent reported some', () => {

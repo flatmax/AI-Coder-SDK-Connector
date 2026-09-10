@@ -870,7 +870,11 @@ construction — but it is the one that fails silently if the bridge is ever cal
 - **Read-only, like every subagent tab.** There is no channel into a running consultation, so the
   input surface is dropped. That is already the webapp's behaviour and needs nothing new.
 - **Stoppable.** `Conversation.cancel()` exists, so the ⏹ affordance is real rather than decorative.
-  It maps onto `stop_task`, which is why that method is in the `subagent_tabs` surface.
+  It maps onto `stop_task`, which is why that method is in the `subagent_tabs` surface. **Amended
+  2026-09-10:** that key no longer exists — `subagent_tabs` split into `subagent_transcripts` and
+  `subagent_stop`, and `stop_task` belongs to the second. Which does *not* make this bullet's claim
+  conditional on the key: a consultation is cancelled here by the bridge, without the request reaching
+  either CLI. `subagent_stop` being `UNBUILT` is about stopping a subagent the **engine** spawned.
 - **No cost figure.** [AG-6](#ag-6) — Antigravity reports tokens and no USD, so the tab hides its
   cost display rather than drawing a zero. This is the first real consumer of the capability
   descriptor ([AG-3](#ag-3), [AG-9](#ag-9)), and it is a good one: the surface is genuinely absent

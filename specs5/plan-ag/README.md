@@ -1,5 +1,40 @@
 # Second Engine — Google Antigravity alongside Claude Code
 
+**Status (2026-09-10, later):** **a subagent's row is now a row you can open, and the rule for reading
+it was wrong until 121 transcripts said so.** Yesterday's `subagent_rows` put a delegation in the live
+strip on the `agy` transport; a row you cannot open is a worse offer than no row, so this is the other
+half. `subagent_tabs` had bundled *"can this engine show what a subagent did"* with *"can it stop one"*,
+and on `agy` those have opposite answers — the transcript is complete on disk, and there is **no halt
+frame at all** (⏹ is `refuse_all`, turn-wide and unscoped, so there is nothing to aim at one subagent).
+`subagent_transcripts` is therefore **SUPPORTED** here and `subagent_stop` is **UNBUILT** on both
+transports; no row carries a `task_id`, because a handle onto a method that would refuse it is worse
+than no button. `agy/subagents.py` reads `agy`'s own conversation store, gated twice — the session must
+be one this repository mirrors, and the agent must be reachable by announcement from it — because
+`agent_id` is a conversation id in a store holding **every** conversation the user has ever had with
+this CLI, so an unchecked read is *open any Antigravity conversation on this machine by id*. **Then the
+method of this directory earned itself again: rather than write up the one capture the reader was built
+from, it was run against all 121 transcripts on the machine, and the central inference broke.** Pairing
+each result with the oldest open call is wrong because **a call our permission dialog refuses is
+written nowhere** — no result, no error, no status, the index just skips — and 58 calls across those
+files have no result record. One hole knocks every later card one call out of step: simulated, the queue
+rule misattributes **302 of 720 results in 24 conversations**, twelve of them handing a *write* call
+someone else's result, at which point the turn reports a file that was never written. The linkage is
+arithmetic — a result's `step_index` is its call's, plus one, plus the call's position in that step —
+and under it all 720 attach to their own call. The same run corrected three more shipped guesses (the
+type vocabulary is **sixteen** types across two eras, not four; there is **no `ERROR` status**, so the
+failure branch was dead; `RUNNING` is a backgrounded tool, not a finished one) and reversed a fourth:
+`step_index` is not an ordering, because one file interleaves two concurrent turns and uses five
+indices twice. The specimen that broke the rule existed only because AG-R-14's gate probe had already
+written the one transcript where a denial is the normal case. Two browser guards, neither naming an
+engine ([AG-R-4](risks.md#ag-r-4)): the tab checks `subagent_transcripts` *before* the RPC and renders
+an unreadable-transcript notice, and Stop draws only on `live && task_id && supports(subagent_stop)`.
+66 new tests; 4,804 Python and 4,484 webapp green. The one string the whole feature rests on — the
+session id the browser holds *being* the conversation id `agy` names its own store by — is followed
+link by link off disk rather than assumed, and the containment gate is shown refusing another real
+conversation on this machine; what is **still owed** is the tab opened in a browser on a live turn. See
+[`delivery.md` § What a subagent did](delivery.md#what-a-subagent-did-read-off-agys-own-disk--and-the-pairing-rule-121-transcripts-overturned-2026-09-10)
+and [`sdk-surface.md` § The `agy` transcript store](sdk-surface.md#the-agy-transcript-store-read-whole--measured-2026-09-10).
+
 **Status (2026-09-10):** **the gate stopped asking who claimed a conversation and started asking the
 kernel** ([AG-18](decisions.md#ag-18)). Yesterday's fix closed the main case of
 [AG-R-14](risks.md#ag-r-14) by claiming a subagent's conversation as its announcement arrived, and left

@@ -170,8 +170,12 @@ class AgyTranslator:
         # There is no per-step scope to derive here, unlike the SDK
         # translator's `_scope`: `agy`'s stream carries no trajectory or
         # depth field at all, so a nested trajectory is invisible to this
-        # pump and the whole turn belongs to one agent. That is also why
-        # the `subagent_tabs` surface is unbuilt on this transport.
+        # pump and the whole turn belongs to one agent. That is why a
+        # subagent's *work* is not read out of this stream at all — it is
+        # read off disk from the conversation `agy` writes for the
+        # subagent, by `agy/subagents.py`, which is what makes the
+        # `subagent_transcripts` surface supported here. What this pump
+        # contributes is the announcement below, and nothing more.
         self._agent_id = agent_id or None
         # Every subagent this turn announced, by its own conversation id.
         # Held rather than emitted and forgotten because the tab's

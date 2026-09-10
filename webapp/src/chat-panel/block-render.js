@@ -23,6 +23,7 @@ import { html, nothing } from 'lit';
 import { unsafeHTML } from 'lit/directives/unsafe-html.js';
 
 import { renderEditBody } from '../edit-block-render.js';
+import { SURFACE, supports } from '../engine-capabilities.js';
 import { findFileMentions } from '../file-mentions.js';
 import { renderMarkdown } from '../markdown.js';
 import { toRepoPath } from '../repo-path.js';
@@ -1146,7 +1147,12 @@ function openSubagentTranscript(panel, row) {
  * (specs5/5-webapp/chat.md § Subagent Activity).
  *
  * Stop is the only write affordance. AIC⚡DC did not create this subagent and
- * cannot message it; the one thing a user can legitimately do is end it.
+ * cannot message it; the one thing a user can legitimately do is end it — on
+ * an engine that can. It reads its own surface rather than the row's presence:
+ * `agy` announces a subagent and can read back what it did, and has no halt
+ * frame to end one with (`subagent_stop` in src/aic_dc/capabilities.py), so a
+ * button here would send a call the router refuses and put the refusal in a
+ * toast. A row with no Stop is the honest rendering of that.
  *
  * The description doubles as the way into the transcript, for a row that
  * names an agent. A button rather than a click handler on the row itself:
@@ -1221,7 +1227,7 @@ export function renderSubagentRow(panel, row, blocks, candidates, settled) {
         ${tokens > 0
           ? html`<span class="subagent-usage">${formatTokens(tokens)} tok</span>`
           : nothing}
-        ${live && row.task_id
+        ${live && row.task_id && supports(SURFACE.SUBAGENT_STOP)
           ? html`
               <button
                 class="subagent-stop"

@@ -243,19 +243,22 @@ class TestTheDescriptor:
         """Why there is no data is not the browser's business.
 
         ``transcript_history`` used to be the ``UNBUILT`` half of this
-        pair and stopped being one in phase 5; ``subagent_tabs`` is the
-        replacement, and the assertion is about the *distinction* rather
-        than about either row, so the pair has to be two rows that are
-        genuinely on the two sides of it.
+        pair and stopped being one in phase 5; ``subagent_tabs`` was the
+        replacement and was split in two on 2026-09-10, so the row named
+        here is ``subagent_stop`` — the half that is unbuilt on **both**
+        transports. The assertion is about the *distinction* rather than
+        about either row, so the pair has to be two rows that are
+        genuinely on the two sides of it, and the half that is now built
+        on ``agy`` is no longer one of them.
         """
         d = descriptor(ANTIGRAVITY)
         assert d["usd_cost"]["supported"] is False
-        assert d["subagent_tabs"]["supported"] is False
+        assert d["subagent_stop"]["supported"] is False
 
     def test_the_distinction_survives_for_developers(self):
         d = descriptor(ANTIGRAVITY)
         assert d["usd_cost"]["status"] == ABSENT
-        assert d["subagent_tabs"]["status"] == UNBUILT
+        assert d["subagent_stop"]["status"] == UNBUILT
 
 
 class TestTheEnginesDisagreeWhereExpected:
@@ -321,28 +324,41 @@ class TestTheHelpers:
             "agent_questions",
             "mcp_server_inventory",
             "subagent_rows",
-            "subagent_tabs",
+            "subagent_stop",
+            "subagent_transcripts",
         }
 
     def test_the_two_transports_have_different_to_do_lists(self):
-        """Which is why ``subagent_tabs`` was split on 2026-09-09.
+        """Which is why ``subagent_tabs`` was split, twice.
 
-        One key answered two questions — does the strip get a row, and do
-        the transcript RPCs work — and ``agy`` answers them differently:
-        it announces a delegation with an identity of its own, while the
-        SDK transport carries the scope and no pump emits the
-        announcement. A single key would have had to be wrong about one
-        of them, and the direction it would have been wrong in is the
-        expensive one: SUPPORTED enables ``stop_task``, which nothing on
-        this transport has been shown to be able to do.
+        One key answered three questions — does the strip get a row, do
+        the transcript RPCs work, and can one subagent be stopped — and
+        ``agy`` answers them differently. The strip went first (2026-09-09):
+        ``agy`` announces a delegation with an identity of its own, while
+        the SDK transport carries the scope and no pump emits the
+        announcement. The remaining key then split again (2026-09-10) for
+        the same reason one level down: a subagent's transcript is a file
+        on disk under the conversation id the announcement already
+        carries, and the only halt mechanism here is turn-wide, so a ⏹
+        wired to it would stop the parent.
+
+        A single key would have had to be wrong about one of them, and the
+        direction it would have been wrong in is the expensive one:
+        SUPPORTED enables ``stop_task``, which nothing on either transport
+        has been shown to be able to do.
         """
         sdk = set(unbuilt_surfaces(ANTIGRAVITY))
         agy = set(unbuilt_surfaces(capabilities.AGY))
         assert "subagent_rows" in sdk
         assert "subagent_rows" not in agy
-        # Still owed on both, and for the same reason: the ⏹ that rides
-        # on this key has not been measured against either transport.
-        assert "subagent_tabs" in sdk and "subagent_tabs" in agy
+        # Read out of `agy`'s own conversation store, so the RPCs answer
+        # here and refuse there.
+        assert "subagent_transcripts" in sdk
+        assert "subagent_transcripts" not in agy
+        assert supports(capabilities.AGY, "subagent_transcripts")
+        # Still owed on both, and for the same reason: no transport has a
+        # halt frame scoped to one subagent.
+        assert "subagent_stop" in sdk and "subagent_stop" in agy
 
     def test_claude_has_nothing_unbuilt(self):
         """It is the shipped engine; a to-do here would be a regression."""

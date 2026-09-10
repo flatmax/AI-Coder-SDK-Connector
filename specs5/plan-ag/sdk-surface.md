@@ -532,6 +532,12 @@ fields and names them in `truncated_fields`; **the second never truncates**. Rec
 (`USER_INPUT`, `PLANNER_RESPONSE`, `CODE_ACTION`, `GENERIC`, `SEARCH_WEB`, `CHECKPOINT`), and a
 completed edit carries a real unified diff:
 
+> **Corrected 2026-09-10.** That type list is a sample of the conversations this machine held on
+> 2026-09-03, and the tool-named members of it (`CODE_ACTION`, `SEARCH_WEB`) are a **format `agy` no
+> longer writes** — read as the current vocabulary it sends a reader looking for the wrong thing. The
+> full set is sixteen types across two eras; see [§ The `agy` transcript store, read
+> whole](#the-agy-transcript-store-read-whole--measured-2026-09-10).
+
 ```
 [diff_block_start]
 @@ -1,2 +1,2 @@
@@ -553,6 +559,123 @@ IPC: the symbols are WebRTC — `PeerSession`, ICE candidates, SCTP framing, `pe
 pairing. A running `agy` listens only on two ephemeral localhost ports for its internal language
 server, which answer `400`/`404` to anything else. **There is no way to attach to an already-running
 session**, and that is architectural rather than a missing flag.
+
+---
+
+## The `agy` transcript store, read whole — measured 2026-09-10
+
+Phase 5 read one capture. `subagent_transcripts` had to *render* every one of them, so this is the
+same store read exhaustively: **121 `transcript_full.jsonl` files, 1,895 records**, every conversation
+`agy` has ever written on this machine (127 directories; 6 hold no transcript at all). The reader is
+`aic_dc.agy.subagents`, and the numbers below are the ones its inferences were checked against —
+several of them by being contradicted.
+
+### The vocabulary is sixteen types across two eras
+
+| | types present |
+|---|---|
+| 9 conversations, 2026-08-03 → 08-16 | all sixteen |
+| 112 conversations, 2026-08-29 → 09-09 | `USER_INPUT`, `PLANNER_RESPONSE`, `GENERIC`, `SYSTEM_MESSAGE`, `CHECKPOINT` |
+
+The sixteen: `USER_INPUT` (175), `PLANNER_RESPONSE` (935), `SYSTEM_MESSAGE` (44), `CHECKPOINT` (11),
+`CONVERSATION_HISTORY` (10), and eleven that carry a **tool result** — `GENERIC` (577), `SEARCH_WEB`
+(47), `RUN_COMMAND` (28), `CODE_ACTION` (25), `VIEW_FILE` (16), `LIST_DIRECTORY` (9),
+`GENERATE_IMAGE` (7), `READ_URL_CONTENT` (5), `ERROR_MESSAGE` (3), `GREP_SEARCH` (2),
+`INVOKE_SUBAGENT` (1).
+
+**The era boundary is the finding, and it cuts both ways.** The tool-named result types are the older
+format: in all 112 conversations since 2026-08-29 the only result type is `GENERIC` (573 of 573). So a
+reader keyed to the current spelling alone is correct on everything the user is likely to open and
+turns *every* record of the older era into an unrendered blob with its tool card stuck pending — a
+whole era rendered wrongly rather than a feature missing. Both sets are read, and the ten stale
+spellings cost one `frozenset`.
+
+`source` is one of `MODEL` (1,652), `USER_EXPLICIT` (175), `SYSTEM` (68). It does not partition by
+type the way it looks like it should: `ERROR_MESSAGE` carries `source: SYSTEM` and is nonetheless a
+tool's result, so a reader that routes on `source` puts a failed call's output in a system notice.
+
+### A result names its call by arithmetic, and the arithmetic has a hole
+
+A result's `step_index` is **its call's index, plus one, plus the call's position within that step**.
+A response making three calls is followed by up to three consecutive results, and *up to* is the whole
+point:
+
+> **A tool call our permission dialog refuses is written nowhere.** No result record, no error
+> record, no status — the index simply skips. Across the 121 transcripts, **58 calls have no result
+> record at all**: 39 mid-conversation holes, and 19 at the file's last response, which is a turn
+> still running or cut short.
+
+The plausible reader pairs each result with the oldest call still open, and it is wrong in a way no
+green log would show. Simulated over the same 121 files, **302 of the 720 result records attach to a
+call that is not theirs, across 24 conversations**, because one hole knocks every later card in the
+conversation one call out of step. Twelve of those mispairings hand a result to a *write* call, and
+`files_written_by` then credits a file to a call that never ran — the worst available failure, since
+that list is what the browsed turn reports as changed.
+
+Under the arithmetic all 720 results attach to their own call and **none is left unattributable**. The
+two things a reader must additionally get right, both measured:
+
+- **A new `PLANNER_RESPONSE` supersedes the previous one's open calls**, whether or not it makes any
+  of its own. A refused call seen from here is a card whose response was followed by another
+  response; left open it collects the *next* call's output.
+- **A result whose call cannot be named is shown as a fenced blob**, not dropped and not folded into
+  the prose. Dropped leaves a hole; folded in attributes the harness's own words to the model.
+
+The gate probe's own subagent transcript is the specimen: `scripts/probe_agy_subagent_gate.py` denies
+everything but the delegation, and steps 4, 10 and 14 of the subagent's conversation have no result
+record. The measurement that broke the queue rule was possible only because that probe had already
+written the one transcript on the machine where a denial is the *normal* case.
+
+### Two statuses, and a failure is a type rather than a status
+
+`status` is `DONE` (1,852) or `RUNNING` (43). **There is no `ERROR` status on any record**, so a
+reader testing for one has a dead failure branch and renders every failure as a success. Failure is
+the `ERROR_MESSAGE` *type* — and only in the older format. A current-format call that ran and failed
+says so **in prose only**, which `subagents.py` deliberately does not sniff:
+`specs5/5-webapp/chat.md` § *Card Anatomy* makes the status flag the only thing a card's failure
+styling may read, and a card that guessed from the body would be a card that lies at some point.
+
+`RUNNING` is a backgrounded tool — a dev server, a watcher. It is **never the last record of a
+file** (0 of 121), so it is not "the transcript stopped mid-call"; the harness comes back. The card
+belongs pending with no duration, because nothing has finished.
+
+### Every result opens with the harness's own two stamps
+
+All 720 result records begin `Created At: …`, and 674 carry `Completed At: …` on the second line. That
+pair is **the tool's own duration**, which is not the same quantity as the gap between two records'
+`created_at` — the record is written when the harness gets round to it. Left in place they are also
+two lines of plumbing at the top of every card, so the header is stripped and used.
+
+### Append order is the order, and `step_index` is not an ordering
+
+On 120 of the 121 files the two agree, which is exactly why sorting by `step_index` looks safe. **One
+file interleaves two concurrent turns and uses five indices twice**, so sorting moves its records away
+from what the harness wrote. The index answers *"which call is this the result of"*; it does not
+answer *"what happened next"*.
+
+### The two files disagree about tool arguments, and the obvious filename is the wrong one
+
+Both exist in every conversation. `transcript.jsonl` **double-encodes each tool argument as a JSON
+string**, so a card built from it renders `"\"/tmp/x\""` for every path; `transcript_full.jsonl` holds
+the values. A reader taking the file with the obvious name looks correct in a listing and is wrong in
+every tool card. The lesser file is still read when it is the only one — a release that stopped
+writing the full file should degrade to a shabby card, not to an empty tab.
+
+### A delegation announces its children in prose, spelled unlike the stream
+
+`invoke_subagent`'s result is a `GENERIC` record whose content is English with JSON embedded in it:
+`conversationId`, `logAbsoluteUri`, `workspaceUris` — camelCase, where the same facts on the
+stream-json protocol are `conversation_id` and `log_uri`. Nothing in the record links a returned id to
+the `Subagents` argument that asked for it except **position**, and the call's own record carries no id
+for the result to reference. A count mismatch is therefore dropped rather than paired anyway: a row
+whose id belongs to a different subagent opens the wrong transcript under the right label.
+
+Two framings sit on top of the content and both are the harness talking, not a person:
+`<USER_REQUEST>` … `<ADDITIONAL_METADATA>` around a subagent's own first prompt, and a
+`<SYSTEM_MESSAGE>` block around a child's reply to its parent. The second carries a trap worth
+recording — the record *opens with a preamble that mentions the tag*, `The following is a
+<SYSTEM_MESSAGE> not actually sent by the user`, so a non-greedy match finds prose about the frame
+instead of the frame and renders the disclaimer, a stray opening tag and the body as one message.
 
 ---
 

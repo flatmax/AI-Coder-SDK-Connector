@@ -49,7 +49,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import shutil
-from pathlib import Path
 from typing import Any
 
 from aic_dc.agy import install
@@ -464,6 +463,149 @@ class AgyService(AntigravityService):
                 await self._dispatch(event, request_id)
         finally:
             self._turns.pop(request_id, None)
+
+    # ------------------------------------------------------------------
+    # Subagent transcripts
+    # ------------------------------------------------------------------
+    #
+    # The ``subagent_transcripts`` surface, which reads ``agy``'s own
+    # conversation store rather than our mirror — see
+    # :mod:`aic_dc.agy.subagents` for why there is nothing in the mirror to
+    # read. Both methods are **synchronous file work on the executor**, like
+    # every other history read here: a listing is one file per subagent and
+    # a transcript is one file, but they are on the user's disk and the event
+    # loop is serving a live turn.
+
+    async def list_subagent_transcripts(
+        self, session_id: str | None = None
+    ) -> list[dict[str, Any]] | dict[str, Any]:
+        """The subagents a conversation delegated to, one row per tab.
+
+        Defaults to the session on screen, matching the Claude adapter, so
+        the common call needs no argument and cannot name a session other
+        than the one being read.
+
+        A bare list on success and ``{"error": …}`` on failure, which is
+        the union the RPC table specifies and the distinction the history
+        browser draws differently: a session that delegated nothing and a
+        listing that could not be read want opposite reactions from the
+        user.
+
+        **A session we do not own answers an empty list, not an error.**
+        The id would have to come from somewhere other than our own
+        session list to get here, and the honest answer to "what did that
+        conversation delegate?" from this service is that it has no such
+        conversation — see :meth:`_mirrors_session`.
+        """
+        target = session_id or await self._visible_session_id()
+        if not target:
+            return []
+        if not await self._mirrors_session(target):
+            logger.warning(
+                "Refused a subagent listing for %s, which is not a session "
+                "this repository mirrors",
+                target,
+            )
+            return []
+
+        from aic_dc.agy import subagents
+
+        try:
+            loop = asyncio.get_running_loop()
+            return await loop.run_in_executor(None, subagents.rows, target)
+        except Exception as exc:  # noqa: BLE001 - answered, not raised
+            logger.exception("list_subagent_transcripts failed for %s", target)
+            return {"error": f"Could not read the subagent transcripts: {exc}"}
+
+    async def get_subagent_transcript(
+        self, agent_id: str, session_id: str | None = None
+    ) -> list[dict[str, Any]] | dict[str, Any]:
+        """One subagent's conversation, rendered like any other.
+
+        Rendered messages rather than raw records, for the reason the
+        Claude adapter states: a subagent tab draws through the same panel
+        code as the main transcript.
+
+        **The id is checked against what this session announced**, and
+        that check is the reason this method is not a hole. ``agent_id`` is
+        a conversation id in ``agy``'s own store, so an unchecked read here
+        would be "open any Antigravity conversation on this machine by id"
+        — including the ones the user had with the IDE, which AIC⚡DC never
+        owned and has no business showing. Two gates, because either alone
+        leaks: the session has to be one we mirror, and the agent has to be
+        reachable by announcement from it (AG-R-12's family).
+
+        A refusal reads as an unreadable transcript rather than as a
+        permission error, and deliberately: the browser renders the reason
+        inside the tab, and "not this session's subagent" is a sentence
+        about the request, which is what happened.
+        """
+        if not agent_id:
+            return {"error": "An agent ID is required"}
+        target = session_id or await self._visible_session_id()
+        if not target:
+            return {"error": "No session to read subagents from"}
+        if not await self._mirrors_session(target):
+            return {"error": f"{target} is not a session in this repository"}
+
+        from aic_dc.agy import subagents
+
+        try:
+            loop = asyncio.get_running_loop()
+            owned = await loop.run_in_executor(None, subagents.descendants, target)
+            if agent_id not in owned:
+                logger.warning(
+                    "Refused subagent %s: not announced by session %s",
+                    agent_id,
+                    target,
+                )
+                return {
+                    "error": (
+                        f"{agent_id} is not a subagent of this conversation, "
+                        f"so there is no transcript here to read."
+                    )
+                }
+            messages = await loop.run_in_executor(None, subagents.load, agent_id)
+        except Exception as exc:  # noqa: BLE001 - answered, not raised
+            logger.exception("get_subagent_transcript failed for %s", agent_id)
+            return {"error": f"Could not read subagent {agent_id}: {exc}"}
+
+        if not messages:
+            # A subagent that ran wrote records, so nothing to render means
+            # the conversation was pruned out of `agy`'s store — worth
+            # saying rather than drawing as an empty conversation. Same
+            # reasoning as `history_load`'s.
+            return {"error": f"Subagent {agent_id} has no readable transcript"}
+        return messages
+
+    async def _mirrors_session(self, session_id: str) -> bool:
+        """Whether this repository's mirror holds ``session_id``.
+
+        The ownership half of the containment check. ``agy``'s store holds
+        every conversation the user has ever had with this CLI, in this
+        repository or anywhere else; our mirror holds the ones AIC⚡DC ran
+        here. Only the second set is this service's to hand out.
+
+        The store's own ``list_sessions`` rather than
+        ``history.list_sessions``: this needs the ids, and that one parses
+        every transcript to count its messages, which is a session-list
+        page's worth of work to answer a yes/no.
+        """
+        if self.session_store is None:
+            return False
+        from claude_agent_sdk import project_key_for_directory
+
+        try:
+            rows = await self.session_store.list_sessions(
+                project_key_for_directory(str(self._repo_root))
+            )
+        except Exception:  # noqa: BLE001 - a failed check refuses, never allows
+            logger.exception("Could not list mirrored sessions to check ownership")
+            return False
+        return any(
+            isinstance(row, dict) and row.get("session_id") == session_id
+            for row in rows
+        )
 
     async def cancel_streaming(self, request_id: str) -> dict[str, Any]:
         """⏹ — starve the turn. **Localhost only.**

@@ -26,6 +26,7 @@
 // flat.
 
 import { html } from 'lit';
+import { SURFACE, supports } from '../engine-capabilities.js';
 import { withRpcTimeout } from '../rpc.js';
 import { _AGENT_LABEL_MAX_LENGTH } from './helpers.js';
 import { restoreMessage } from './restore.js';
@@ -674,6 +675,18 @@ function _unreadableTranscript(reason) {
  * caller's job is to put a tab in the strip either way.
  */
 async function _loadSubagentTranscript(panel, agentId, sessionId) {
+  // Its own surface, and not the strip's. An engine can announce a subagent
+  // and be unable to say what it did — that is the SDK Antigravity
+  // transport today — and asking anyway renders the router's refusal as the
+  // tab's contents, which is the phase-5 defect the history browser already
+  // learned ("a surface newly enabled exposing an unguarded call to
+  // another"). The sentence below is about the record rather than about the
+  // wiring, which is what the user can actually act on.
+  if (!supports(SURFACE.SUBAGENT_TRANSCRIPTS)) {
+    return _unreadableTranscript(
+      'This engine cannot read back what a subagent did',
+    );
+  }
   let result;
   try {
     result = await withRpcTimeout(

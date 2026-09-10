@@ -4581,3 +4581,200 @@ what tells them apart; an entry with no pid is left alone; a half-written entry 
 entry is reaped the same way and `scope_owner` stops matching it; an empty registry is not an error;
 and the one that pins the shape of the fix rather than its behaviour — a dead host's entry still
 denies while it is on disk. 4,708 green.
+
+---
+
+## What a subagent did, read off `agy`'s own disk — and the pairing rule 121 transcripts overturned (2026-09-10)
+
+`subagent_rows` landed on 2026-09-09: the live strip now shows a delegation on this transport, because
+`agy` announces one with a conversation id of its own. A row you cannot open is a worse offer than no
+row, so this is the other half — clicking one, and getting the subagent's work.
+
+### One capability key was answering two questions the transports answer differently
+
+`subagent_tabs` bundled *"can this engine show what a subagent did"* with *"can it stop one"*, and on
+`agy` those have opposite answers. **There is no halt frame on this transport.** ⏹ is starvation —
+`AgyGateServer.refuse_all` denies every pending call for the rest of the turn — which is turn-wide and
+unscoped by construction, so there is nothing to aim at a single subagent. Meanwhile the transcript is
+sitting on disk, complete, in a format the history browser's renderer already understands.
+
+So the key split: `subagent_transcripts` is **SUPPORTED** on `agy` and `subagent_stop` is **UNBUILT**
+on both transports. Two consequences worth stating because they are the sort of thing a later reading
+gets backwards:
+
+- **`UNBUILT` on the surface does not make `ConsultantBridge.cancel` decorative.** A consultation *is*
+  stopped, by the bridge, without the request ever reaching the CLI. What is unbuilt is stopping a
+  subagent **`agy` itself** spawned. The docstrings on both `bridge.cancel` and
+  `ClaudeCodeService.stop_task` now say which of the two keys they mean.
+- **No row carries a `task_id`.** `task_id` is what `stop_task` takes, so a value there would be a
+  handle onto a method that would refuse it — and this transport's transcript carries no call id to
+  put in one anyway. `tests/test_agy_subagents.py` asserts the key's *absence*.
+
+### The RPC pair, and the two gates that keep it from being a hole
+
+`AgyService.list_subagent_transcripts` and `.get_subagent_transcript`, both synchronous file work on
+the executor like every other history read here.
+
+`agent_id` is a conversation id in `agy`'s own store, and that store holds **every conversation the
+user has ever had with this CLI** — including the ones they had with the IDE, in other repositories,
+that AIC⚡DC never ran and has no business showing. An unchecked read is therefore not "the wrong tab
+opens"; it is *open any Antigravity conversation on this machine by id*. Two gates, because either
+alone leaks:
+
+1. **`_mirrors_session`** — the session has to be one this repository's mirror holds. It asks the
+   store's own `list_sessions` rather than `history.list_sessions`, which parses every transcript to
+   count its messages: a session-list page's worth of work to answer a yes/no.
+2. **`subagents.descendants`** — the agent has to be reachable *by announcement* from that session.
+   It walks deeper than the one-level listing needs, deliberately: a containment check that has to be
+   widened later is one that gets widened wrongly. The session is never its own descendant, a
+   self-announcement does not open that door either, cycles terminate, and the walk limit is logged
+   rather than silently narrowing — a check that quietly stopped looking would refuse a transcript the
+   user is entitled to, and it would read as *"the record is gone"*.
+
+Under both, a refusal reads as an **unreadable transcript rather than a permission error**: the
+browser renders the reason inside the tab, and "not this session's subagent" is a sentence about the
+request. A failed ownership check refuses; it never allows. And `_safe_id` in the reader is the third
+line, present even though `descendants` is the real containment, because the cost of being wrong there
+is reading the user's home directory rather than showing an empty tab.
+
+### The reader, and the one shape two engines owe the renderer
+
+`src/aic_dc/agy/subagents.py`: find the file, read the records, pair a call with its result, render
+messages the chat panel can draw. `agy`'s stream carries no trajectory or depth field, so a subagent's
+work is invisible to the live pump — `steps.py` now says so, and says where it *is* read instead.
+
+One renderer draws both engines' tabs, so this reader owes `claude_code.history` one message shape.
+That is asserted against `history._text_block` rather than against a literal list of keys: a field
+added there and not here is exactly the drift the test is for, and a literal would go stale without
+failing. The card conventions follow the sibling reader too — an unanswered call is `pending` with
+`result: None`, no turn claims a clean finish on no evidence, and **usage is absent rather than zero**,
+because a zero renders as a turn that cost nothing.
+
+### The defect a test caught before the measurement did
+
+A child's reply reaches its parent as a `<SYSTEM_MESSAGE>` block, and the record **opens with a
+preamble that mentions the tag** — `The following is a <SYSTEM_MESSAGE> not actually sent by the user`.
+A non-greedy match therefore finds prose *about* the frame instead of the frame, and renders the
+disclaimer, a stray opening tag and the body as one message. The assertion failed when it was written,
+which is why it is its own test rather than a line in the one above it.
+
+### The central inference was wrong, and 121 transcripts is what said so
+
+Every inference in this reader came from **one** capture, and each had a plausible wrong answer
+available. So before writing it up it was run against every `transcript_full.jsonl` on this machine:
+**121 files, 1,895 records, 720 tool results**. The full vocabulary is in
+[`sdk-surface.md` § The `agy` transcript store, read whole](sdk-surface.md#the-agy-transcript-store-read-whole--measured-2026-09-10);
+what the run *overturned* is here.
+
+No record type carries a tool result and no id links a result to its call, so the reader paired each
+result with the oldest call still open. The arithmetic is the truth instead: a result's `step_index` is
+its call's index, **plus one, plus the call's position within that step**. The difference only shows up
+where a call has no result — and:
+
+> **A tool call our own permission dialog refuses is written nowhere.** No result record, no error
+> record, no status: the index just skips.
+
+That is 58 calls across the 121 files — 39 mid-conversation holes and 19 at a file's last response
+(a turn still running, or cut short). One hole knocks every later card in the conversation one call out
+of step, and simulated over the same files the queue rule attaches **302 of the 720 results to a call
+that is not theirs, in 24 conversations**. Twelve of those hand a *write* call someone else's result,
+at which point `files_written_by` credits a file to a call that never ran — the worst failure
+available, since that list is what the browsed turn reports as changed. Under the arithmetic all 720
+attach to their own call and none is left unattributable.
+
+**The specimen was already on disk because of last week's work.** `probe_agy_subagent_gate.py` denies
+everything but the delegation, so steps 4, 10 and 14 of its subagent's conversation have no result
+record. The only transcript on this machine where a denial is the *normal* case is the one AG-R-14's
+probe wrote, and it is what made the hole visible.
+
+Three more corrections came out of the same run, none of which a green test suite would have raised:
+
+- **`KNOWN_TYPES` had 4 of the 16 real types.** Ten of them name a result after its tool
+  (`VIEW_FILE`, `CODE_ACTION`, `RUN_COMMAND`, …) and are the format of the 9 conversations from
+  2026-08-03 to 08-16; all 112 since 08-29 use `GENERIC` alone. Reading only the current spelling is
+  correct on everything a user is likely to open and turns a whole era into unrendered blobs with
+  their cards stuck pending. `sdk-surface.md`'s 2026-09-03 reading had listed the older set *as* the
+  current one; that paragraph now carries a correction.
+- **There is no `ERROR` status**, so `failed = status == "ERROR"` was a dead branch and every failure
+  rendered as a success. Failure is the `ERROR_MESSAGE` **type**, and a current-format runtime failure
+  says so in prose this deliberately does not sniff — `specs5/5-webapp/chat.md` § *Card Anatomy* makes
+  the status flag the only thing a card's failure styling may read.
+- **`RUNNING` is a backgrounded tool**, 43 records, never the last line of a file. Rendered `ok` it
+  was a card claiming a tool had finished with whatever output the harness had printed so far; it is
+  `pending`, `done: false`, no duration.
+
+And one inference was replaced by its opposite: `read_records` sorted by `step_index`, which agrees
+with append order on 120 of the 121 files — and the 121st **interleaves two concurrent turns and uses
+five indices twice**, so sorting moved its records away from what the harness wrote. The index answers
+*which call is this the result of*; it does not answer *what happened next*.
+
+### Two guards in the browser, and neither names an engine
+
+[AG-R-4](risks.md#ag-r-4) again: the browser must never branch on an engine name.
+`tabs.js::_loadSubagentTranscript` checks `supports(SURFACE.SUBAGENT_TRANSCRIPTS)` **before the RPC**
+and renders an unreadable-transcript notice — *"This engine cannot read back what a subagent did"* —
+rather than letting the call fail at the router and reporting it as an error. `block-render.js` draws
+Stop only on `live && row.task_id && supports(SURFACE.SUBAGENT_STOP)`, which is three conditions
+because they fail in three different ways: a browsed row has nothing to stop, a row without a task id
+has no handle, and a transport without the surface would refuse the call.
+
+`engine-capabilities.js::supports` reads an **unknown key as supported** — the deliberate opposite of
+the server's rule, so that a browser running against an older server does not hide working features.
+It also means a new guard is untested unless its fixture sets the key explicitly, which is what the
+new webapp tests do.
+
+### The tests
+
+Sixty-six, offline, in `tests/test_agy_subagents.py`, against a `tmp_path` store with no `agy` and no
+network. They are written as falsifications of the plausible reader rather than as coverage: the one
+that trusts the tool's name (`invoke_subagent` here, `start_subagent` on the SDK — a reader keyed to a
+name is one rename away from listing nothing, silently, because a name matching nothing looks exactly
+like a turn that delegated nothing); the one that reads `transcript.jsonl` because it has the obvious
+name (it double-encodes every tool argument, so each card would render `"\"/tmp/x\""`); the one that
+hands out any conversation whose id looked like a UUID.
+
+Four of them exist only because of the measurement, and the sharpest is
+`test_a_call_our_dialog_refused_does_not_take_the_next_calls_output` — a refused write, no result
+record, then a `list_directory` whose output must land in its own card while the write stays pending
+and attributes no file. Its sibling puts the same hole *inside* one step, where the queue rule gets
+both cards wrong from one missing record. 4,804 Python and 4,484 webapp tests green.
+
+### Does the pair answer in the app? The id chain, followed rather than assumed
+
+Both methods take the session the browser is showing and hand it to `subagents.rows()` and
+`subagents.descendants()` as an `agy` **conversation id**. Nothing says those are the same string, and
+if they were not, **every test would still pass** — a fixture builds its store around whichever id it
+hands in — while the tab stayed empty in the app for good. That is the shape of failure this plan has
+already paid for four times, so the chain was followed link by link on this machine rather than read
+as obvious:
+
+- `agy/session.py` takes `_conversation_id` off the `init` frame and returns it as the session's
+  identity; `service.py` hands that same value to the translator and to the mirror.
+- `mirror.py::attach` files entries under it — refusing a non-UUID, because the reader validates —
+  keyed by `project_key_for_directory(repo_root)`, and `RepoSessionStore._list_sessions_sync` reports
+  each row's `session_id` as the file's stem. `_mirrors_session` asks for the same project key and
+  compares the same field, so the ownership gate closes on one string rather than on two spellings of
+  one.
+- And the id `agy` mints is the directory name in its own store: all **8** entries in the gate
+  registry — `~/.config/aic-dc/agy-sessions/<conversation_id>.json`, each written by a live turn — are
+  directories under `~/.gemini/antigravity-cli/brain`. (Two roots share that leaf name and are never
+  the same directory: `MIRROR_DIR` hangs off the repo's `.aic-dc/`, the registry off the user's config
+  dir. Worth knowing before grepping for one and finding the other.)
+
+Then the reader over the store as it stands: **127** conversations, **121** with a
+`transcript_full.jsonl`, **7** holding subagent rows, 8 rows between them. `load()` on one returns five
+messages in the shape `restore.js::restoreMessage` accepts — `role`, `content`, `blocks` of tool cards,
+`system_event`, `timestamp` — which is the shape the Claude reader emits, and has to be, because one
+normalizer serves both engines' tabs.
+
+The containment gate was checked against the real store too, not only in a fixture: `descendants()` on
+the two-subagent conversation returns exactly its two children, and **another real conversation on this
+machine** — readable, its own `transcript_full.jsonl` sitting there — is refused by id. That is the
+case the gate exists for, and it can only be demonstrated because the store holds conversations that
+have nothing to do with this repository.
+
+**Still owed:** nobody has opened the tab in a browser on a live `agy` turn. The guards and the gates
+are asserted in tests, the reader is measured against the real store, and the id chain above is read
+off disk — but the round trip has not been watched: a delegation announced, its row clicked, the
+transcript arriving through the RPC and rendering. Until then this is a read that demonstrably works
+and a wire that is only argued to.

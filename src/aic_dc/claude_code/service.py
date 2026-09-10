@@ -1918,7 +1918,7 @@ class ClaudeCodeService:
         # by asking the CLI first and falling back on an error, because a
         # `stop_task` for an unknown id is not a *failure* the CLI reports
         # cleanly, and AG-13's button has to be real rather than decorative
-        # (it maps to the `subagent_tabs` surface for exactly this reason).
+        # (it maps to the `subagent_stop` surface for exactly this reason).
         bridge = getattr(self, "consultant_bridge", None)
         if bridge is not None and str(task_id).startswith("consultation-"):
             stopped = await bridge.cancel()

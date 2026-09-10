@@ -185,7 +185,7 @@ Measured, not hypothesised: `agy` was asked to create a file in the current dire
 > against `trustedWorkspaces` would pass on a machine where writes divert anyway — measured here. It
 > must assert the **outcome**: write a sentinel, then `stat` it at the path it was asked for. That is
 > the one form of the check that does not depend on a mechanism nobody has pinned down. See
-> [`delivery.md` § The trusted workspace was not the whole story](delivery.md#the-trusted-workspace-was-not-the-whole-story-and-two-explanations-that-were-wrong).
+> [`delivery.md` § The trusted workspace was not the whole story](delivery.md#the-trusted-workspace-was-not-the-whole-story-and-the-first-two-explanations-were-wrong).
 
 **Mitigated 2026-09-05, at detection rather than at startup — and the reason is that the specified
 mitigation cannot be built honestly.** The startup check above has to assert an *outcome*, and the

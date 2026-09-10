@@ -322,7 +322,7 @@ describe('renderEngineNotice', () => {
 
     setCapabilities({
       ...ANTIGRAVITY,
-      subagent_tabs: surface('Subagent rows and their own tabs', 'unbuilt'),
+      subagent_stop: surface('Stop one subagent', 'unbuilt'),
     });
     expect(draw(renderEngineNotice(p)).textContent).toContain('Antigravity');
   });
@@ -363,7 +363,7 @@ describe('engineNoticeKey', () => {
     const before = engineNoticeKey(p);
     setCapabilities({
       ...ANTIGRAVITY,
-      subagent_tabs: surface('Subagent rows and their own tabs', 'unbuilt'),
+      subagent_stop: surface('Stop one subagent', 'unbuilt'),
     });
     expect(engineNoticeKey(p)).not.toBe(before);
   });

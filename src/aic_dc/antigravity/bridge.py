@@ -389,8 +389,12 @@ class ConsultantBridge:
         """Stop a running consultation. AG-13's ⏹, and it is real.
 
         Reached from ``stop_task``, which is why that method belongs to
-        the ``subagent_tabs`` surface. A button that did nothing would
-        read as a hung engine rather than as a missing feature.
+        the ``subagent_stop`` surface. A button that did nothing would
+        read as a hung engine rather than as a missing feature. Note that
+        the surface being ``UNBUILT`` on this transport does not make this
+        method decorative: a consultation is stopped here, by the bridge,
+        without ever reaching the CLI — what is unbuilt is stopping a
+        subagent *`agy` itself* spawned.
         """
         return await self._consultant.cancel()
 
