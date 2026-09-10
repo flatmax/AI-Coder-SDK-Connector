@@ -418,3 +418,92 @@ class TestTheRoundTrip:
 
         assert asyncio.run(go()) == hook.ALLOW
         assert recorder.requests() == []
+class TestStoppingOneSubagentRatherThanTheTurn:
+    """``refuse_conversation`` — ⏹ on a row, not on the turn.
+
+    The mechanism that already existed was ``refuse_all``, which is
+    turn-wide: wiring ⏹ on a subagent to it would have stopped the parent
+    as well as the subagent the user aimed at, and that is why
+    ``subagent_stop`` stayed UNBUILT with its design written out rather
+    than being wired to the nearest thing.
+
+    What makes aiming possible is the fact AG-R-14 was raised *about*: a
+    subagent runs in a conversation of its own, and the hook payload names
+    it on every call.
+    """
+
+    CHILD = "c21acd4d-0000-4000-8000-000000000001"
+
+    @pytest.mark.asyncio
+    async def test_the_stopped_conversation_is_denied_with_its_reason(self, wired):
+        _recorder, _gate, server, _config_dir = wired
+        server.refuse_conversation(self.CHILD, "the user stopped this subagent")
+        answer = await server.decide(payload(conversation=self.CHILD))
+        assert answer["decision"] == "deny"
+        assert answer["reason"] == "the user stopped this subagent"
+
+    @pytest.mark.asyncio
+    async def test_the_parent_is_untouched(self, wired):
+        """The whole difference from ``refuse_all``, in one assertion.
+
+        Answered by the dialog rather than by the refusal: the parent's
+        call goes down the ordinary path, so it is *asked about*, which is
+        what "the rest of the turn keeps running" means here.
+        """
+        recorder, gate, server, _config_dir = wired
+        server.refuse_conversation(self.CHILD, "stopped")
+        decide = asyncio.ensure_future(server.decide(payload(conversation=OURS)))
+        await answer_next(gate, recorder, {"action": "allow"})
+        assert (await decide)["decision"] == "allow"
+
+    @pytest.mark.asyncio
+    async def test_a_stopped_subagent_is_never_put_to_the_user_again(self, wired):
+        """Pressing stop is an answer, and re-asking would be the opposite.
+
+        The same rule ``refuse_all`` follows. Asserted on the broadcast
+        rather than on the verdict, because a dialog that appears and is
+        then auto-answered would give the same verdict and a very
+        different experience.
+        """
+        recorder, _gate, server, _config_dir = wired
+        server.refuse_conversation(self.CHILD, "stopped")
+        await server.decide(payload(conversation=self.CHILD))
+        assert recorder.requests() == []
+
+    @pytest.mark.asyncio
+    async def test_a_turn_wide_stop_still_covers_everything(self, wired):
+        """``refuse_all`` subsumes an aimed refusal, and is checked first."""
+        _recorder, _gate, server, _config_dir = wired
+        server.refuse_all("the user stopped this turn")
+        answer = await server.decide(payload(conversation=OURS))
+        assert answer["decision"] == "deny"
+        assert answer["reason"] == "the user stopped this turn"
+
+    @pytest.mark.asyncio
+    async def test_resume_clears_the_aimed_refusals_too(self, wired):
+        """A stop applies to the turn it was pressed during.
+
+        This matters more than for the turn-wide refusal: a subagent's id
+        is ``agy``'s own conversation id, so one left standing would still
+        be aimed at that conversation if the user resumed it later — the
+        interception ``registry.release`` exists to prevent, arriving
+        through a different door.
+        """
+        recorder, gate, server, _config_dir = wired
+        server.refuse_conversation(self.CHILD, "stopped")
+        server.resume()
+        assert server.is_refusing(self.CHILD) is False
+        decide = asyncio.ensure_future(server.decide(payload(conversation=self.CHILD)))
+        await answer_next(gate, recorder, {"action": "allow"})
+        assert (await decide)["decision"] == "allow"
+
+    def test_an_empty_id_aims_at_nothing(self, wired):
+        """A missing row id must not become a refusal that matches "".
+
+        ``decide`` looks the payload's conversation up in this map, and a
+        payload with no conversation id reads as ``""`` — so an empty key
+        would stop every call this host could not attribute.
+        """
+        _recorder, _gate, server, _config_dir = wired
+        server.refuse_conversation("", "stopped")
+        assert server.is_refusing("") is False

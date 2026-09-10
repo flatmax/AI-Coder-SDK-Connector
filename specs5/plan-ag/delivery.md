@@ -5099,3 +5099,91 @@ and the false positives are the polite failure mode.** The same asymmetry could 
 had a name been classified in only the `agy` table while the merged read happened elsewhere.
 
 4,840 Python and 4,485 webapp tests green.
+---
+
+## ⏹ on one subagent: the mechanism works and the handle arrives too late (2026-09-10, latest)
+
+`subagent_stop` was the last unbuilt surface of the subagent trio, and the only one whose design was
+already written out — `capabilities.py` said what to build, named two limits in advance, and named one
+unmeasured thing. It was built. It is still UNBUILT, **for a reason the row did not have**, and
+finding that out is the entry.
+
+### What was built, and it holds
+
+`AgyGateServer.refuse_conversation` aims the starvation the gate already performs at a single
+conversation id. That aiming is possible because of the fact [AG-R-14](risks.md#ag-r-14) was raised
+*about*: a subagent runs in a conversation of its own, and the hook payload names it on every call.
+`AgyService.stop_task` drives it, checks the id against what the turn announced — the same containment
+`agy/subagents.py` states for the reading half of the same identifier — and answers `stopping`, never
+`stopped`, because the row must stay live until the stream says otherwise.
+
+`scripts/probe_agy_subagent_stop.py` measured it on a live turn, and the instrument is the asymmetry:
+**the stopped subagent's later calls were all denied, and the parent's still reached the dialog.**
+Same turn, same gate, two conversations, opposite outcomes — which is the whole difference from
+`cancel_streaming`, and the difference that kept this surface unbuilt while the only mechanism was
+turn-wide.
+
+**The question the row ended on is answered, and the answer was the awkward one.** It asked whether
+`agy` reports a starved subagent `CANCELED` — the state that maps to `stopped` and an amber LED. It
+does not: it reports **`DONE`**. Defensible from the harness's side, since the agent did read the
+refusal and wind down, and wrong on a row, because `DONE` maps to `completed` and puts green over work
+a user stopped. So the terminal word is this host's (`AgyTranslator.mark_stopped`): we know a human
+pressed the button, which the stream does not report. Narrow on purpose — it changes the word, never
+the terminality, and only for an id `stop_task` recorded.
+
+### What cannot be built, and it is in the wire
+
+The browser probe found nothing to press. `scripts/probe_agy_subagent_stop_ui.py` drove a fourteen-file
+delegation with a browser attached and **no live subagent row was ever on screen**: one
+`subagentEvent` arrived, already terminal.
+
+Reading the frames says why, and it is not a timing accident:
+
+| Frame | State | Carries |
+|---|---|---|
+| `tool` / `invoke_subagent` | **ACTIVE** | `Subagents: [{Model, Prompt, Role, TypeName, Workspace}]` — **no conversation id** |
+| `subagent` / `invoke_subagent` | **DONE** | `subagent_info.subagents[]` with `conversation_id`, `log_uri` |
+
+`agy` emits the `subagent` step **once, and at `DONE`**. The identity a Stop button needs therefore
+arrives **with the frame that ends the row**, and `block-render.js` draws Stop only on
+`live && task_id && supports(...)`. There is no window.
+
+**This is AG-R-14 residue 1 in a second place.** That residue is the spawn-to-announce race — a child
+whose first call can beat the claim onto disk, because *"`invoke_subagent`'s arguments carry only
+`Prompt`, `Role`, `TypeName`, `Model` and `Workspace` — no conversation id, because the child does not
+exist when the dialog for the spawn is answered."* The same sentence, read a second time, is also the
+answer to why a live row cannot carry a handle: the id does not exist yet, so nothing can be keyed on
+it. AG-18 closed the *gating* consequence of that by asking the kernel instead. There is no equivalent
+move here, because a **button** needs a name the user's click can carry, and the kernel does not have
+one either.
+
+So the gate half stays built, tested and unreachable, and the surface stays `UNBUILT` with its reason
+replaced: **it waits on an identity, not on a mechanism.**
+
+### The correction this forced next door
+
+`subagent_rows` is titled *"Subagent rows and their own tabs, **live**"* and is SUPPORTED on `agy`.
+The word `live` overstates it, and the measurement above is what shows that: the row arrives already
+terminal, so it never spins. Worse in the other direction — the child can go on making tool calls
+*after* that `DONE` frame; two did, in the run that measured the stop. So the row reports an end the
+subagent has not reached.
+
+Left SUPPORTED rather than downgraded, because the row and its tab are real and carry the subagent's
+whole transcript — what is absent is the liveness, and it is now stated in the descriptor rather than
+implied by the title. **A capability's title is a claim, and this one had been making a claim nobody
+had checked.**
+
+### What the sitting cost, and what it bought
+
+Two probes, three tests files' worth of new coverage (an aimed refusal at the gate, the stopped word
+at the pump, `stop_task`'s containment and localhost rule), and a capability that ends the day exactly
+where it started — with a different reason and two measurements behind it. The alternative was
+shipping a button that could never appear, or shipping the descriptor's guess that `CANCELED` was
+coming.
+
+One test earned its place immediately: `test_a_remote_client_cannot_stop_anything` was first written
+patching `_localhost_available`, which is the *gate's* deadline question, and passed the call straight
+through while asserting it had been stopped. `_check_localhost_only` reads `_collab`. A test that
+patches the wrong seam is a test that reports the code it did not exercise.
+
+4,857 Python and 4,485 webapp tests green.

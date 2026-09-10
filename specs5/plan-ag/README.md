@@ -1,6 +1,27 @@
 # Second Engine — Google Antigravity alongside Claude Code
 
-**Status (2026-09-10, latest):** **the three findings the verification sitting turned up are fixed,
+**Status (2026-09-10, latest):** **⏹ on one subagent was built, measured working, and is still
+unbuilt — because the handle arrives too late, not because the mechanism was missing.**
+`AgyGateServer.refuse_conversation` aims the gate's starvation at a single conversation id, and
+`scripts/probe_agy_subagent_stop.py` held it on a live turn: every one of the stopped subagent's later
+calls denied, the parent's still reaching the dialog — same turn, two conversations, opposite
+outcomes, which is the whole difference from `cancel_streaming`. The question that row ended on is
+answered and the answer was awkward: `agy` reports a starved subagent **`DONE`**, not `CANCELED`, so
+the LED would have gone green over a stop and the terminal word is now this host's
+(`AgyTranslator.mark_stopped`). **Then the browser found nothing to press.** `agy` emits the
+`subagent` step carrying `conversation_id` **once, and at `DONE`**; the live `invoke_subagent` frame
+carries `Role`, `TypeName`, `Model`, `Workspace` and `Prompt` and no id, because the child does not
+exist yet. So the identity a Stop button needs arrives *with the frame that ends the row*, and there
+is no window in which the button can draw — [AG-R-14](risks.md#ag-r-14) residue 1 read a second way,
+and one AG-18's move cannot close, because a button needs a name the user's click can carry and the
+kernel has none either. `subagent_stop` therefore stays UNBUILT with its reason replaced: **it waits
+on an identity, not a mechanism.** The same measurement corrected the row next door — `subagent_rows`
+is titled *live* and on this transport the row arrives already terminal, while the child can go on
+working after it (two calls did) — stated in the descriptor rather than left implied. 4,857 Python and
+4,485 webapp tests green. See
+[`delivery.md` § ⏹ on one subagent](delivery.md#-on-one-subagent-the-mechanism-works-and-the-handle-arrives-too-late-2026-09-10-latest).
+
+**Status (2026-09-10, night):** **the three findings the verification sitting turned up are fixed,
 and one of the fixes was corrected by its own test before it shipped.** *(1)* The registry's
 grandfather clause is closed: a **conversation** entry with a dead host and no `agy_pid` is now a
 corpse, because the orphan's lifetime was measured this evening and is under a second, so such an

@@ -562,6 +562,33 @@ session**, and that is architectural rather than a missing flag.
 
 ---
 
+## When a subagent is announced, and what the two frames carry — 2026-09-10
+
+`sdk-surface.md` recorded that `agy` announces a delegation with a `conversation_id` of its own, which
+is what made `subagent_rows` and `subagent_transcripts` buildable. **What it did not record is
+when**, and the answer decides whether anything can be *done* to a subagent while it runs.
+
+One turn, captured with `stream_frames` so nothing is filtered by the translator:
+
+| Step | `state` | What it carries |
+|---|---|---|
+| `tool`, `tool_name: invoke_subagent` | `ACTIVE` | `tool_info.parameters.Subagents: [{Model, Prompt, Role, TypeName, Workspace}]` — **no conversation id** |
+| `subagent`, `tool_name: invoke_subagent` | `DONE` | `subagent_info.subagents[]`: `conversation_id`, `log_uri`, `role`, `type_name`, `initial_prompt`, `workspace_uris` |
+
+**The `subagent` step is emitted once, and at `DONE`.** There is no `ACTIVE` announcement, so:
+
+- a subagent's row arrives **already terminal** — the pump has nothing to spin, and the `live` in
+  `subagent_rows`' title overstates this transport;
+- the identity anything would be keyed on — a Stop button, a live tab, a per-subagent action — first
+  exists at the moment the row ends. This is [AG-R-14](risks.md#ag-r-14) residue 1 read a second way:
+  the child does not exist when the spawn is approved, so nothing about it can be named until it
+  reports.
+
+**And `DONE` on that step is not "the subagent has finished".** In the run that measured ⏹, the child
+made two more tool calls *after* the `DONE` frame — both reached the gate, both were denied by the
+aimed refusal. So the step's state describes the *spawn*, and a row settled from it reports an end the
+subagent has not reached.
+
 ## The `agy` process, measured rather than reasoned about — 2026-09-10
 
 Three facts about the process rather than the protocol, each of which a piece of shipped code

@@ -916,3 +916,115 @@ class TestSubagentTranscripts:
         for name in ("subagents.rows", "subagents.descendants", "subagents.load"):
             index = source.index(name)
             assert "run_in_executor" in source[max(0, index - 120) : index], name
+class TestStoppingOneSubagent:
+    """``stop_task`` — ⏹ on a row, built 2026-09-10.
+
+    The RPC contract is the browser's: ``stopping``, never ``stopped``.
+    ``chat-panel/index.js::_stopSubagent`` keeps the row live until the
+    *stream* reports it terminal, because a row that greyed out on the
+    request would claim a subagent had ended while its tools were still
+    running. These tests are about what the method does to the gate and to
+    the row's word; whether the refusal reaches the agent is
+    ``scripts/probe_agy_subagent_stop.py``'s question and was measured on a
+    live turn.
+    """
+
+    ANNOUNCED = "45f0eec3-66f6-4544-a1fd-a15dabe512bd"
+    STRANGER = "01dab20c-69b0-4c09-ac35-3382a7b1c8d1"
+
+    def _service_with_a_live_subagent(self, tmp_path):
+        from aic_dc.agy.steps import AgyTranslator
+
+        svc = service(tmp_path)
+        translator = AgyTranslator("r1")
+        translator._subagents[self.ANNOUNCED] = {"agent_id": self.ANNOUNCED}
+        svc._turns["r1"] = translator
+
+        class FakeGate:
+            def __init__(self):
+                self.refused = {}
+
+            def refuse_conversation(self, conversation_id, reason):
+                self.refused[conversation_id] = reason
+
+        gate = FakeGate()
+        svc._agy_gate = gate
+        return svc, gate, translator
+
+    def test_an_announced_subagent_is_refused_and_reported_stopping(self, tmp_path):
+        svc, gate, _translator = self._service_with_a_live_subagent(tmp_path)
+        answer = asyncio.run(svc.stop_task(self.ANNOUNCED))
+        assert answer == {"status": "stopping", "task_id": self.ANNOUNCED}
+        assert self.ANNOUNCED in gate.refused
+        assert "stopped this subagent" in gate.refused[self.ANNOUNCED]
+
+    def test_the_reason_tells_the_model_not_to_route_around_it(self, tmp_path):
+        """AG-R-11's sentence, one level down.
+
+        A refused agent has been measured reaching for another way; the
+        reason a stopped subagent reads has to close that off, because
+        unlike a denied *call* there is no second dialog behind it.
+        """
+        svc, gate, _translator = self._service_with_a_live_subagent(tmp_path)
+        asyncio.run(svc.stop_task(self.ANNOUNCED))
+        assert "not try another way" in gate.refused[self.ANNOUNCED]
+
+    def test_a_conversation_this_turn_never_announced_is_refused_the_handle(
+        self, tmp_path
+    ):
+        """The containment half, and the reason this is not a thin wrapper.
+
+        ``task_id`` here is ``agy``'s own conversation id, so an unchecked
+        one would let a caller aim a refusal at any conversation on the
+        machine — the same door ``agy/subagents.py`` shuts on the reading
+        side of the identifier.
+        """
+        svc, gate, _translator = self._service_with_a_live_subagent(tmp_path)
+        answer = asyncio.run(svc.stop_task(self.STRANGER))
+        assert answer["status"] == "not_running"
+        assert gate.refused == {}
+
+    def test_the_row_is_marked_so_it_settles_stopped_rather_than_completed(
+        self, tmp_path
+    ):
+        """``agy`` reports a starved subagent DONE — measured, 2026-09-10.
+
+        Left alone, the LED table would take that to ``completed`` and put
+        green over something the user stopped, so the terminal word for a
+        stopped id is this host's.
+        """
+        svc, _gate, translator = self._service_with_a_live_subagent(tmp_path)
+        asyncio.run(svc.stop_task(self.ANNOUNCED))
+        assert self.ANNOUNCED in translator._stopped
+
+    def test_a_session_with_no_gate_says_so_rather_than_pretending(self, tmp_path):
+        svc, _gate, _translator = self._service_with_a_live_subagent(tmp_path)
+        svc._agy_gate = None
+        answer = asyncio.run(svc.stop_task(self.ANNOUNCED))
+        assert "error" in answer
+
+    def test_an_empty_id_is_an_error_not_a_refusal_aimed_at_nothing(self, tmp_path):
+        svc, gate, _translator = self._service_with_a_live_subagent(tmp_path)
+        answer = asyncio.run(svc.stop_task(""))
+        assert "error" in answer
+        assert gate.refused == {}
+
+    def test_a_remote_client_cannot_stop_anything(self, tmp_path):
+        """The localhost rule every write-shaped RPC on this service follows.
+
+        Through ``_collab``, which is what ``_check_localhost_only``
+        actually reads — the first version of this test patched
+        ``_localhost_available`` instead, which is the gate's deadline
+        question, and passed the call straight through while asserting it
+        had been stopped.
+        """
+        svc, gate, _translator = self._service_with_a_live_subagent(tmp_path)
+
+        class Remote:
+            def is_caller_localhost(self):
+                return False
+
+        svc._collab = Remote()
+        answer = asyncio.run(svc.stop_task(self.ANNOUNCED))
+        assert answer == {"error": "restricted", "reason": "localhost_only"}
+        assert gate.refused == {}

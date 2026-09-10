@@ -283,7 +283,18 @@ SURFACES: tuple[Surface, ...] = (
         "than by the SDK's per-step scope — measured at 1.1.27 by "
         "scripts/probe_agy_subagent_frames.py. The SDK transport carries "
         "trajectory_id and depth, which antigravity/steps.py already maps "
-        "onto agent_id, and no pump there emits the announcement yet.",
+        "onto agent_id, and no pump there emits the announcement yet. "
+        "**The word `live` in this title overstates it on agy, measured "
+        "2026-09-10.** The `subagent` step is emitted once and at DONE, so "
+        "the row arrives already terminal and there is no window in which "
+        "it spins; the ACTIVE `invoke_subagent` frame that would give it "
+        "one carries no conversation id to key it by. Worse in the other "
+        "direction: the child can still be making tool calls after that "
+        "DONE frame — two of them, in the run that measured it — so the "
+        "row reports an end the subagent has not reached. Still SUPPORTED "
+        "rather than downgraded, because the row and its tab are real and "
+        "carry the subagent's whole transcript; what is absent is the "
+        "liveness, and it is stated here rather than implied by the title.",
     ),
     Surface(
         key="subagent_transcripts",
@@ -310,21 +321,28 @@ SURFACES: tuple[Surface, ...] = (
         title="⏹ one subagent, leaving the rest of the turn running",
         claude=SUPPORTED,
         antigravity=UNBUILT,
-        note="stop_task, and the half of subagent_tabs that was holding the "
-        "other half back. There is no halt frame on either Antigravity "
-        "transport: on agy the only mechanism is starvation "
-        "(AgyGateServer.refuse_all), and it is turn-wide rather than scoped "
-        "to a conversation, so wiring stop_task to it as it stands would "
-        "stop the parent as well as the subagent the user aimed at. "
-        "Scoping a refusal to one subagent's conversation is buildable — "
-        "the gate already claims each subagent's id — and two limits are "
-        "known before it is written: a subagent producing only prose has no "
-        "tool call to refuse and runs to its end, and a subagent's own "
-        "subagent has a conversation id of its own that an id-scoped "
-        "refusal would not match. Whether agy then reports the step "
-        "CANCELED — the amber LED the row would need — is unmeasured. "
-        "UNBUILT rather than ABSENT because the mechanism exists; what is "
-        "missing is the scoping and the measurement.",
+        agy=UNBUILT,
+        note="stop_task. The scoping this row asked for was built and "
+        "measured on 2026-09-10, and it is still UNBUILT here — for a "
+        "different reason than the one this row carried, and the new one is "
+        "in the wire rather than in us. AgyGateServer.refuse_conversation "
+        "aims the gate's starvation at one conversation id, and "
+        "scripts/probe_agy_subagent_stop.py showed it holding on a live "
+        "turn: every one of the stopped subagent's later calls denied, the "
+        "parent's still reaching the dialog. It also answered the question "
+        "this row ended on, awkwardly — agy reports a starved subagent "
+        "DONE, not CANCELED — so AgyTranslator.mark_stopped owns the "
+        "terminal word, because a green LED over a stop is a lie. **What "
+        "cannot be built is the aim.** A subagent's conversation id first "
+        "appears on the `subagent` step, which agy emits once, at DONE; the "
+        "live `invoke_subagent` frame carries Role, TypeName, Model, "
+        "Workspace and Prompt and no id, because the child does not exist "
+        "yet — AG-R-14 residue 1, in a second place. So the identity the "
+        "button would need arrives with the frame that ends the row, and "
+        "scripts/probe_agy_subagent_stop_ui.py found no live row to press "
+        "at all. The gate half stays built and tested; what it waits on is "
+        "an identity, not a mechanism. The SDK transport is unbuilt for the "
+        "older reason: no pump there emits the announcement.",
     ),
     Surface(
         key="agent_questions",

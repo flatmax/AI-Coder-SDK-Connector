@@ -339,13 +339,21 @@ class TestTheHelpers:
         announcement. The remaining key then split again (2026-09-10) for
         the same reason one level down: a subagent's transcript is a file
         on disk under the conversation id the announcement already
-        carries, and the only halt mechanism here is turn-wide, so a ⏹
-        wired to it would stop the parent.
+        carries, and the only halt mechanism here was turn-wide, so a ⏹
+        wired to it would have stopped the parent.
 
         A single key would have had to be wrong about one of them, and the
         direction it would have been wrong in is the expensive one:
-        SUPPORTED enables ``stop_task``, which nothing on either transport
-        has been shown to be able to do.
+        SUPPORTED enables ``stop_task``, and on the SDK transport nothing
+        has been shown to be able to do it.
+
+        **``subagent_stop`` stayed unbuilt on both, and the second attempt
+        at it is why the reason in that row changed.** The scoping was
+        built and measured — an aimed refusal holds, the parent survives —
+        and the blocker turned out to be the *identity*: a subagent's
+        conversation id first appears on the `subagent` step, which ``agy``
+        emits once and at ``DONE``, so the handle a Stop button needs
+        arrives with the frame that ends the row.
         """
         sdk = set(unbuilt_surfaces(ANTIGRAVITY))
         agy = set(unbuilt_surfaces(capabilities.AGY))
@@ -356,8 +364,9 @@ class TestTheHelpers:
         assert "subagent_transcripts" in sdk
         assert "subagent_transcripts" not in agy
         assert supports(capabilities.AGY, "subagent_transcripts")
-        # Still owed on both, and for the same reason: no transport has a
-        # halt frame scoped to one subagent.
+        # Unbuilt on both, for reasons that are now different: the SDK
+        # transport emits no announcement, and `agy` emits one too late to
+        # aim at. The mechanism exists here and the handle does not.
         assert "subagent_stop" in sdk and "subagent_stop" in agy
 
     def test_claude_has_nothing_unbuilt(self):

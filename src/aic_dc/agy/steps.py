@@ -183,6 +183,10 @@ class AgyTranslator:
         # the announcement, and is the only route to what the subagent
         # actually did.
         self._subagents: dict[str, dict[str, Any]] = {}
+        #: Subagents the user pressed ⏹ on, by conversation id. See
+        #: `mark_stopped` — `agy` reports a starved subagent as DONE, so
+        #: the terminal word for these is ours rather than the stream's.
+        self._stopped: set[str] = set()
         self._text: dict[int, str] = {}
         self._seq: dict[int, int] = {}
         self._tools: dict[int, dict[str, Any]] = {}
@@ -313,6 +317,45 @@ class AgyTranslator:
             )
         ]
 
+    def mark_stopped(self, agent_id: str) -> None:
+        """Record that the *user* stopped this subagent.
+
+        Measured 2026-09-10 by ``scripts/probe_agy_subagent_stop.py``: a
+        subagent starved by an aimed refusal is reported by ``agy`` as
+        **DONE**, not ``CANCELED``. Which is defensible from the harness's
+        side — the step did finish, once the agent read the refusal and
+        wound down — and is the wrong thing to put on a row, because
+        ``DONE`` maps to ``completed`` and a green LED over work the user
+        stopped.
+
+        So the status is overridden here rather than inferred from the
+        stream. This host knows something the stream does not report: that
+        a human pressed ⏹ on this conversation. ``stopped`` is the word
+        ``subagent-tabs.js``'s LED table maps to amber, and it is what
+        happened.
+
+        Not a guess about the agent's *behaviour* — a subagent producing
+        only prose is never refused anything and finishes its work
+        normally, and this will still label it stopped. That is the honest
+        reading of the row all the same: it reports what the user did to
+        it, and the transcript beside it reports what it managed to do.
+        """
+        if agent_id:
+            self._stopped.add(str(agent_id))
+
+    @property
+    def subagents(self) -> frozenset[str]:
+        """Every subagent conversation id this turn has announced.
+
+        Read by :meth:`~aic_dc.agy.service.AgyService.stop_task`, which
+        must not aim a refusal at a conversation this turn never spawned:
+        a subagent's ``agent_id`` is `agy`'s own conversation id, so an
+        unchecked one is "stop any Antigravity conversation on this
+        machine by id" — the same containment `agy/subagents.py` states
+        for reading one.
+        """
+        return frozenset(self._subagents)
+
     def _subagent(self, step: dict[str, Any], index: int, state: str) -> list[Event]:
         """A delegation, as the row and tab the strip already renders.
 
@@ -389,7 +432,14 @@ class AgyTranslator:
                         "description": known["role"],
                         "subagent_type": known["type_name"],
                         "task_type": str(step.get("tool_name") or "subagent"),
-                        "status": SUBAGENT_STATUS.get(state, "running")
+                        # A subagent the user stopped is `stopped`,
+                        # whatever `agy` says the step's state was — it
+                        # says DONE, measured. See `mark_stopped`.
+                        "status": (
+                            "stopped"
+                            if agent_id in self._stopped
+                            else SUBAGENT_STATUS.get(state, "running")
+                        )
                         if terminal
                         else "running",
                         # Without this the tab streams for the rest of the

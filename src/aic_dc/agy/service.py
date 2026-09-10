@@ -607,6 +607,78 @@ class AgyService(AntigravityService):
             for row in rows
         )
 
+    #: What a stopped subagent is told, and it is written to be read by a
+    #: model rather than logged: the second sentence is AG-R-11's, because
+    #: an agent refused one way has been measured reaching for another.
+    STOP_SUBAGENT_REASON = (
+        "The user stopped this subagent in AIC-DC. Stop what you are doing, "
+        "do not continue, and do not try another way of making this change."
+    )
+
+    async def stop_task(self, task_id: str) -> dict[str, Any]:
+        """⏹ **one subagent**, leaving the rest of the turn running.
+
+        There is no halt frame on this transport, so this is the same
+        starvation ``cancel_streaming`` performs, aimed at one
+        conversation: the gate refuses every later call from it with a
+        reason the model reads, and the parent turn is untouched. The id is
+        the subagent's own ``agy`` conversation, which is what the row
+        carries and what the gate already claims as the announcement
+        arrives.
+
+        **``stopping``, never ``stopped``.** The row keeps rendering as
+        live until the *stream* reports the subagent terminal, and that is
+        the contract ``chat-panel/index.js::_stopSubagent`` is written
+        against: a row that greyed out on the request would claim a
+        subagent had stopped while its tools were still running. What this
+        returns is a fact about the gate — the refusal is recorded — and
+        nothing about the agent.
+
+        **The id is checked against what this turn announced.** An
+        unchecked one would let a caller aim a refusal at any conversation
+        on this machine, which is the containment
+        :mod:`aic_dc.agy.subagents` states for the reading half of the
+        same id.
+
+        Three limits, stated in ``capabilities.py`` before this was built
+        and unchanged by building it: a subagent producing only prose never
+        asks for a tool and runs to its end; a subagent's own subagent has
+        an id of its own that this does not match; and what ``agy`` reports
+        for a starved subagent decides the row's LED, which is the stream's
+        answer rather than this method's.
+        """
+        restricted = self._check_localhost_only()
+        if restricted is not None:
+            return restricted
+        if not task_id:
+            return {"error": "A task ID is required"}
+        if self._agy_gate is None:
+            return {
+                "error": "This session has no permission gate, so there is "
+                "nothing to refuse a subagent's calls through."
+            }
+        stopped_on = [
+            translator
+            for translator in self._turns.values()
+            if task_id in translator.subagents
+        ]
+        if not stopped_on:
+            # Not an error: a subagent whose turn has ended is a stale
+            # button rather than a bad request, and the browser draws Stop
+            # only while a row is live.
+            logger.info(
+                "stop_task for %s, which no live turn announced", task_id
+            )
+            return {"status": "not_running", "task_id": task_id}
+        self._agy_gate.refuse_conversation(task_id, self.STOP_SUBAGENT_REASON)
+        # The row's terminal word is ours, because `agy` reports a starved
+        # subagent as DONE and a green LED over a stop is a lie the user
+        # would have to read twice. See `AgyTranslator.mark_stopped`.
+        for translator in stopped_on:
+            translator.mark_stopped(task_id)
+        logger.info("Stopped subagent %s by refusing its calls", task_id)
+        return {"status": "stopping", "task_id": task_id}
+
     async def cancel_streaming(self, request_id: str) -> dict[str, Any]:
         """⏹ — starve the turn. **Localhost only.**
 

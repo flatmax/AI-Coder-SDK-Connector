@@ -185,6 +185,11 @@ class AgyGateServer:
         # its subagents' while they run. See `claim`.
         self._claimed: set[str] = set()
         self._refusal: str | None = None
+        #: Conversations stopped one at a time — ⏹ on a subagent's row,
+        #: where `_refusal` is ⏹ on the whole turn. Keyed by conversation
+        #: id, valued by the reason the agent reads. Cleared by `resume`
+        #: with its turn-wide sibling.
+        self._refused_conversations: dict[str, str] = {}
         #: The systemd scope `agy` will be launched into, or None where the
         #: platform has none. Named at construction rather than at `start`
         #: so `AgySession` can read it while assembling argv, and held here
@@ -226,6 +231,43 @@ class AgyGateServer:
         """
         return self._scope_unit
 
+    def refuse_conversation(self, conversation_id: str, reason: str) -> None:
+        """Refuse one conversation's calls, leaving the rest of the turn.
+
+        This is ⏹ **on a single subagent**, and it is the same starvation
+        :meth:`refuse_all` performs, aimed. It can be aimed because the
+        hook payload names the conversation every call comes from and this
+        host claims a subagent's conversation as its announcement arrives
+        (AG-R-14) — so by the time a user can see a row to press stop on,
+        the id on that row is one the gate already recognises.
+
+        **Three limits, and all three were known before this was written**
+        (``src/aic_dc/capabilities.py``, ``subagent_stop``):
+
+        - A subagent producing only **prose** never asks for a tool, so
+          there is nothing to refuse and it runs to its end. The same limit
+          :meth:`refuse_all` has for a whole turn, one level down.
+        - A subagent's **own** subagent has a conversation id of its own,
+          which an id-scoped refusal does not match. It is caught here
+          anyway when its parent's next call is refused and the parent
+          winds down, but not immediately, and not if it never reports
+          back.
+        - What ``agy`` then *reports* for the starved subagent is the
+          stream's business, not this method's: it returns when the
+          refusal is recorded, which is a fact about the gate rather than
+          about the agent.
+
+        Cleared by :meth:`resume` with the turn-wide refusal, for the same
+        reason — a stop applies to the turn it was pressed during.
+        """
+        if not conversation_id:
+            return
+        self._refused_conversations[str(conversation_id)] = reason
+
+    def is_refusing(self, conversation_id: str) -> bool:
+        """Whether this conversation has been stopped. For the caller's report."""
+        return str(conversation_id) in self._refused_conversations
+
     def refuse_all(self, reason: str) -> None:
         """Refuse every subsequent call without asking. This is ⏹.
 
@@ -250,8 +292,16 @@ class AgyGateServer:
         the next one would make ⏹ a mode rather than an action, and the
         user would find their next turn refusing everything for no visible
         reason.
+
+        The per-conversation refusals go with it, and that matters more
+        than it looks: a subagent's conversation id is `agy`'s own, so a
+        refusal left standing would still be aimed at it if the user
+        resumed that conversation later — the interception
+        `registry.release` exists to prevent, arriving through a different
+        door.
         """
         self._refusal = None
+        self._refused_conversations.clear()
 
     async def start(self) -> None:
         """Listen. Safe to call once; a second call is a no-op."""
@@ -402,6 +452,20 @@ class AgyGateServer:
         if self._refusal is not None:
             # Stopped. Answered without a dialog: the user already said so.
             return {"decision": "deny", "reason": self._refusal}
+
+        # Stopped one subagent, rather than the turn. Checked *after* the
+        # turn-wide refusal because a turn-wide stop subsumes it, and
+        # before everything else for the same reason that one is: the user
+        # has answered this question already and re-asking it per call
+        # would be the opposite of cancelling.
+        aimed = self._refused_conversations.get(
+            str(payload.get("conversationId") or "")
+        )
+        if aimed is not None:
+            logger.info(
+                "Refusing %s: its conversation was stopped by the user", tool_name
+            )
+            return {"decision": "deny", "reason": aimed}
 
         if self._policy is not None:
             # A consultation (AG-16). Terminal on purpose: this does not

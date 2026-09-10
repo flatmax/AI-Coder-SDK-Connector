@@ -788,6 +788,19 @@ routing.
   run is not a distribution, and the honest reading is that the window is real and unquantified
   rather than that it is narrow.
 
+  **The same missing id has a second consequence, found 2026-09-10 while building ⏹.** This residue
+  is about a claim arriving late; the other half is that *nothing else can be keyed on the id either*.
+  `agy` emits the `subagent` step carrying `conversation_id` **once, and at `DONE`** — the live
+  `invoke_subagent` frame carries `Role`, `TypeName`, `Model`, `Workspace` and `Prompt`, exactly as
+  this bullet says, and no id. So a subagent's row arrives already terminal, and a Stop button, which
+  needs a handle the user's click can carry, has no window in which to exist. `subagent_stop` is
+  therefore blocked on an **identity** rather than on a mechanism: the aimed refusal was built and
+  measured working (`scripts/probe_agy_subagent_stop.py`), and
+  `scripts/probe_agy_subagent_stop_ui.py` found no live row to press it on. AG-18 closed the *gating*
+  consequence of this residue by asking the kernel which group a call came from; there is no
+  equivalent move for a button, because the kernel has no name for the user to click either. See
+  [`delivery.md` § ⏹ on one subagent](delivery.md#-on-one-subagent-the-mechanism-works-and-the-handle-arrives-too-late-2026-09-10-latest).
+
   Two distinctions the consultant's argument elides and this entry should not. **A window that
   opens on every spawn is not a bypass on every spawn** — the bypass needs the child's first call to
   land inside it, which is the unmeasured quantity. And the figures offered for how often that

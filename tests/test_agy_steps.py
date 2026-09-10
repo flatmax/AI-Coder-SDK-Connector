@@ -820,3 +820,63 @@ class TestTheLocatorIsSharedAndDiffers:
         brain = self._brain(tmp_path)
         (brain / CONVERSATION / "duck_1").mkdir()
         assert steps.locate_generated_image(brain, CONVERSATION, "duck") is None
+class TestAStoppedSubagentSaysStopped:
+    """The word on a stopped row is this host's, and it has to be.
+
+    ``scripts/probe_agy_subagent_stop.py`` starved a real subagent on
+    2026-09-10 and ``agy`` reported the step **DONE**, not ``CANCELED`` —
+    defensible from the harness's side, since the agent did read the
+    refusal and wind down, and wrong on a row, because ``DONE`` maps to
+    ``completed`` and puts a green LED over work a user stopped.
+
+    So the override is deliberate and narrow: it changes the *word*, never
+    the terminality, and only for an id ``stop_task`` recorded.
+    """
+
+    AGENT = SUBAGENT_ENTRY["conversation_id"]
+
+    def test_a_stopped_subagent_is_stopped_rather_than_completed(self):
+        t = AgyTranslator("r1")
+        t.translate(frame(SUBAGENT_ACTIVE))
+        t.mark_stopped(self.AGENT)
+        payload = t.translate(frame(SUBAGENT_DONE))[0].payload
+        assert payload["status"] == "stopped"
+        assert payload["terminal"] is True
+
+    def test_an_untouched_subagent_still_completes(self):
+        """The negative control: without ⏹ the stream's word stands.
+
+        Amber everywhere would satisfy the assertion above while meaning
+        the LED had stopped distinguishing anything.
+        """
+        t = AgyTranslator("r1")
+        t.translate(frame(SUBAGENT_ACTIVE))
+        payload = t.translate(frame(SUBAGENT_DONE))[0].payload
+        assert payload["status"] == "completed"
+
+    def test_a_stop_does_not_settle_a_running_subagent(self):
+        """Pressing ⏹ is a request; the row settles when the stream says so.
+
+        ``chat-panel/index.js::_stopSubagent`` is written against this:
+        ``stop_task`` answers ``stopping``, and a row that went terminal on
+        the request would claim a subagent had ended while its tools were
+        still running.
+        """
+        t = AgyTranslator("r1")
+        t.mark_stopped(self.AGENT)
+        payload = t.translate(frame(SUBAGENT_ACTIVE))[0].payload
+        assert payload["status"] == "running"
+        assert payload["terminal"] is False
+
+    def test_the_announced_ids_are_readable_for_the_containment_check(self):
+        """``stop_task`` refuses to aim at a conversation this turn never had.
+
+        An ``agent_id`` here is ``agy``'s own conversation id, so an
+        unchecked one would be "stop any Antigravity conversation on this
+        machine by id" — the containment ``agy/subagents.py`` states for
+        the reading half of the same identifier.
+        """
+        t = AgyTranslator("r1")
+        assert t.subagents == frozenset()
+        t.translate(frame(SUBAGENT_ACTIVE))
+        assert t.subagents == frozenset({self.AGENT})
