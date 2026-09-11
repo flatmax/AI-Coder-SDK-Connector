@@ -19,7 +19,7 @@ on an identity, not a mechanism.** The same measurement corrected the row next d
 is titled *live* and on this transport the row arrives already terminal, while the child can go on
 working after it (two calls did) — stated in the descriptor rather than left implied. 4,857 Python and
 4,485 webapp tests green. See
-[`delivery.md` § ⏹ on one subagent](delivery.md#-on-one-subagent-the-mechanism-works-and-the-handle-arrives-too-late-2026-09-10-latest).
+[`delivery.md` § ⏹ on one subagent](delivery.md#-on-one-subagent-the-mechanism-works-and-the-handle-arrives-too-late-2026-09-10).
 
 **Status (2026-09-10, night):** **the three findings the verification sitting turned up are fixed,
 and one of the fixes was corrected by its own test before it shipped.** *(1)* The registry's

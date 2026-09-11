@@ -11,6 +11,8 @@ Where a decision here rests on a measurement, the measurement is in
 
 ---
 
+<a id="ag-1"></a>
+
 ## AG-1 — Two engines, one master per session **(user)**
 
 AIC⚡DC gains a second agent backend. Exactly **one engine is master at a time**, chosen per session;
@@ -62,6 +64,8 @@ therefore get **its own store root**, so a foreign record is unreachable by cons
 by a check somebody has to remember to write.
 
 ---
+
+<a id="ag-2"></a>
 
 ## AG-2 — The Python SDK is the engine; `agy` is not
 
@@ -208,6 +212,8 @@ wired into the probe ([AG-8](#ag-8)). What it cannot be is the thing running the
 
 ---
 
+<a id="ag-3"></a>
+
 ## AG-3 — One RPC namespace, with a capability descriptor
 
 The second engine mounts under the **same** RPC namespace as the first —
@@ -257,6 +263,8 @@ Mechanics, and what nearly shipped wrong, are in [`delivery.md`](delivery.md); t
 
 ---
 
+<a id="ag-4"></a>
+
 ## AG-4 — The indexes reach Antigravity as callables, not as MCP
 
 The symbol index and document index are exposed to the Antigravity engine as **plain Python
@@ -275,6 +283,8 @@ wrappers are Claude-specific packaging around functions that are not; only the p
 per-engine.
 
 ---
+
+<a id="ag-5"></a>
 
 ## AG-5 — The permission dialog is non-negotiable, and it uses the raw hook
 
@@ -392,6 +402,8 @@ and are not re-derived for Antigravity. Only the callback's shape changes.
 
 ---
 
+<a id="ag-6"></a>
+
 ## AG-6 — Cost is reported in tokens; no USD is invented
 
 For the Antigravity engine, the turn footer, the HUD and the Context tab report **tokens**. AIC⚡DC
@@ -417,6 +429,8 @@ to answer "reply with exactly the word: ok", so the cache-hit fraction is the nu
 explains a turn's size.
 
 ---
+
+<a id="ag-7"></a>
 
 ## AG-7 — Consultant first: capability before symmetry
 
@@ -448,6 +462,8 @@ consultation that could be resumed is a session, and a session belongs to the en
 
 ---
 
+<a id="ag-8"></a>
+
 ## AG-8 — The surface probe is built in phase 1, not later
 
 `src/aic_dc/antigravity/surface.py` and its test gate land with the consultant, before any engine
@@ -469,6 +485,8 @@ not `Literal` unions) and are listed in
 query and it is the only machine-readable capability inventory either Antigravity surface offers.
 
 ---
+
+<a id="ag-9"></a>
 
 ## AG-9 — Engine-specific surfaces are hidden, never stubbed
 
@@ -526,6 +544,8 @@ handed back to `switch_engine` as a choice. A third engine changes neither file.
 
 ---
 
+<a id="ag-10"></a>
+
 ## AG-10 — One repo root, one working tree, one master writing to it
 
 The Antigravity engine's `workspaces` is the repo root and nothing else. No `add_dirs` equivalent, no
@@ -547,6 +567,8 @@ diagnosable only by reading someone else's settings file.
 beside the existing CLI-version gate in the engine's health module, and it must fail visibly.
 
 ---
+
+<a id="ag-11"></a>
 
 ## AG-11 — The Gemini key lives in a file AIC⚡DC owns, not in `engine.json`
 
@@ -602,6 +624,8 @@ None of this changes [AG-R-8](risks.md#ag-r-8): a key is still mandatory, an `ag
 cannot supply it, and the file merely stops the user having to re-export it every session.
 
 ---
+
+<a id="ag-12"></a>
 
 ## AG-12 — The free AI Studio tier is chosen, not defaulted into **(user)**
 
@@ -678,6 +702,8 @@ choice should be re-made on its merits rather than inherited from this decision.
 none of them — see [AG-2](#ag-2).
 
 ---
+
+<a id="ag-14"></a>
 
 ## AG-14 — `agy` is a *second Antigravity transport*, and it is the one that reaches the paid account **(user)**
 
@@ -790,6 +816,8 @@ paragraph.
 
 ---
 
+<a id="ag-13"></a>
+
 ## AG-13 — A consultation is a subagent, and it gets a tab **(user)**
 
 An Antigravity consultation started from a Claude turn renders as its **own agent tab**, streaming
@@ -892,13 +920,15 @@ and the tripwire changes to match.
 
 ---
 
+<a id="ag-15"></a>
+
 ## AG-15 — "Always allow" is buildable on Antigravity, and AIC⚡DC owns the rule **(user)**
 
 **The dialog on this engine offers `Allow once` and `Deny`, and nothing else.** Reported from a live
 `agy` turn on 2026-09-05 against a `run_command`: the Claude dialog for the same call offers a third
 control that stops the question being asked again, and this one does not. That is a real difference
 in what the two engines cost a user to operate, not a cosmetic one — a session where every repeat of
-the same call raises a modal trains exactly the click-through habit [R-12](../3-engine/risks.md#r-12)
+the same call raises a modal trains exactly the click-through habit [R-12](../plan/risks.md#r-12)
 is about.
 
 ### Why it is absent today, which was a correct decision on a wrong assumption
@@ -976,6 +1006,8 @@ rule must never widen beyond what was shown. A rule derived from `rm -rf build/`
 dialog's label.
 
 ---
+
+<a id="ag-16"></a>
 
 ## AG-16 — The consultant runs over `agy` too, and by default prefers it **(user)**
 
@@ -1188,6 +1220,8 @@ a stronger position for it rather than a weaker one.
 
 ---
 
+<a id="ag-17"></a>
+
 ## AG-17 — A Claude-only deployment is supported, and the second engine can be switched off **(user)**
 
 **Asked as a question and it had no answer.** *"Is there a way to disable agy engine calling in the
@@ -1306,6 +1340,8 @@ That is the failure this entry was written about — a mount condition that answ
 nothing else, correct on the day it was written and wrong the day the product met a workplace.
 
 ---
+
+<a id="ag-18"></a>
 
 ## AG-18 — The gate's identity is a cgroup, not a conversation id
 
@@ -1437,6 +1473,8 @@ cgroup identity carried the load alone. A mechanism that is only ever measured w
 running is a mechanism whose contribution has not been measured.
 
 ---
+
+<a id="ag-19"></a>
 
 ## AG-19 — The stop is a mechanism, not a request **(built 2026-09-11)**
 
@@ -1577,6 +1615,8 @@ invocation cannot be stopped without killing the process, which costs 3.7s of de
 few seconds of text from a turn that holds no locks, runs no commands and touches no files. That
 trade remains the user's to make, through the force restart the `stop_ignored` card offers.
 
+<a id="ag-20"></a>
+
 ## AG-20 — The private config root returns as a mount namespace **(measured 2026-09-11, unbuilt)**
 
 > **Superseded as the primary mechanism by [AG-21](#ag-21) (2026-09-11, one day later).** Every
@@ -1671,6 +1711,8 @@ needs a durable app-owned root, since `--conversation` resume state would live t
 **Not scheduled.** `agy`-as-master is rare in real traffic and the consultant is the load it actually
 carries, so this is a correctness improvement to a path that works, not a fix to a path that is
 failing.
+
+<a id="ag-21"></a>
 
 ## AG-21 — The private config root is an environment variable, not a namespace **(measured 2026-09-11, unbuilt)**
 

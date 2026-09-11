@@ -9,6 +9,8 @@ re-litigation during implementation.
 
 ---
 
+<a id="cc-1"></a>
+
 ## CC-1 — Total replacement, not a dual-engine mode **(user)**
 
 Claude Code replaces the native engine. There is no engine-selection switch, no
@@ -29,6 +31,8 @@ flux controller, the prompt assembler, the context manager, the history compacto
 counter, and the emoji edit protocol.
 
 ---
+
+<a id="cc-2"></a>
 
 ## CC-2 — The symbol index and document index survive **(user)**
 
@@ -51,6 +55,8 @@ for a few hundred tokens instead of a directory walk plus twenty `Read` calls.
 sections are repointed from cache tiering to the MCP bridge and the browser.
 
 ---
+
+<a id="cc-3"></a>
 
 ## CC-3 — Transcript mirrored to `.aic-dc/`, context continuity via the SDK **(user)**
 
@@ -83,6 +89,8 @@ so its payload is untyped and must be read defensively out of `.data`.
 
 ---
 
+<a id="cc-4"></a>
+
 ## CC-4 — Claude Code's context is visualised, not guessed **(user)**
 
 The Context tab is not deleted. It is rebuilt on `ClaudeSDKClient.get_context_usage()`, which
@@ -107,6 +115,8 @@ state come from `ResultMessage.model_usage` / `total_cost_usd` and `RateLimitEve
 
 ---
 
+<a id="cc-5"></a>
+
 ## CC-5 — Scope of the first pass: plan and specs only **(user)**
 
 This pass writes `specs5/plan/` and rewrites `specs5/`. Nothing under `src/` or `webapp/` is
@@ -116,6 +126,8 @@ touched.
 touches ~28k lines across two languages. Agreeing the target shape on paper is the cheap half.
 
 ---
+
+<a id="cc-6"></a>
 
 ## CC-6 — The indexes reach Claude Code as MCP tools, not as prompt text
 
@@ -136,6 +148,8 @@ property, and it fights auto-compact — injected context that the model did not
 what compaction throws away first.
 
 ---
+
+<a id="cc-7"></a>
 
 ## CC-7 — Edits are Claude Code's, applied by Claude Code
 
@@ -167,6 +181,8 @@ checkpointing in a session that mirrors its transcript, and the mirror is the on
 
 ---
 
+<a id="cc-8"></a>
+
 ## CC-8 — Subagents are Claude Code's `Task` tool, not AIC⚡DC's spawn blocks
 
 The agent-mode design (`🟧🟧🟧 AGENT` blocks, `filter_dispatchable_agents`, per-agent
@@ -186,6 +202,8 @@ IDs. `7-future/parallel-agents.md` is retired as implemented-by-the-platform.
 
 ---
 
+<a id="cc-9"></a>
+
 ## CC-9 — URL fetching is retired
 
 URL detection, the fetch pipeline, the URL cache with TTL, the LiteLLM-backed summariser, and the
@@ -200,6 +218,8 @@ curation problem disappears.
 UI.
 
 ---
+
+<a id="cc-10"></a>
 
 ## CC-10 — One SDK client per repo process, browser request IDs retained
 
@@ -216,6 +236,8 @@ cannot demultiplex two concurrent turns on their own.
 the cancellation flag.
 
 ---
+
+<a id="cc-11"></a>
 
 ## CC-11 — `setting_sources` includes the project, so `CLAUDE.md` is live
 
@@ -234,6 +256,8 @@ onto a session they could also have opened in a terminal.
 settings. Prompt customisation moves to `CLAUDE.md`, where users already expect it.
 
 ---
+
+<a id="cc-12"></a>
 
 ## CC-12 — Modes become prompt presets, not engine states
 
@@ -256,6 +280,8 @@ invalidation for no reason.
 
 ---
 
+<a id="cc-13"></a>
+
 ## CC-13 — Review mode keeps its git machinery, loses its prompt swap
 
 Code review's git state machine (clean-tree gate, merge-base computation, soft reset, branch-tip
@@ -274,6 +300,8 @@ question an agent with `Bash` and `git` can answer better, at the granularity it
 token budget cap on how many diffs fit.
 
 ---
+
+<a id="cc-14"></a>
 
 ## CC-14 — File selection becomes a hint, not a context contract
 
@@ -295,6 +323,8 @@ honest equivalent: it stops the agent reading the file rather than stopping us f
 
 ---
 
+<a id="cc-15"></a>
+
 ## CC-15 — Permission prompts are localhost-only
 
 `can_use_tool` resolves against the **host** browser only. Non-localhost collaborators see the
@@ -310,6 +340,8 @@ request is denied after a timeout with a reason the transcript records. A headle
 be driven by a remote collaborator into running commands.
 
 ---
+
+<a id="cc-16"></a>
 
 ## CC-16 — Always-allow grants persist to `localSettings`, and never to `.claude/**` **(user)**
 
@@ -341,6 +373,8 @@ Separately, no derived rule may ever name a path under `.claude/`.
 such a call is approvable once but never permanently. `permissions.py` continues to honour an
 explicit `destination` on a CLI suggestion; the change is to what AIC⚡DC's own derivation defaults.
 
+<a id="cc-17"></a>
+
 ## CC-17 — The HUD and Context tab are replaced in phase 3, not vacated **(user)**
 
 `token-hud.js` and `context-tab.js` are deleted by the rip-out and immediately replaced with
@@ -363,6 +397,8 @@ visualisation [`../3-engine/context-visibility.md`](../3-engine/context-visibili
 starting from a working panel and a gate that can already be checked against `/context`.
 
 ---
+
+<a id="cc-18"></a>
 
 ## CC-18 — Index freshness after `Bash` **(decided 2026-08-28: sweep mtimes at flush)**
 
@@ -423,6 +459,8 @@ migrating transcripts users have already accumulated. The cheap moment to be acc
 before the first one is written — phase 5, before CC-18's implementation exists.
 
 ---
+
+<a id="cc-19"></a>
 
 ## CC-19 — One store, entries verbatim; `history_store.py` retires **(user)**
 
@@ -537,6 +575,8 @@ than left implicit in a table:
 
 ---
 
+<a id="cc-20"></a>
+
 ## CC-20 — The mirror wins over file checkpointing; undo is git's job
 
 `session_store` and `enable_file_checkpointing` cannot both be set. The SDK validates the pair in
@@ -572,6 +612,8 @@ changes git already tracks and a working tree the user can already diff.
   fails, and undo comes back by deleting a branch. Recorded in `7-future/README.md`.
 
 ---
+
+<a id="cc-21"></a>
 
 ## CC-21 — The selection hint goes, the checkbox with it **(user)**
 
@@ -638,6 +680,8 @@ silent when the real mechanism is neither.
   loss of a promise we were never keeping.
 
 ---
+
+<a id="cc-22"></a>
 
 ## CC-22 — Snippets are deleted; the `/` palette replaces them **(user)**
 

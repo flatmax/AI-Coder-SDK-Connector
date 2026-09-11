@@ -8,6 +8,8 @@ with corrections from [`sdk-surface.md`](sdk-surface.md). R-5 onward are new.
 
 ---
 
+<a id="r-1"></a>
+
 ## R-1 — `can_use_tool` is not a universal gate
 
 **Severity: high. Likelihood: certain — this is documented behaviour.**
@@ -37,6 +39,8 @@ path.
 
 ---
 
+<a id="r-2"></a>
+
 ## R-2 — `interrupt()` leaves messages in the buffer
 
 **Severity: medium. Likelihood: high — every user-cancelled turn.**
@@ -59,6 +63,8 @@ finalised. In steady state this log is empty; a non-empty log after a cancel mea
 wrong.
 
 ---
+
+<a id="r-3"></a>
 
 ## R-3 — Do not `break` out of the message iterator
 
@@ -83,6 +89,8 @@ carries over rather than being rewritten. Cancellation is a flag plus `interrupt
 full turn transcript is present and the process has no pending-task warnings at teardown.
 
 ---
+
+<a id="r-4"></a>
 
 ## R-4 — Built-in slash commands are CLI UI, not SDK features
 
@@ -110,6 +118,8 @@ handled is the failure this now watches for, in the direction opposite to the or
 
 ---
 
+<a id="r-5"></a>
+
 ## R-5 — Losing the tool's identity
 
 **Severity: high. Likelihood: medium — this is a slow drift, not an event.**
@@ -133,6 +143,8 @@ than a terminal. If the answer is only "it looks nicer", the phase did not deliv
 
 ---
 
+<a id="r-6"></a>
+
 ## R-6 — Cost becomes invisible instead of cheap
 
 **Severity: medium. Likelihood: medium.**
@@ -155,6 +167,8 @@ subscription-mode equivalent of a cost signal and gets first-class display.
 shows a real figure or shows "subscription" with the usage figures.
 
 ---
+
+<a id="r-7"></a>
 
 ## R-7 — Bundled CLI size and platform-specific wheels
 
@@ -212,6 +226,8 @@ install test has not ([`../next.md`](../next.md) § A2).
 
 ---
 
+<a id="r-8"></a>
+
 ## R-8 — Version skew between the SDK and the system CLI
 
 **Severity: medium. Likelihood: high over time.**
@@ -236,6 +252,8 @@ that line, we cannot diagnose a skew report.
 
 ---
 
+<a id="r-9"></a>
+
 ## R-9 — Authentication conflict silently redirects the session
 
 **Severity: high. Likelihood: medium.**
@@ -257,6 +275,8 @@ auth source is misconfigured.
 
 ---
 
+<a id="r-10"></a>
+
 ## R-10 — Subagent transcript volume
 
 **Severity: low. Likelihood: medium.**
@@ -270,6 +290,8 @@ directory. The warning mechanism is unchanged; only the path it measures moves.
 **Tripwire:** the existing one-shot warning, retained.
 
 ---
+
+<a id="r-11"></a>
 
 ## R-11 — Index staleness now has no natural refresh point
 
@@ -292,6 +314,8 @@ symbol is present.
 
 ---
 
+<a id="r-12"></a>
+
 ## R-12 — The permission dialog becomes a click-through
 
 **Severity: medium. Likelihood: high — this is the documented failure mode of every permission UI.**
@@ -308,6 +332,8 @@ settings where the user can see and revoke it — never an invisible in-memory g
 two, the tiering is wrong and needs re-cutting.
 
 ---
+
+<a id="r-13"></a>
 
 ## R-13 — Some `ClaudeAgentOptions` combinations are invalid, and only `connect()` knows
 
@@ -334,3 +360,46 @@ by accident.
 `test_the_sdk_still_refuses_the_pair`, both `importorskip`ing the private module. A new validation rule
 in a future SDK will not be caught by either — the general guard is a live connect per phase, which is
 what phase 5 skipped.
+
+---
+
+<a id="r-14"></a>
+
+## R-14 — Two refreshes race for one single-use refresh token
+
+**Severity: high when it fires. Likelihood: low, and rising with each open repo.**
+
+The severity has a measured half and an inferred half, and the difference is worth stating because the
+mitigation does not depend on it. Measured: the token is single-use, so the second redemption cannot
+succeed. Inferred: that the auth server treats a superseded redemption as replay and revokes the grant,
+which would take every engine path's login at once and need an interactive browser re-login. If instead
+it fails softly, this is a retry. Establishing which costs the login, so it stays inferred deliberately.
+
+The refresh token is single-use. [`token_refresh.py`](../../src/aic_dc/claude_code/token_refresh.py)
+exists because of it, and the whole design around it is single-writer on purpose: the SDK redacts
+`refreshToken` from the materialised child config, `propagate()` copies an access token only, the
+account panel reads and never repairs ([R-6](#r-6--cost-becomes-invisible-instead-of-cheap)'s
+neighbour in `account_usage.py` says so in as many words), and the parent delegates the actual
+redemption to `claude` rather than doing it itself.
+
+What is not guarded is the parent against *itself*. `ensure_fresh()` takes no lock. It short-circuits on
+`needs_refresh()`, so it only acts within the 15-minute `REFRESH_MARGIN_SECONDS` window — but two
+callers arriving inside that window both read the same `expiresAt`, both conclude a refresh is due, and
+both spawn a rung. The second redeems a token the first has already spent.
+
+**Why it bites:** the callers are per-session, not per-process. A connect-time pre-flight and a
+`_token_watchdog` each call it, and sessions are per-repo, so *n* open repos give 2*n* callers on one
+credential file. The window is small and the sessions were started at different times, which is exactly
+the shape of a bug that does not appear until it appears — and the watchdogs converge, because they all
+wake a fixed margin before the *same* expiry. A Claude consultant
+([`../7-future/blank-sheet-architecture.md`](../7-future/blank-sheet-architecture.md)) would add a
+caller per consultation.
+
+**Mitigation:** serialise `ensure_fresh()`. An `asyncio.Lock` covers every caller this process has, and
+the second one through re-reads `expiresAt` and short-circuits on `needs_refresh()` for free. It does
+not cover the user's own terminal `claude`, which is a consumer we cannot coordinate with and must
+instead survive: `LOGIN_REQUIRED_DETAIL` is already the honest terminal state for it.
+
+**Tripwire:** a test that two concurrent `ensure_fresh()` calls on an about-to-expire credential spawn
+**one** rung, not two. There is no field observable worth waiting for here — if this fires the user is
+logged out, and the symptom will be read as an outage rather than as a race.

@@ -13,6 +13,11 @@ the end of round 3, with one disagreement left standing. The transport measureme
 recorded separately, as [AG-20](../plan-ag/decisions.md#ag-20), because they change a live decision
 rather than a future one.
 
+> **Companion review, one day later.** This review asked *what would we rebuild* and answered *no
+> rewrite*. [`blank-sheet-architecture.md`](blank-sheet-architecture.md) asks the harder version — what
+> concepts would exist if nothing were built — and it is where rank 2 below gets its concept set. Read
+> this one for the ranking and that one for the seam.
+
 ## The question, and the answer to it
 
 *If we re-architected from scratch today, knowing what the system does, what would change — and is a

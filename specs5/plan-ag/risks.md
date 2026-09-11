@@ -12,6 +12,8 @@ measurement raised **`AG-R-11`**, which is live, critical, and was not predicted
 
 ---
 
+<a id="ag-r-1"></a>
+
 ## AG-R-1 — The permission dialog may not be able to render a diff
 
 **Severity: critical. Likelihood: RETIRED — measured 2026-08-30, the risk did not materialise.**
@@ -53,6 +55,8 @@ the dialog has silently lost its diff — which otherwise presents as users appr
 
 ---
 
+<a id="ag-r-2"></a>
+
 ## AG-R-2 — `google-antigravity` is 0.1.x and alpha
 
 **Severity: high. Likelihood: certain — the classifier says so.**
@@ -86,6 +90,8 @@ emptied write seam. See
 [`delivery.md` § Three findings, closed](delivery.md#three-findings-closed--and-the-one-that-was-wrong-before-it-shipped-2026-09-10-latest).
 
 ---
+
+<a id="ag-r-3"></a>
 
 ## AG-R-3 — A write can be silently diverted out of the repo
 
@@ -252,6 +258,8 @@ the tool's own report. A test that trusts the report cannot catch this.
 
 ---
 
+<a id="ag-r-4"></a>
+
 ## AG-R-4 — Two engines double every downstream surface
 
 **Severity: high. Likelihood: certain — it is the shape of the work.**
@@ -276,6 +284,8 @@ the webapp keys off the descriptor rather than off an engine name string. A bran
 `engine === 'claude'` is the observable that the seam has leaked.
 
 ---
+
+<a id="ag-r-5"></a>
 
 ## AG-R-5 — The Context tab has nothing to draw
 
@@ -303,6 +313,8 @@ window figure that came from the engine.
 
 ---
 
+<a id="ag-r-6"></a>
+
 ## AG-R-6 — A hand-maintained price table goes stale silently
 
 **Severity: medium. Likelihood: high, if one is ever written.**
@@ -322,6 +334,8 @@ token and call caps as the control instead of a dollar cap.
 tripwire; there is no correct value.
 
 ---
+
+<a id="ag-r-7"></a>
 
 ## AG-R-7 — Two masters on one working tree
 
@@ -345,6 +359,8 @@ construction: a second master session cannot be created while one is live, and t
 config is built from `BuiltinTools.read_only()` so it structurally cannot write.
 
 ---
+
+<a id="ag-r-8"></a>
 
 ## AG-R-8 — The credential path is separate, and separately billed
 
@@ -395,6 +411,8 @@ path (`local_connection.py:1241`), so the requirement is that it is caught and r
 credential degradation in the health banner rather than as an engine crash.
 
 ---
+
+<a id="ag-r-9"></a>
 
 ## AG-R-9 — The consultant becomes the engine adapter by accident
 
@@ -448,6 +466,8 @@ grow resume, history, a session store, or a master's RPC surface. It is one ques
 streamed. A consultation that could be resumed is a session, and a session belongs to the engine.
 
 ---
+
+<a id="ag-r-10"></a>
 
 ## AG-R-10 — A second bundled binary
 
@@ -508,6 +528,8 @@ The first two are what make this a caught regression rather than a noticed one.
 
 ---
 
+<a id="ag-r-11"></a>
+
 ## AG-R-11 — A denied edit is re-attempted through the shell
 
 **Severity: critical. Likelihood: observed — it happened on both probe runs, unprompted.**
@@ -539,6 +561,8 @@ rather than presenting it as a fresh, unrelated request. Deny-by-default on the 
 completion, and asserts the file's bytes are unchanged — asserting on the *file*, not on the hook
 having fired. A hook-level assertion passes while the file is being rewritten by `sed`, which is
 precisely the hole. It goes red if a future engine adapter gates file tools only.
+
+<a id="ag-r-12"></a>
 
 ## AG-R-12 — An `agy` hook gate is only as wide as its matcher
 
@@ -643,6 +667,8 @@ while claiming the second.
 
 ---
 
+<a id="ag-r-13"></a>
+
 ## AG-R-13 — A Claude-only deployment acquires a second provider by accident
 
 **Raised 2026-09-06**, by a user asking whether the second engine could be turned off and finding that
@@ -716,6 +742,8 @@ implies for any policy added later: **the file it lives in is part of the decisi
 managed file needs the merge or it needs a file of its own.
 
 ---
+
+<a id="ag-r-14"></a>
 
 ## AG-R-14 — A subagent's tool calls do not reach the gate
 
@@ -799,7 +827,7 @@ routing.
   `scripts/probe_agy_subagent_stop_ui.py` found no live row to press it on. AG-18 closed the *gating*
   consequence of this residue by asking the kernel which group a call came from; there is no
   equivalent move for a button, because the kernel has no name for the user to click either. See
-  [`delivery.md` § ⏹ on one subagent](delivery.md#-on-one-subagent-the-mechanism-works-and-the-handle-arrives-too-late-2026-09-10-latest).
+  [`delivery.md` § ⏹ on one subagent](delivery.md#-on-one-subagent-the-mechanism-works-and-the-handle-arrives-too-late-2026-09-10).
 
   Two distinctions the consultant's argument elides and this entry should not. **A window that
   opens on every spawn is not a bypass on every spawn** — the bypass needs the child's first call to
@@ -1044,6 +1072,8 @@ routing.
 author of the fix, which is the first time this feature has been used on this repository's own work
 and is worth recording as evidence for [AG-13](decisions.md#ag-13).
 
+<a id="ag-r-15"></a>
+
 ## AG-R-15 — The second opinion may not be a second model
 
 **Severity: moderate. Likelihood: LIVE — not fired, and nothing prevents it.**
@@ -1158,6 +1188,8 @@ had.
   a fallback.
 
 ---
+
+<a id="ag-r-16"></a>
 
 ## AG-R-16 — A `Stop` hook this app does not own can revive a turn it stopped
 
@@ -1316,6 +1348,8 @@ without waiting for the late `step_update` the paragraph above describes — and
 than acted on, because it is a fact about the user's own configuration.
 
 ---
+
+<a id="ag-r-17"></a>
 
 ## AG-R-17 — An engine may invent its own spelling of a shared field, and nothing says so
 
