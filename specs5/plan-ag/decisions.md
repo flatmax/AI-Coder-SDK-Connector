@@ -1958,11 +1958,14 @@ mechanisms has a place for one.
 The costed plan for this work assumed a spawned stdio MCP server, and every part of that assumption was
 expensive: a new process, a new entry point, and a second holder of the Claude credential. The last is
 the one that mattered. This process is the **sole** holder of a single-use refresh token by design, and
-[R-14](../plan/risks.md#r-14--two-refreshes-race-for-one-single-use-refresh-token) is already open on two
+[R-14](../plan/risks.md#r-14--two-refreshes-race-for-one-single-use-refresh-token) was open on two
 in-process callers racing inside the refresh margin; a separately spawned server would have added a
 third that no in-process lock could reach. Serving MCP from the process that already holds the
-credential removes that case entirely. R-14's lock is still a prerequisite of this work — it stays a
-lock rather than becoming an IPC design.
+credential removes that case entirely. R-14's lock was a prerequisite of this work and it stayed a
+lock rather than becoming an IPC design — **built 2026-09-11**, a process-wide mutex with the whole of
+`ensure_fresh()` behind it. The decision above is what kept it that cheap: had the stdio server survived,
+the same hazard would have needed a cross-process lock and a story about what happens when the other
+process dies holding it.
 
 ### Still unmeasured, and honestly so
 

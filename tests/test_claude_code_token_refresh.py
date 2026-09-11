@@ -24,6 +24,7 @@ the ladder is driven through a fake ``create_subprocess_exec``.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 
@@ -178,12 +179,28 @@ class _FakeProcess:
         self.killed = True
 
 
-def _spy_exec(monkeypatch: pytest.MonkeyPatch, *, on_call, returncode: int = 0):
-    """Replace subprocess spawning with a recorder. Returns the call list."""
+def _spy_exec(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    on_call,
+    returncode: int = 0,
+    yield_inside: bool = False,
+):
+    """Replace subprocess spawning with a recorder. Returns the call list.
+
+    ``yield_inside`` hands the loop back while the fake "subprocess" is in
+    flight, and before ``on_call`` has had a chance to rewrite the
+    credential. Only the concurrency tests need it, and they need it
+    badly: these fakes otherwise complete without ever suspending, so a
+    second caller would never get to run and a test for serialisation
+    would pass whether or not anything was serialised.
+    """
     calls: list[dict[str, object]] = []
 
     async def fake_exec(program, *args, env=None, cwd=None, **kwargs):
         calls.append({"program": program, "args": args, "env": env or {}, "cwd": cwd})
+        if yield_inside:
+            await asyncio.sleep(0)
         on_call(len(calls))
         return _FakeProcess(returncode)
 
@@ -408,6 +425,123 @@ async def test_a_cli_that_cannot_be_spawned_is_not_fatal(
     )
 
     assert outcome.ok is False
+
+
+# ---------------------------------------------------------------------------
+# Serialising concurrent refreshes
+# ---------------------------------------------------------------------------
+#
+# R-14, as tests. The refresh token is single-use and the callers are per
+# *session*: a connect-time pre-flight and a watchdog each call
+# `ensure_fresh`, sessions are per repo, and every watchdog wakes the same
+# margin before the same expiry. Two of them inside that margin used to
+# read the same `expiresAt`, both decide a refresh was due, and the second
+# spend a token the first had already redeemed.
+
+
+async def test_two_concurrent_refreshes_spawn_one_rung(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R-14's tripwire: one rung, not two.
+
+    The second caller does not merely lose a race — it never runs a
+    ladder at all. It wakes to the file the first one refreshed, and
+    `attempted is False` is how we know the deciding read happened inside
+    the lock rather than before it.
+    """
+    path = _write(tmp_path / ".credentials.json", _creds(_expired()))
+
+    def refresh_on_first_call(n: int) -> None:
+        _write(path, _creds(_far_future()))
+
+    calls = _spy_exec(monkeypatch, on_call=refresh_on_first_call, yield_inside=True)
+
+    first, second = await asyncio.gather(
+        ensure_fresh(credential_path=path, config_dir=tmp_path, cli_path="/bin/claude"),
+        ensure_fresh(credential_path=path, config_dir=tmp_path, cli_path="/bin/claude"),
+    )
+
+    assert len(calls) == 1
+    assert (first.ok, first.attempted) == (True, True)
+    assert (second.ok, second.attempted) == (True, False)
+
+
+async def test_many_converging_watchdogs_still_spawn_one_rung(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The shape the risk is actually written about: *n* open repos give
+    2*n* callers on one credential file, and their watchdogs converge
+    because they all wake the same margin before the same expiry."""
+    path = _write(tmp_path / ".credentials.json", _creds(_inside_margin()))
+
+    def refresh_on_first_call(n: int) -> None:
+        _write(path, _creds(_far_future()))
+
+    calls = _spy_exec(monkeypatch, on_call=refresh_on_first_call, yield_inside=True)
+
+    outcomes = await asyncio.gather(
+        *(
+            ensure_fresh(
+                credential_path=path, config_dir=tmp_path, cli_path="/bin/claude"
+            )
+            for _ in range(8)
+        )
+    )
+
+    assert len(calls) == 1
+    assert all(outcome.ok for outcome in outcomes)
+    assert [outcome.attempted for outcome in outcomes].count(True) == 1
+
+
+async def test_a_ladder_that_cannot_fix_it_is_re_run_by_each_caller(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The bounded price of the mitigation, pinned rather than glossed.
+
+    When the ladder *works*, the lock turns 2*n* refreshes into one. When
+    it cannot — a lapsed token no rung will move — each caller still runs
+    its own ladder, serially, so the last one waits for the sum of the
+    others rather than for the longest. The subprocess count is no worse
+    than it was without a lock; only the latency is, and the alternative
+    is caching a failure the user's own terminal may have just fixed.
+    """
+    path = _write(tmp_path / ".credentials.json", _creds(_expired()))
+    calls = _spy_exec(monkeypatch, on_call=lambda n: None, yield_inside=True)
+
+    outcomes = await asyncio.gather(
+        *(
+            ensure_fresh(
+                credential_path=path, config_dir=tmp_path, cli_path="/bin/claude"
+            )
+            for _ in range(2)
+        )
+    )
+
+    assert [outcome.detail for outcome in outcomes] == [REFRESH_FAILED_DETAIL] * 2
+    assert len(calls) == 2 * len(token_refresh.REFRESH_LADDER)
+
+
+def test_the_refresh_mutex_rebinds_to_each_event_loop() -> None:
+    """Why the mutex is built on demand instead of at import.
+
+    An `asyncio.Lock` binds itself to a loop the first time it is
+    contended and refuses every loop after that, so a module-level
+    instance would serialise the first batch of callers and then raise
+    `bound to a different event loop` for the rest of the process. One
+    loop per server run makes that invisible in production and certain in
+    the test suite, which gets a fresh loop per test — this is the only
+    test that would notice, so it contends deliberately.
+    """
+
+    async def contend() -> None:
+        async def hold() -> None:
+            async with token_refresh._refresh_mutex():
+                await asyncio.sleep(0)
+
+        await asyncio.gather(hold(), hold())
+
+    asyncio.run(contend())
+    asyncio.run(contend())
 
 
 # ---------------------------------------------------------------------------

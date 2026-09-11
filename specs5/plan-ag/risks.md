@@ -1928,3 +1928,45 @@ the gate, so it is the one component in the system that knows for certain that a
 currently keeps that to itself. The fix is presentational — a denial the consultation tab renders, so an
 answer built on blocked retrieval is marked as ungrounded rather than shipped as research. Unwritten, and
 on the list in [`README.md`](README.md#unbuilt-on-the-agy-transport-as-of-2026-09-10).
+
+---
+
+<a id="ag-r-23"></a>
+
+## AG-R-23 — A failed consultation deletes its own evidence
+
+**Severity: low for correctness, moderate for diagnosability. Likelihood: certain, on every failure.**
+**Raised 2026-09-11**, while checking what [AG-21](decisions.md#ag-21) did to `scripts/` — not by
+building it, and not by a test, which is the point.
+
+[AG-21](decisions.md#ag-21)'s ephemeral root is removed in a `finally`, and a `finally` does not know
+whether the consultation worked. So the one case where somebody wants to read the vendor's tree — an
+image the collector did not find, a transcript that is not where it should be, a turn that failed in a
+way the frames do not explain — is exactly the case where the tree has already been deleted.
+
+Before AG-21 this cost nothing, because the tree was under the user's own `HOME` and simply stayed
+there. `scripts/probe_agy_consultant.py` still carried the sentence that assumed it: *"if the image is
+missing, look in `<BRAIN_DIR>/<conversation_id>/`"*. That advice is now unfollowable, and the probe was
+the only place in the repository that noticed — the test suite cannot, because every test that would
+care builds its own root and keeps it.
+
+**This is a trade, not a defect.** Keeping every consultation root would reinstate the litter
+`sweep_consultations` exists to remove, and 228 KB per consultation is small but unbounded. The
+question is only whether *failure* should be treated differently from success, and the answer is not
+obvious enough to build unasked.
+
+**Candidate mitigations**, cheapest first:
+
+- **Keep the root when the consultation raised**, and log the path at `warning`. One condition in
+  `ephemeral`'s `finally`. Bounded by the failure rate, and swept on the next start by
+  `sweep_consultations`, which already removes anything it finds before this process opens one — so the
+  evidence survives exactly until the next run, which is roughly the window in which anyone would look.
+- **Copy the brain subtree out before removal**, which keeps the sweep simple at the cost of a second
+  policy about where copies live and when they expire.
+- **A debug flag**, which is the honest answer if failures turn out to be rare enough that nobody ever
+  wants this — and the dishonest one if they are not, because a flag is only reachable by somebody who
+  already knew to set it before the failure they wanted to investigate.
+
+**Tripwire.** A test that fails a consultation deliberately and asserts something readable survives,
+with the path named in the log. Assert on the **artefact** — that a named directory exists and holds the
+conversation's files — never that a branch was taken.

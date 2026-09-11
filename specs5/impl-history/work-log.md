@@ -574,6 +574,33 @@ The classification tests work because they refuse to be read past, and that is t
 
 ### Landed since
 
+- **The refresh lock, and the event loop it could not have been bound to** — 2026-09-11.
+  [R-14](../plan/risks.md#r-14--two-refreshes-race-for-one-single-use-refresh-token) closed, which is
+  what [AG-22](../plan-ag/decisions.md#ag-22) was waiting on: a consultation adds a consumer of a
+  single-use refresh token, so the lock had to be in front of it rather than after.
+
+  **The one-line mitigation was three decisions.** The lock is *module* state, because the callers are one
+  session per open repo while the thing guarded is one file on one machine — a session-owned lock would
+  have been 2*n* locks. The deciding read moved *inside* it, into `_refresh_under_mutex()`, because the
+  expiry a waiter reads before queueing is the one answer that waiting invalidates. And the mutex is built
+  on demand: an `asyncio.Lock` binds to an event loop the first time it is **contended** and refuses every
+  loop after, so a module-level one would have been invisible in a server that runs a single loop for its
+  whole life and certain in a test suite that gets a fresh loop per test.
+
+  **The tripwire asserts more than the rung count.** `len(calls) == 1` would pass on a lucky schedule with
+  the read left outside the lock; the second caller returning `attempted=False` is the only observable
+  that separates the two. Both tripwires were run against the unlocked source and fail there — the
+  eight-caller one at `8 != 1`, the risk entry's own arithmetic as an assertion message. The existing
+  fakes never suspend, so the subprocess spy grew a `yield_inside` flag; without it a serialisation test
+  passes whether or not anything is serialised.
+
+  **What it costs is recorded rather than glossed.** When the ladder works, 2*n* refreshes become one.
+  When it cannot, each waiter still runs its own ladder, so the last caller waits for the sum rather than
+  the longest — latency, not tokens, and caching the failure would break the re-read's whole purpose,
+  which is that the user's terminal `claude` may have fixed the credential while the ladder ran.
+  5,082 pytest green. Account in
+  [*Interlude — the lock that had to be built rather than declared*](../plan/delivery.md#interlude--the-lock-that-had-to-be-built-rather-than-declared-2026-09-11).
+
 - **A config editor two pixels tall, and a 1M context window nobody had chosen** — 2026-09-11. One
   session, two findings, and both arrived the same way: a user asking a question about the running app
   rather than an audit of the tree.

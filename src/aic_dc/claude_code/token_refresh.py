@@ -91,6 +91,30 @@ repair and which is therefore checked *before* a subprocess is spent on it
 (:data:`LOGIN_REQUIRED_DETAIL`). A banner that fires on ordinary restarts
 is the fastest way to teach a user to ignore the one that matters.
 
+One refresh at a time
+---------------------
+The refresh token is single-use, and the callers of :func:`ensure_fresh`
+are per *session* rather than per process: a connect-time pre-flight and
+a token watchdog each call it, and sessions are per repo, so *n* open
+repos put 2*n* callers on one credential file. Their watchdogs converge
+as well, because they all wake the same margin before the *same* expiry.
+Two arriving inside :data:`REFRESH_MARGIN_SECONDS` would both read the
+same ``expiresAt``, both conclude a refresh is due, and the second would
+redeem a token the first had already spent — ``specs5/plan/risks.md``
+R-14.
+
+So the whole of :func:`ensure_fresh` runs under a process-wide mutex,
+including the ``needs_refresh()`` short-circuit: the second caller
+through re-reads the file the first one just refreshed and returns
+having spawned nothing. Deciding *outside* the lock would be deciding
+from the one answer that waiting for the lock invalidates.
+
+The mutex reaches this process and no further. The user's own terminal
+``claude`` is a consumer in another one, and the design there is to
+survive the collision rather than prevent it — see
+:data:`LOGIN_REQUIRED_DETAIL`, which is the honest terminal state for a
+credential somebody else rotated out from under us.
+
 Never fatal
 -----------
 A failed refresh does not fail the connect. The token may still be valid,
@@ -268,6 +292,39 @@ def needs_refresh(expires_at_ms: int | None, *, now_ms: int | None = None) -> bo
     return seconds_remaining(expires_at_ms, now_ms=now_ms) < REFRESH_MARGIN_SECONDS
 
 
+# The process-wide refresh mutex and the loop it is bound to. Held as a
+# pair of module globals rather than as state on a session, because the
+# thing being serialised is one file on one machine while the callers are
+# one session per open repo — a lock owned by any of them would not be a
+# lock at all. See the module docstring's "One refresh at a time".
+_refresh_mutex_lock: asyncio.Lock | None = None
+_refresh_mutex_loop: asyncio.AbstractEventLoop | None = None
+
+
+def _refresh_mutex() -> asyncio.Lock:
+    """The process-wide refresh mutex, bound to the running loop.
+
+    Created on first use rather than at import, and replaced whenever the
+    running loop is not the one it bound itself to. An :class:`asyncio.Lock`
+    latches onto a loop the first time it is *contended* and raises
+    ``bound to a different event loop`` for every loop after that, so a
+    module-level instance would be a latent crash in any process that
+    outlives one loop — and a loop torn down mid-refresh would leave the
+    lock held forever, which rebinding also sheds.
+
+    The server runs exactly one loop for its whole life (``cli.py`` calls
+    :func:`asyncio.run` once), so the single slot is a cache that is
+    populated once and never thrashes. The case it is really there for is
+    the test suite, which gets a fresh loop per test.
+    """
+    global _refresh_mutex_lock, _refresh_mutex_loop
+    loop = asyncio.get_running_loop()
+    if _refresh_mutex_lock is None or _refresh_mutex_loop is not loop:
+        _refresh_mutex_lock = asyncio.Lock()
+        _refresh_mutex_loop = loop
+    return _refresh_mutex_lock
+
+
 async def ensure_fresh(
     *,
     credential_path: Path | None,
@@ -279,7 +336,13 @@ async def ensure_fresh(
 
     Runs before connect, so that the temp config dir the SDK is about to
     materialise snapshots a token with a full lifetime ahead of it rather
-    than the tail of an old one.
+    than the tail of an old one, and again on every watchdog tick.
+
+    Serialised process-wide. Concurrent callers do not race for the
+    single-use refresh token: the first through refreshes, the rest wake
+    to a file that no longer needs one and return without spawning
+    anything. The deciding read happens *inside* the lock for that
+    reason — see the module docstring's "One refresh at a time".
 
     Parameters
     ----------
@@ -302,6 +365,35 @@ async def ensure_fresh(
     if credential_path is None:
         return RefreshOutcome(ok=True, attempted=False)
 
+    async with _refresh_mutex():
+        return await _refresh_under_mutex(
+            credential_path=credential_path,
+            config_dir=config_dir,
+            cli_path=cli_path,
+            cwd=cwd,
+        )
+
+
+async def _refresh_under_mutex(
+    *,
+    credential_path: Path,
+    config_dir: Path,
+    cli_path: str,
+    cwd: Path | None,
+) -> RefreshOutcome:
+    """:func:`ensure_fresh`'s body, with the refresh mutex already held.
+
+    Split out so that every decision below is made from a file that no
+    other caller in this process can be part-way through rewriting —
+    starting with the ``needs_refresh()`` short-circuit, which is what
+    turns a queue of waiting callers into a single refresh.
+
+    Callers that wake to a credential the ladder *could not* fix each run
+    their own ladder, so a wedged CLI costs the last caller the sum of
+    the waits rather than the longest of them. That is the bounded price
+    of the mitigation and it is deliberately not cached around; see
+    ``specs5/plan/risks.md`` R-14.
+    """
     before = read_expiry(credential_path)
     if not needs_refresh(before):
         return RefreshOutcome(ok=True, attempted=False)

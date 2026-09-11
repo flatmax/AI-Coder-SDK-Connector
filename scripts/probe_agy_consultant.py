@@ -191,8 +191,11 @@ async def generate_image(consultant: AgyConsultant, work: Path) -> int:
             log(json.dumps(steps[-1], indent=2)[:2000])
             log(
                 "the frame carries no path by design — the harness picks "
-                "one. If the image is missing, look in "
-                f"{consultant_module.BRAIN_DIR}/<conversation_id>/ and fix "
+                "one. The image would have been written to "
+                "<config_dir>/agy-roots/consultations/c-*/.gemini/"
+                "antigravity-cli/brain/<conversation_id>/ — and that root "
+                "is already gone, because AG-21 removes it in a `finally` "
+                "whether the consultation succeeded or not (AG-R-23). Fix "
                 "the collector, not the shared table"
             )
         else:
@@ -228,19 +231,19 @@ async def run() -> int:
     work = probe_root("agy-consult-")
     config_dir = Path.home() / ".config" / "aic-dc"
 
-    state = install.status(config_dir)
-    log(f"installed gate: {state['state']} ({state.get('path')})")
-    # **Snapshotted and put back, rather than uninstalled.** The gate this
-    # machine has installed is usually somebody's *other* build — a
-    # released binary, another checkout — and `install.uninstall()` would
-    # remove it rather than restore it, so a probe run would silently
-    # leave the user ungated for their own next `agy` session. What is
-    # borrowed here is the file, and what is owed is the file back.
-    hooks_path = Path(state.get("path") or install.GLOBAL_HOOKS)
-    previous = hooks_path.read_bytes() if hooks_path.is_file() else None
-    if state["state"] != "current":
-        log("installing this checkout's gate for the duration of the probe")
-        install.install(config_dir)
+    # **Nothing is borrowed and nothing is installed, since AG-21.** This
+    # block used to snapshot the user's own `~/.gemini/config/hooks.json`,
+    # install this checkout's gate into it, and put the original back —
+    # carefully, because the gate on a developer's machine is usually some
+    # *other* build's. None of that applies now: a consultation writes its
+    # own hooks file into an ephemeral root it then deletes, so there is no
+    # shared file to borrow. Leaving the old block in would have been worse
+    # than dead code — `AgyConsultant.__init__` calls `retire_global()`, so
+    # the probe would install an entry, watch the consultant remove it, and
+    # then *restore* it in its `finally`, undoing AG-21's migration on the
+    # operator's machine every time the probe ran.
+    state = install.installable(config_dir)
+    log(f"gate: {state['state']} ({state.get('detail') or state['command']})")
 
     # The real class, recording. Substituted in the module the consultant
     # builds its gate from, because a consultation owns its own gate by
@@ -258,11 +261,6 @@ async def run() -> int:
             code = await generate_image(consultant, work)
     finally:
         consultant_module.AgyGateServer = AgyGateServer
-        if previous is None:
-            hooks_path.unlink(missing_ok=True)
-        else:
-            hooks_path.write_bytes(previous)
-        log(f"gate restored: {install.status(config_dir)['state']}")
         shutil.rmtree(work, ignore_errors=True)
     return code
 

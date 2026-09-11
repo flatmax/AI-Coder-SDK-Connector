@@ -403,3 +403,44 @@ instead survive: `LOGIN_REQUIRED_DETAIL` is already the honest terminal state fo
 **Tripwire:** a test that two concurrent `ensure_fresh()` calls on an about-to-expire credential spawn
 **one** rung, not two. There is no field observable worth waiting for here — if this fires the user is
 logged out, and the symptom will be read as an outage rather than as a race.
+
+**Built 2026-09-11, ahead of the step that needed it** —
+[*Interlude — the lock that had to be built rather than declared*](delivery.md#interlude--the-lock-that-had-to-be-built-rather-than-declared-2026-09-11). A process-wide mutex in
+[`token_refresh.py`](../../src/aic_dc/claude_code/token_refresh.py), with the whole of `ensure_fresh()`
+behind it — the `needs_refresh()` short-circuit included, split into `_refresh_under_mutex()` so that the
+indentation says which decisions are made under the lock. Reading the expiry *outside* the lock would
+have been reading the one answer that waiting for the lock invalidates, which is the failure mode the
+split exists to make unwritable. The tripwire is
+[`test_two_concurrent_refreshes_spawn_one_rung`](../../tests/test_claude_code_token_refresh.py), and it
+asserts more than the rung count: the second caller comes back `attempted=False`, which is the only
+observable that distinguishes a deciding read taken under the lock from one taken before it. Beside it,
+`test_many_converging_watchdogs_still_spawn_one_rung` drives the 2*n* shape this entry is written about —
+eight callers, one rung. Both were run against the unlocked source and fail there, the second at
+`8 != 1`.
+
+Three things the build settled that the entry above had left open.
+
+- **The mutex cannot be a module-level `asyncio.Lock`.** One binds itself to an event loop the first time
+  it is *contended* and raises `bound to a different event loop` for every loop after that — measured, not
+  inferred. The server runs a single loop for its whole life, so the defect would never show there; the
+  test suite gets a fresh loop per test and would meet it on the second contended test. So the lock is
+  built on demand and replaced when the running loop is not the one it bound to, which also sheds a lock
+  left held by a loop that was torn down mid-refresh. `test_the_refresh_mutex_rebinds_to_each_event_loop`
+  is the guard, and it contends deliberately, because an uncontended lock never binds and so never proves
+  anything.
+- **It is module state, not session state.** The thing being serialised is one file on one machine, while
+  the callers are one session per open repo. A lock owned by any session would not be a lock at all.
+- **The mitigation has a bounded price, and it is latency rather than tokens.** When the ladder works, the
+  lock turns 2*n* refreshes into one. When it *cannot* — a lapsed token no rung will move — each waiter
+  wakes, re-reads, still sees a refresh due, and runs its own ladder, so the last caller waits for the sum
+  of the others rather than for the longest of them. The subprocess count is no worse than it was without
+  a lock; only the ordering is. Caching the failure would fix the latency and break the thing the re-read
+  is for, which is that the user's own terminal `claude` may have repaired the credential while the ladder
+  ran. Accepted and pinned rather than glossed:
+  `test_a_ladder_that_cannot_fix_it_is_re_run_by_each_caller`.
+
+**Unchanged by the build:** the severity's inferred half — whether a superseded redemption trips replay
+detection or merely fails — is still inferred, and still does not matter, because the mutex is the same
+either way. And the mutex reaches this process only. The user's own terminal `claude` is a consumer we
+cannot coordinate with, so that collision stays survivable rather than prevented, with
+`LOGIN_REQUIRED_DETAIL` as its honest terminal state.

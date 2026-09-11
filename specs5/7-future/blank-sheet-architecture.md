@@ -183,10 +183,12 @@ the parent's stored credentials out from under it and lock the user out."* That 
 recorded here as unverified: **the refresh token is single-use for this provider.** It is not an
 assumption from the OAuth standard; it is why the SDK redacts it.
 
-What is genuinely unguarded is narrower. `ensure_fresh()` has no lock — no `asyncio.Lock`, no
-`fcntl.flock`. It short-circuits on `needs_refresh()`, so it only acts inside the 15-minute
-`REFRESH_MARGIN_SECONDS` window, but two callers arriving in that window both see the same answer and
-both spawn a rung. The second redeems a token the first has already replaced. Callers are not
+What was genuinely unguarded is narrower — and is **guarded as of 2026-09-11**; the paragraph is kept in
+the past tense because it is the argument for the ordering below, not a live hazard. `ensure_fresh()` had
+no lock — no `asyncio.Lock`, no
+`fcntl.flock`. It short-circuits on `needs_refresh()`, so it only acted inside the 15-minute
+`REFRESH_MARGIN_SECONDS` window, but two callers arriving in that window both saw the same answer and
+both spawned a rung. The second redeemed a token the first had already replaced. Callers are not
 hypothetical: there is a connect-time pre-flight *and* a watchdog **per session**, sessions are
 per-repo, so *n* open repos give 2*n* callers on one file — and a Claude consultant adds one more per
 consultation, which is what makes this the risk that gates step 2 rather than a pre-existing curiosity.
@@ -196,6 +198,16 @@ for a few lines, and it is correct whatever the server does on replay. Then acce
 reach: **the user's own terminal `claude` is a consumer we cannot coordinate with**, so the failure has
 to be survivable rather than merely unlikely. `LOGIN_REQUIRED_DETAIL` already exists as the honest
 terminal state, and the tripwire belongs on the observable the user would otherwise meet as a mystery.
+
+**Both are done, 2026-09-11.** The lock is a process-wide mutex with the whole of `ensure_fresh()` behind
+it, and the second acceptance stands unchanged — the mutex deliberately reaches this process and no
+further. Two things the build found that this layer had not: an `asyncio.Lock` held at module level binds
+to one event loop and refuses the next, so the mutex is built on demand; and when the ladder *cannot* fix
+the credential, every waiter still runs its own, which is a latency cost rather than a token one. Both are
+recorded where the hazard now lives — [R-14](../plan/risks.md#r-14--two-refreshes-race-for-one-single-use-refresh-token),
+with the build narrative in
+[*Interlude — the lock that had to be built rather than declared*](../plan/delivery.md#interlude--the-lock-that-had-to-be-built-rather-than-declared-2026-09-11)
+— because this layer holds the architecture argument and not the mechanism.
 
 The one claim here still inferred rather than measured is the *severity*. Single-use is established; whether
 redeeming a superseded token merely fails or trips replay detection and revokes the whole grant is not.
@@ -221,7 +233,7 @@ change.
 | step | size | what the costing turned on |
 |---|---|---|
 | 1 — every sink an observer | ~~2–3 d~~ 4–6 d | The shipped bridge fix is two-thirds of the test set already. **Consultation half done 2026-09-11**; the master-turn half is [AG-R-19](../plan-ag/risks.md#ag-r-19), and **revised upward the same day** when consulting it added [AG-R-20](../plan-ag/risks.md#ag-r-20) as a prerequisite |
-| 2 — a Claude consultant through `query()` | 3–5 d | Includes [R-14](../plan/risks.md#r-14--two-refreshes-race-for-one-single-use-refresh-token)'s lock, which it must not ship without |
+| 2 — a Claude consultant through `query()` | 3–5 d | Included [R-14](../plan/risks.md#r-14--two-refreshes-race-for-one-single-use-refresh-token)'s lock, which it must not ship without — **built 2026-09-11, ahead of the step**, so the remainder is the headless resolver and `max_turns` |
 | 3 — inline rendering as the default surface | 3–5 d | Webapp work, and the read-only tab it replaces already exists |
 | 4 — reach the consultant from `agy` | 4–6 d | **Down.** A spawned stdio server and a third credential holder were both deleted by measurement — see below |
 | 5 — formalise `ApprovalResolver` | 1–2 d | **Down hard, from 1–2 weeks.** Its ~3,000-line premise was refuted by the import graph |
@@ -261,7 +273,9 @@ roughly 40% of the estimate**. A costing exercise that only ever adds is not mea
    measuring*, and one that never adds is not either.
 2. **A Claude consultant through `query()`.** Headless resolver, `max_turns` above 2, and
    `token_refresh.ensure_fresh()` serialised first — a consultation adds a credential consumer, so the
-   lock is a prerequisite rather than a follow-up. *Must not break:* the master engine, and no mutation
+   lock is a prerequisite rather than a follow-up. **That prerequisite is discharged: the lock shipped
+   2026-09-11**, ahead of the step, which is the order it was written to require. What remains of step 2
+   is the headless resolver and `max_turns`. *Must not break:* the master engine, and no mutation
    of shared CLI environment state. This is the step that ends the asymmetry the exercise was framed
    around.
 3. **Inline rendering as the default consultation surface**, with a full streaming view available and
