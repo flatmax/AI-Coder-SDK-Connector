@@ -617,6 +617,38 @@ class TestTheStopIsAMechanism:
         footer = [e for e in events if e.name == "streamComplete"][-1]
         assert footer.payload["cancelled"] is True
 
+    def test_the_view_stops_at_the_latch_not_at_the_last_frame(self, wired):
+        """AG-19's presentational half, from the side that holds the latch.
+
+        The pump learns of the stop between frames, so the frames the fake
+        has already written are translated with the latch set and stop
+        becoming view. Before this, ``note_cancelled`` was called once the
+        loop had ended — the pump was told when there was nothing left to
+        suppress, so a stopped prose turn streamed its whole answer and
+        *then* said it had been stopped.
+        """
+        session, _server, _cfg, _events = wired
+
+        async def go():
+            await session.start()
+            gen = session.stream_turn("x", translator=AgyTranslator("r1"))
+            out = [await gen.__anext__()]
+            await session.cancel()
+            async for event in gen:
+                out.append(event)
+            await session.close()
+            return out
+
+        events = asyncio.run(go())
+        rendered = json.dumps([e.payload for e in events])
+        assert "the file." not in rendered
+        stops = [
+            e for e in events
+            if e.name == "systemEvent"
+            and e.payload.get("subtype") == "stop_acknowledged"
+        ]
+        assert len(stops) == 1
+
     def test_an_ordinary_turn_is_not(self, wired):
         session, _server, _cfg, _events = wired
 

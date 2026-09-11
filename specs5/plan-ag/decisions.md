@@ -1479,6 +1479,10 @@ by construction; the honest handling is presentational: stop updating the view, 
 user*, let the stream drain into the warm process, and offer a separate force-reset for a genuinely
 runaway generation.
 
+> **All four are built as of 2026-09-12** — see *The presentational half* at the end of this
+> decision. The mechanism's gap stays open on purpose; what changed is that a stopped turn now reads
+> as stopped from the moment ⏹ lands rather than at the footer.
+
 ### Two corrections that came with it
 
 - **`status: "SUCCESS"` with an empty response must not render as a completed answer.** A turn ended
@@ -1528,3 +1532,42 @@ same stop point, same gate — 3 invocations when the host answers `{}`, **1 whe
 **The residual gap named above is unchanged and was not closed.** `PostInvocation` still fires
 between invocations, so a single-invocation prose answer still runs to its natural end. What the
 build adds is that the turn now *says* it was stopped rather than rendering as a blank success.
+
+### The presentational half, built 2026-09-12
+
+The paragraph above was accurate about the mechanism and incomplete about the experience. The gap it
+describes was always going to be handled by *how the stopped turn reads*, and the specification had
+already written the handling down — *"stop updating the view, badge it stopped by user, let the
+stream drain into the warm process, and offer a separate force-reset for a genuinely runaway
+generation"*. The force-reset arrived with [AG-R-16](risks.md#ag-r-16)'s `stop_ignored` card. The
+other three had not been built, and the reason they had not is a single line: `stream_turn` called
+`translator.note_cancelled()` **after** the frame loop. The pump learned about the stop when there
+was nothing left to suppress, so a stopped prose turn streamed its entire answer and *then* said it
+had been stopped.
+
+The session now tells the pump the moment the latch is set, at the top of the loop and before the
+frame is translated. Three things follow, and the freeze is only honest if all three hold:
+
+- **The view stops.** Steps stop becoming events — prose, tool cards, subagent rows, the counters the
+  footer renders. Frames are still read, so the process stays warm and the next turn costs nothing.
+- **The meter does not.** Usage is still absorbed from every frame. The turn is still spending, and a
+  cost the UI cannot account for is [AG-R-6](risks.md#ag-r-6)'s family — the freeze is of the screen,
+  not of the accounting.
+- **The prose does not come back at the end.** `agy` assembles the whole answer into
+  `result.response` and the browser takes a settled message's content from it, so accepting it would
+  freeze the screen for the length of the turn and then paste the complete reply in at the footer —
+  a worse reading of the stop than never freezing. After a cancel the result's prose is refused and
+  `response_text` falls back to the accumulated deltas, which is exactly what was on screen when ⏹
+  was pressed.
+
+A **`stop_acknowledged`** system card carries the badge, because the footer's own badge cannot appear
+until the turn ends — which on the case this exists for is the thing taking the time. Without it the
+freeze is indistinguishable from a hang: text simply stops arriving, which is also what a model
+thinking looks like. It says the stop landed and the screen is final, offers no action, and raises no
+toast; the escalation stays with `stop_ignored`, which appears only if the wind-down drags past
+`STOP_OVERDUE_SECONDS`.
+
+**What is still not closed is the mechanism**, and deliberately: token generation inside one
+invocation cannot be stopped without killing the process, which costs 3.7s of dead session to save a
+few seconds of text from a turn that holds no locks, runs no commands and touches no files. That
+trade remains the user's to make, through the force restart the `stop_ignored` card offers.

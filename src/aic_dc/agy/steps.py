@@ -202,6 +202,10 @@ class AgyTranslator:
         #: rather than read off the stream, because the stream cannot say
         #: so — see that method.
         self._cancelled = False
+        #: Whether the freeze has been announced. Once per turn: the
+        #: suppression runs on every frame after the stop and one card per
+        #: withheld frame would bury the sentence it is there to say.
+        self._announced_stop = False
         # The *same* accounting object the SDK transport's translator
         # carries, and it is shared rather than reinvented because a
         # caller they share reaches straight into it:
@@ -253,7 +257,53 @@ class AgyTranslator:
         step = unwrap(frame, "step_update")
         if step is None:
             return []
+        if self._cancelled:
+            # **The view is frozen; the meter is not.** AG-19's residual
+            # gap: `PostInvocation` fires *between* invocations, so a turn
+            # already inside one runs to its own end and a prose answer
+            # asks permission for nothing and cannot be starved at all.
+            # Killing the process would stop it and costs 3.7s of dead
+            # session, so the specified handling is presentational —
+            # *"stop updating the view … let the stream drain into the
+            # warm process"*. This is that line. Frames are still read, so
+            # the process stays usable for the next turn; they just stop
+            # becoming view.
+            #
+            # Usage is absorbed anyway because the turn is still spending.
+            # Hiding that would be a cost the UI cannot account for, which
+            # is AG-R-6's family and the reason `_absorb_result` was fixed.
+            # Everything else — blocks, prose, tool cards, the counters the
+            # footer renders — stops here, so the footer describes the turn
+            # the user was shown rather than one that kept growing behind a
+            # frozen screen.
+            self._absorb_usage(step)
+            return self._announce_stop()
         return self._step(step)
+
+    def _announce_stop(self) -> list[Event]:
+        """Say once that the view has stopped updating.
+
+        Without this the freeze is indistinguishable from a hang: text
+        simply stops arriving, which is also what a model thinking looks
+        like. AG-19 asks for the stop to be *badged*, and the footer's
+        badge cannot appear until the turn ends — which on the case this
+        exists for is the thing taking the time.
+
+        Distinct from `stop_ignored`, which `AgySession` raises after
+        :data:`~aic_dc.agy.session.STOP_OVERDUE_SECONDS` and which offers
+        the force-restart. This one says *the stop landed and the screen is
+        final*; that one says *it has been a while and here is the
+        escalation*. A turn that winds down promptly shows only this.
+        """
+        if self._announced_stop:
+            return []
+        self._announced_stop = True
+        return [
+            Event(
+                "systemEvent",
+                {"subtype": "stop_acknowledged", "data": {}},
+            )
+        ]
 
     def _step(self, step: dict[str, Any]) -> list[Event]:
         step_type = str(step.get("step_type") or "")
@@ -664,7 +714,16 @@ class AgyTranslator:
         """
         self._status = str(result.get("status") or "")
         response = result.get("response")
-        if isinstance(response, str):
+        # **Not after a stop**, and this is the half that makes the freeze
+        # real rather than cosmetic. `agy` assembles the whole answer here,
+        # the browser takes the settled message's content from it, and the
+        # deltas it duplicates are the ones the view stopped rendering. So
+        # accepting it would freeze the screen for the length of the turn
+        # and then paste the complete reply in at the footer — a worse
+        # reading of the stop than not freezing at all. `response_text`
+        # falls back to the accumulated deltas, which is exactly what was
+        # on screen when ⏹ was pressed.
+        if isinstance(response, str) and not self._cancelled:
             self._response = response
         if self._status in ("SUCCESS", ""):
             self._absorb_usage(result)
@@ -713,6 +772,17 @@ class AgyTranslator:
         :class:`~aic_dc.agy.session.AgySession` is what knows, since it
         holds the latch ⏹ set and can ask the gate whether the loop was
         ended mechanically or merely refused.
+
+        **Called while the turn is still streaming, not only after it.**
+        It was originally called once, between the last frame and the
+        footer, which was enough to badge the turn and nothing more: the
+        pump learned about the stop only when there was nothing left to
+        suppress, so a stopped prose turn streamed its entire answer and
+        *then* said it had been stopped. The session now tells the pump as
+        soon as the latch is set, which is what turns this flag from a
+        footer field into the switch that stops the view — see
+        :meth:`_translate`. Idempotent, because both call sites remain:
+        the late one still covers a stop with no frame after it.
         """
         self._cancelled = True
 

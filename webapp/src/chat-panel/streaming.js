@@ -651,6 +651,27 @@ export function systemNotice(subtype, data) {
       collapse: true,
     };
   }
+  if (subtype === 'stop_acknowledged') {
+    // ⏹ landed and the screen is now final. Without this the freeze reads
+    // as a hang: text simply stops arriving, which is also what a model
+    // thinking looks like, and the turn's own "stopped" badge cannot
+    // appear until the turn ends — which is the part taking the time.
+    //
+    // No action and no toast. There is nothing for the reader to decide
+    // yet, and a toast would fire on every stop; the escalation belongs to
+    // `stop_ignored` below, which only appears if the wind-down drags.
+    // `collapse` so that a stop during a second turn replaces this rather
+    // than stacking a second copy of the same sentence.
+    return {
+      text:
+        'Stopped. The engine is finishing the reply it had already '
+        + 'started — nothing further will be shown, and anything it '
+        + 'had already done stands.',
+      toast: '',
+      severity: 'info',
+      collapse: true,
+    };
+  }
   if (subtype === 'stop_ignored') {
     // The user pressed ⏹ and the turn kept going. Two causes, one
     // experience, and the card says which because the two call for

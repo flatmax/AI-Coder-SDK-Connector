@@ -5692,3 +5692,70 @@ difference.
 vocabularies that are both already measured, and the reading that mattered — `agy` reporting
 `CANCELED` for a permission denial with exit 0 — was taken in phase 0 and is recorded in
 [`sdk-surface.md`](sdk-surface.md).
+
+## The stop that read like a hang (2026-09-12)
+
+[AG-19](decisions.md#ag-19) shipped its mechanism on 2026-09-11 and named its own residual gap:
+`PostInvocation` fires *between* invocations, so a single-invocation prose answer runs to its own end
+and cannot be starved by the gate either, because it asks permission for nothing. The decision had
+already written down what to do about the experience — *"stop updating the view, badge it stopped by
+user, let the stream drain into the warm process, and offer a separate force-reset."* The force-reset
+arrived with [AG-R-16](risks.md#ag-r-16)'s `stop_ignored` card. The other three had not been built.
+
+**The cause was one line in the wrong place.** `AgySession.stream_turn` called
+`translator.note_cancelled()` *after* the frame loop, so the pump was told about the stop when there
+was nothing left to suppress. The flag was a footer field, not a switch. A stopped prose turn
+therefore streamed its entire answer to the screen and *then* landed a footer saying it had been
+stopped — the one reading of a stop that is worse than no feedback, because it looks like the stop
+did nothing.
+
+The session now tells the pump at the top of the loop, before the frame is translated. The late call
+stays, because a stop with no frame behind it still has to badge the turn, and `note_cancelled` is
+idempotent for that reason.
+
+### Freezing the view is three changes, not one
+
+Each of the other two would have made the freeze a lie in a different direction:
+
+- **The meter keeps running.** Usage is still absorbed from every suppressed frame. The turn is still
+  spending, and a cost the UI cannot account for is [AG-R-6](risks.md#ag-r-6)'s family. What stops is
+  the rendering, not the accounting.
+- **The finished prose is refused.** `agy` assembles the whole answer into `result.response`, and
+  `streaming.js` takes a settled message's content from it. Accepting it after a stop would freeze
+  the screen for the length of the turn and then paste the complete reply in at the footer — strictly
+  worse than never freezing. `response_text` falls back to the accumulated deltas, which is exactly
+  what was on screen when ⏹ was pressed.
+
+The suppression is of *every* step type rather than of prose alone. A tool card opening after the
+stop would announce work the user has no way to watch finish, and the footer's counters would
+describe a turn that kept growing behind a frozen screen.
+
+### The card exists because stillness is ambiguous
+
+A frozen view and a hung one look identical: text stops arriving, which is also what a model thinking
+looks like. The footer's *stopped* badge cannot arrive until the turn ends, which on the case this
+whole change exists for is the part taking the time. So the pump emits a **`stop_acknowledged`**
+system event on the first suppressed frame and never again, and the panel renders it as a card that
+says the stop landed and the screen is final.
+
+It carries no action and no toast. The escalation belongs to `stop_ignored`, which appears only after
+`STOP_OVERDUE_SECONDS` and only offers the restart when something is actively overriding the stop —
+restarting ends a session the user is holding, which is the trade AG-19 leaves to them. The card
+collapses, so a stop on a later turn replaces it rather than stacking a second copy of one sentence.
+
+No webapp state needed changing: `input.js::cancel` deliberately leaves `_streaming` set on success,
+so the spinner keeps running while the stream drains, which is now true rather than merely tolerated.
+
+### What is asserted
+
+Seven pump tests and one session test, each of which fails against the previous build: the deltas
+stop becoming view, a tool card does not appear after the stop, the usage total still advances, the
+card is emitted exactly once, the prose is the frozen deltas rather than `agy`'s assembly, and the
+footer still closes the turn with `cancelled` and `aborted_streaming`. Two controls guard the shape —
+an ordinary turn still takes `agy`'s own assembly, and an unstopped turn still renders. The session
+test drives the real fake subprocess and asserts that the words written after ⏹ appear nowhere in any
+payload the browser is given. Two webapp tests cover the card and its collapse.
+
+**The mechanism's gap is still open and still deliberate.** Closing it means killing the process:
+3.7s of dead session to save a few seconds of text from a turn that holds no locks, runs no commands
+and touches no files.

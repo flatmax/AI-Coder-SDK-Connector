@@ -41,9 +41,15 @@ job only it can do:
 *between* invocations, so nothing stops token generation inside one — a
 single-invocation prose answer runs to its natural end. Closing that would
 mean killing the process, to save a few seconds of text from a turn that
-holds no locks, runs no commands and touches no files. The honest handling
-is presentational, and it is why :meth:`stream_turn` badges the turn
-stopped rather than pretending the words never arrived.
+holds no locks, runs no commands and touches no files.
+
+So the handling is presentational, in the three parts AG-19 names.
+:meth:`stream_turn` tells the translator the moment the latch is set, and
+from there **frames are still read but stop becoming view** — the process
+stays warm and usable for the next turn while the screen holds still. The
+turn is badged stopped rather than pretending the words never arrived. And
+a stop that outlasts :data:`STOP_OVERDUE_SECONDS` is reported once, with
+the force-restart offered rather than taken.
 
 Governing spec: ``specs5/plan-ag/`` — AG-14, AG-19; ``sdk-surface.md``
 § *The stream, measured in bidirectional mode*.
@@ -582,6 +588,15 @@ class AgySession:
         frames = self.stream_frames(prompt)
         try:
             async for frame in frames:
+                # **Before the frame is translated, not after the loop.**
+                # The pump uses this to stop turning frames into view
+                # (AG-19's presentational half), which only works if it
+                # knows before it renders the frame in hand. The call below
+                # — after the loop, where this used to be the only one —
+                # is still needed for a stop with no frame behind it, and
+                # is idempotent with this.
+                if self._cancelled:
+                    translator.note_cancelled()
                 for event in translator.translate(frame):
                     yield event
                 overdue = self._overdue_stop()

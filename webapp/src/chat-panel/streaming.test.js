@@ -1834,6 +1834,46 @@ describe('ChatPanel compaction toast', () => {
     ]);
   });
 
+  it('says the screen is final as soon as the stop lands', async () => {
+    // AG-19's residual gap: a prose turn asks permission for nothing, so
+    // it cannot be starved and runs to its own end. The backend stops
+    // turning its frames into view; this card is what tells the reader
+    // that the stillness is the stop and not a hang.
+    const p = mountPanel();
+    await settle(p);
+    pushEvent('system-event', {
+      requestId: 'r1',
+      data: { subtype: 'stop_acknowledged', data: {} },
+    });
+    await settle(p);
+    const last = p.messages[p.messages.length - 1];
+    expect(last.system_event).toBe(true);
+    expect(last.content).toContain('Stopped.');
+    expect(last.content).toContain('nothing further will be shown');
+    // No escalation here. Restarting the engine costs the session, and
+    // AG-19 offers that only once the wind-down drags — `stop_ignored`.
+    expect(last.system_action).toBeNull();
+  });
+
+  it('does not stack a card per frame while the stream drains', async () => {
+    // The pump announces once per turn, but the card collapses anyway so
+    // that a stop on a later turn replaces this rather than leaving the
+    // reader two identical sentences to reconcile.
+    const p = mountPanel();
+    await settle(p);
+    for (const requestId of ['r1', 'r2']) {
+      pushEvent('system-event', {
+        requestId,
+        data: { subtype: 'stop_acknowledged', data: {} },
+      });
+    }
+    await settle(p);
+    const cards = p.messages.filter(
+      (m) => m.system_subtype === 'stop_acknowledged',
+    );
+    expect(cards).toHaveLength(1);
+  });
+
   it('says a stop that did not land has not landed, and why', async () => {
     // AG-R-16 raised to high: ⏹ can be outlasted, either by a `Stop` hook
     // this app does not own reviving the loop, or by prose that asks

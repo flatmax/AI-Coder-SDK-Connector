@@ -907,6 +907,100 @@ class TestAStoppedSubagentSaysStopped:
         assert t.subagents == frozenset({self.AGENT})
 
 
+class TestTheViewStopsUpdatingWhenTheStopLands:
+    """AG-19's residual gap, handled where it can be: the screen.
+
+    ``PostInvocation`` fires *between* invocations, so a turn already
+    inside one runs to its own end — and a single-invocation prose answer
+    asks permission for nothing, so the gate cannot starve it either.
+    Killing the process would stop it and costs 3.7s of dead session, so
+    the specified handling is presentational: *stop updating the view, let
+    the stream drain into the warm process*.
+
+    The freeze has to be all three of these at once. A view that stops but
+    keeps billing silently is [AG-R-6](../specs5/plan-ag/risks.md#ag-r-6)'s
+    family; a view that stops and then pastes the finished answer in at the
+    footer reads worse than one that never stopped; and a view that stops
+    with nothing said is indistinguishable from a hang.
+    """
+
+    def test_the_deltas_stop_becoming_view(self):
+        t = AgyTranslator("r1")
+        assert t.translate(frame(TEXT_A)) != []
+        t.note_cancelled()
+        t.translate(frame(TEXT_B))
+        assert t.translate(frame(TEXT_B)) == []
+
+    def test_a_tool_card_does_not_appear_after_the_stop(self):
+        """Prose is the case this exists for; every step type is suppressed.
+
+        A card opening after the user stopped would say work had started
+        that the user has no way to watch finish.
+        """
+        t = AgyTranslator("r1")
+        t.note_cancelled()
+        t.translate(frame(TOOL_ACTIVE))
+        assert t.translate(frame(TOOL_DONE)) == []
+
+    def test_the_meter_is_not_frozen_with_the_view(self):
+        """The turn is still spending, and the footer still has to say so."""
+        t = AgyTranslator("r1")
+        t.translate(frame(dict(TEXT_A, usage={"total_tokens": 100})))
+        t.note_cancelled()
+        t.translate(frame(dict(TEXT_B, usage={"total_tokens": 250})))
+        assert t.turn_usage()["total_tokens"] == 250
+
+    def test_the_screen_is_said_to_be_final_exactly_once(self):
+        """Otherwise the freeze is a hang, and a hang repeated is a stutter.
+
+        The card has to arrive when the stop lands, because the footer's
+        badge cannot appear until the turn ends — which on the case this
+        exists for is the thing taking the time.
+        """
+        t = AgyTranslator("r1")
+        t.note_cancelled()
+        first = t.translate(frame(TEXT_A))
+        assert names(first) == ["systemEvent"]
+        assert first[0].payload["subtype"] == "stop_acknowledged"
+        assert t.translate(frame(TEXT_B)) == []
+
+    def test_the_prose_is_what_was_on_screen_not_what_agy_finished(self):
+        """The half that makes the freeze real rather than cosmetic.
+
+        ``agy`` assembles the whole answer into ``result.response`` and the
+        browser takes the settled message's content from it, so accepting
+        it would freeze the screen for the length of the turn and then
+        paste the complete reply in at the footer.
+        """
+        t = AgyTranslator("r1")
+        t.translate(frame(TEXT_A))
+        t.note_cancelled()
+        t.translate(RESULT)
+        assert t.response_text() == TEXT_A["text_delta"]
+
+    def test_an_ordinary_turn_still_prefers_agys_own_assembly(self):
+        """The negative control: without ⏹ the result's prose stands."""
+        t = AgyTranslator("r1")
+        t.translate(frame(TEXT_A))
+        t.translate(RESULT)
+        assert t.response_text() == "calc.py defines add()."
+
+    def test_the_footer_still_closes_the_turn(self):
+        """Suppression is of the view, not of the turn's end.
+
+        A stopped turn that never reached ``streamComplete`` would leave
+        the browser streaming forever, which is the failure the freeze is
+        supposed to make legible.
+        """
+        t = AgyTranslator("r1")
+        t.translate(frame(TEXT_A))
+        t.note_cancelled()
+        t.translate({"event": "result", "result": {"status": "CANCELED"}})
+        payload = t.stream_complete()[-1].payload
+        assert payload["cancelled"] is True
+        assert payload["terminal_reason"] == "aborted_streaming"
+
+
 class TestARefusedTurnIsNotBilledForTheLastOne:
     """`agy` echoes the previous turn's usage on a result it refused.
 
