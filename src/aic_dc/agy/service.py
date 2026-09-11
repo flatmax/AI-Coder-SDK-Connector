@@ -47,11 +47,13 @@ Governing spec: ``specs5/plan-ag/`` — AG-14, AG-5, AG-3.
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 import shutil
+from pathlib import Path
 from typing import Any
 
-from aic_dc.agy import install
+from aic_dc.agy import install, roots
 from aic_dc.agy import tools as agy_tools
 from aic_dc.agy.gate_server import AgyGateServer
 from aic_dc.agy.session import AgyNotInstalledError, AgySession
@@ -124,14 +126,60 @@ class AgyService(AntigravityService):
     # `AttributeError: property has no setter` on every `AgyService`.
 
     def gate_status(self) -> dict[str, Any]:
-        """Whether the gate is installed in the user's `agy` configuration.
+        """Whether the gate is installed in **this app's** `agy` root.
 
         Public because it is the settings surface's whole question, and
         because a user is entitled to ask it without starting a session.
+
+        **The file it reads moved with AG-21.** It used to be
+        ``~/.gemini/config/hooks.json`` — the user's own, shared with every
+        `agy` they run by hand. It is now the master root this app owns, so
+        the answer is about our sessions and only ours.
         """
-        report = install.status(self._config_dir)
+        report = install.status(
+            self._config_dir,
+            path=roots.hooks_file(roots.master_root(self._config_dir)),
+        )
         report["agy_present"] = shutil.which(self._executable) is not None
         return report
+
+    def _ensure_gate(self) -> tuple[Path, dict[str, Any]]:
+        """Provision the master root and put the gate inside it.
+
+        Returns the root and the install report.
+
+        **This is not asked about, and that is the point of AG-21.**
+        Installing a hook into the user's own configuration was a decision
+        with consequences outside this app — every `agy` they ran by hand
+        went through our socket — so it had a button and no default. A hook
+        inside a directory this app created, for a process this app spawns,
+        is not a decision at all. Nothing outside ``<config_dir>/agy-roots``
+        is written.
+
+        **And the old one comes out here**, because "the user's own `agy`
+        is untouched" is false on an upgraded machine until it does, and
+        waiting for somebody to find the Settings button would mean the
+        claim is true of new installs and quietly false of everyone else.
+
+        Raises ``RuntimeError`` if the command will not run: `install`
+        probes before it writes, and a gate that cannot be installed must
+        stop the session rather than be skipped, because `agy` is spawned
+        with ``--dangerously-skip-permissions`` and the hook is the only
+        thing between the model and the tree.
+        """
+        config_root = roots.prepare(
+            roots.master_root(self._config_dir), self._config_dir
+        )
+        if install.retire_global():
+            logger.info(
+                "Removed the pre-AG-21 gate from %s: this root replaces it",
+                install.GLOBAL_HOOKS,
+            )
+        report = install.install(
+            self._config_dir, path=roots.hooks_file(config_root)
+        )
+        report["agy_present"] = shutil.which(self._executable) is not None
+        return config_root, report
 
     async def _list_models(self) -> list[dict[str, Any]]:
         """The models ``agy`` will accept, from ``agy models``.
@@ -280,16 +328,20 @@ class AgyService(AntigravityService):
                     "use the SDK transport with a Gemini API key."
                 ),
             }
-        gate = self.gate_status()
+        try:
+            _, gate = self._ensure_gate()
+        except RuntimeError as exc:
+            gate = self.gate_status()
+            gate["detail"] = str(exc)
         if gate["state"] != "current":
             return {
                 "error": "gate_not_installed",
                 "reason": gate["state"],
                 "message": (
-                    "The AIC-DC permission gate is not installed in "
+                    "The AIC-DC permission gate could not be installed in "
                     f"{gate['path']}, so a turn could not be reviewed before "
-                    "it wrote to your files. Install it from Settings — it "
-                    "stays installed until you remove it there."
+                    "it wrote to your files, and the session was not started."
+                    + (f" {gate['detail']}" if gate.get("detail") else "")
                 ),
                 "gate": gate,
             }
@@ -323,12 +375,26 @@ class AgyService(AntigravityService):
             gate=self._gate,
             config_dir=self._config_dir,
         )
+        # **The master's own config root** (AG-21), stable so that resume
+        # keeps working across restarts, and private so that the hook this
+        # app installs is not in the user's file. The hook goes in with it:
+        # the gate is the only thing between the model and the tree on this
+        # transport, because `agy` runs with `--dangerously-skip-permissions`.
+        config_root, report = self._ensure_gate()
+        if report.get("state") != "current":
+            await self._agy_gate.stop()
+            raise RuntimeError(
+                "The agy permission gate could not be installed into this "
+                "session's config root, so the session would run ungated: "
+                + str(report.get("detail") or report.get("state"))
+            )
         session = AgySession(
             self._repo_root,
             gate=self._agy_gate,
             model=self._model,
             executable=self._executable,
             resume=target,
+            config_root=config_root,
         )
         try:
             await session.start()
@@ -410,6 +476,10 @@ class AgyService(AntigravityService):
             request_id,
             repo_root=self._repo_root,
             conversation_id=session.conversation_id,
+            # AG-R-18: the brain and scratch directories are properties of
+            # the root this session's `agy` was spawned against, not of
+            # this server's own `HOME`.
+            config_root=roots.master_root(self._config_dir),
         )
         self._turns[request_id] = translator
         import asyncio
@@ -512,7 +582,10 @@ class AgyService(AntigravityService):
 
         try:
             loop = asyncio.get_running_loop()
-            return await loop.run_in_executor(None, subagents.rows, target)
+            brain = roots.brain_dir(roots.master_root(self._config_dir))
+            return await loop.run_in_executor(
+                None, functools.partial(subagents.rows, target, brain_dir=brain)
+            )
         except Exception as exc:  # noqa: BLE001 - answered, not raised
             logger.exception("list_subagent_transcripts failed for %s", target)
             return {"error": f"Could not read the subagent transcripts: {exc}"}
@@ -552,7 +625,10 @@ class AgyService(AntigravityService):
 
         try:
             loop = asyncio.get_running_loop()
-            owned = await loop.run_in_executor(None, subagents.descendants, target)
+            brain = roots.brain_dir(roots.master_root(self._config_dir))
+            owned = await loop.run_in_executor(
+                None, functools.partial(subagents.descendants, target, brain_dir=brain)
+            )
             if agent_id not in owned:
                 logger.warning(
                     "Refused subagent %s: not announced by session %s",
@@ -565,7 +641,9 @@ class AgyService(AntigravityService):
                         f"so there is no transcript here to read."
                     )
                 }
-            messages = await loop.run_in_executor(None, subagents.load, agent_id)
+            messages = await loop.run_in_executor(
+                None, functools.partial(subagents.load, agent_id, brain_dir=brain)
+            )
         except Exception as exc:  # noqa: BLE001 - answered, not raised
             logger.exception("get_subagent_transcript failed for %s", agent_id)
             return {"error": f"Could not read subagent {agent_id}: {exc}"}

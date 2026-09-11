@@ -53,6 +53,7 @@ CONV = "0d9d1f3a-6c1e-4a51-9b0e-3f5f0f1b2c34"
 def _fake_agy(
     *,
     image_path: str | None = None,
+    image_in_brain: str | None = None,
     answer: str = "It depends.",
     log: str = "",
 ) -> str:
@@ -70,9 +71,39 @@ def _fake_agy(
     ``Prompt`` and no path at all — the harness picks the location. So the
     fake now writes where ``agy`` writes and names the arguments ``agy``
     names, and the collection is what is under test.
+
+    **``image_in_brain`` resolves against the fake's own ``HOME``**, which
+    is how AG-21 made this test honest. The brain directory used to be a
+    module constant the fixture monkeypatched, and a fake pointed at an
+    absolute path proved only that the collector could read the path it was
+    handed. It is now derived from the config root the consultant spawned
+    this process against — so if that plumbing breaks, this writes
+    somewhere the collector does not look, and the test fails for the
+    reason a user would.
     """
     tool = ""
-    if image_path is not None:
+    if image_in_brain is not None:
+        tool = textwrap.dedent(
+            f'''
+            path = os.path.join(
+                os.environ["HOME"], ".gemini", "antigravity-cli", "brain",
+                conv, {image_in_brain!r},
+            )
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            open(path, "wb").write(b"PNG-ish bytes")
+            emit({{"event": "step_update", "step_update": {{
+                "step_index": 2, "state": "DONE", "step_type": "tool",
+                "conversation_id": conv,
+                "tool_name": "generate_image",
+                "tool_info": {{"name": "generate_image",
+                              "parameters": {{"ImageName": "hero",
+                                             "Prompt": "a hero image"}},
+                              "output": "done"}}}}}})
+            '''
+        )
+    elif image_path is not None:
+        # The diverted write: somewhere that is not this conversation's
+        # directory, which is the one AG-R-3 shape still reachable here.
         tool = textwrap.dedent(
             f'''
             path = {image_path!r}
@@ -119,46 +150,60 @@ def _fake_agy(
     )
 
 
-def brain_image(tmp_path, name: str = "hero_1788851691210.jpg"):
-    """Where ``agy`` would put an image, in the fake brain directory.
+BRAIN_IMAGE = "hero_1788851691210.jpg"
+"""What ``agy`` names an image it generated.
 
-    ``brain/<conversation_id>/<ImageName>_<epoch_ms>.jpg`` — measured on
-    2026-09-08, and the reason the consultant collects rather than asks.
-    """
-    return tmp_path / "brain" / CONV / name
+``brain/<conversation_id>/<ImageName>_<epoch_ms>.jpg`` — measured on
+2026-09-08, and the reason the consultant collects rather than asks. The
+directory it lands in is no longer a constant a test can move: AG-21 made
+it a property of the config root the consultation was spawned against, so
+the fake resolves it from its own ``HOME``.
+"""
 
 
 @pytest.fixture
 def gated(tmp_path, monkeypatch):
     """An :class:`AgyConsultant` wired to a fake binary and a live gate.
 
-    The gate is reported ``current`` rather than actually installed: the
-    hook's own installation is ``test_agy_install.py``'s subject, and what
-    matters here is that this refuses to run when it is *not*.
+    The hook command is reported runnable rather than actually probed —
+    three interpreter startups per consultation would buy nothing here, and
+    whether the command runs is ``test_agy_install.py``'s subject. What is
+    *not* faked is the install: ``_run`` writes a real ``hooks.json`` into
+    the real ephemeral root, because "an unhooked root is an ungated agent"
+    is the invariant this file exists to defend.
+
+    Nothing here monkeypatches a brain directory any more. The consultation
+    gets its own config root under ``config_dir``, the fake ``agy`` reads
+    ``HOME`` like the real one does, and the collector derives the path
+    from the same root — so the plumbing is under test rather than stubbed
+    out of the way.
     """
     repo = tmp_path / "repo"
     repo.mkdir()
     config_dir = tmp_path / "cfg"
-    # The image is collected out of agy's own per-conversation directory,
-    # so a test that did not move this would read the developer's real one.
-    monkeypatch.setattr("aic_dc.agy.consultant.BRAIN_DIR", tmp_path / "brain")
 
     def build(
         *,
         image_path: str | None = None,
+        image_in_brain: str | None = None,
         answer: str = "It depends.",
         log: str = "",
     ):
         fake = tmp_path / "fake_agy.py"
         fake.write_text(
-            _fake_agy(image_path=image_path, answer=answer, log=log), "utf-8"
+            _fake_agy(
+                image_path=image_path,
+                image_in_brain=image_in_brain,
+                answer=answer,
+                log=log,
+            ),
+            "utf-8",
         )
         launcher = tmp_path / "agy"
         launcher.write_text(f"#!/bin/sh\nexec {sys.executable} {fake}\n", "utf-8")
         launcher.chmod(0o755)
         monkeypatch.setattr(
-            "aic_dc.agy.consultant.install.status",
-            lambda *_a, **_k: {"state": "current", "path": "/fake/hooks.json"},
+            "aic_dc.agy.consultant.install.hook_runs", lambda *_a, **_k: ""
         )
         monkeypatch.setattr(
             "aic_dc.agy.consultant.shutil.which", lambda _n: str(launcher)
@@ -191,19 +236,32 @@ class Recorder:
 class TestItWillNotRunUngated:
     """AG-5, for a transport whose tool set is not ours to restrict."""
 
-    def test_a_missing_gate_makes_it_unavailable(self, tmp_path, monkeypatch):
+    def test_a_hook_that_cannot_run_makes_it_unavailable(
+        self, tmp_path, monkeypatch
+    ):
+        """AG-21 changed the question from *installed* to *runnable*.
+
+        There is no standing hooks file to be absent from: a consultation
+        writes its own into a root that does not exist until it starts. So
+        the condition that used to read ``status() == "current"`` reads a
+        probe of the command instead, and this is the probe failing.
+        """
         monkeypatch.setattr(
-            "aic_dc.agy.consultant.install.status",
-            lambda *_a, **_k: {"state": "absent", "path": "/fake/hooks.json"},
+            "aic_dc.agy.consultant.install.hook_runs",
+            lambda *_a, **_k: "exit 127: no such file",
         )
         monkeypatch.setattr("aic_dc.agy.consultant.shutil.which", lambda _n: "/bin/agy")
         assert AgyConsultant(tmp_path).available is False
 
-    def test_a_stale_gate_is_not_good_enough(self, tmp_path, monkeypatch):
-        """`stale` means another checkout's hook: our calls are not gated."""
+    def test_one_broken_event_is_enough(self, tmp_path, monkeypatch):
+        """Three commands differ by an argument, and an argument is what the
+        frozen build got wrong. A consultant that ran because *the gate*
+        probed clean would be gated and unstoppable."""
         monkeypatch.setattr(
-            "aic_dc.agy.consultant.install.status",
-            lambda *_a, **_k: {"state": "stale", "path": "/fake/hooks.json"},
+            "aic_dc.agy.consultant.install.hook_runs",
+            lambda _c, *, event="PreToolUse", **_k: (
+                "exit 2: unrecognized arguments" if event == "Stop" else ""
+            ),
         )
         monkeypatch.setattr("aic_dc.agy.consultant.shutil.which", lambda _n: "/bin/agy")
         assert AgyConsultant(tmp_path).available is False
@@ -212,14 +270,14 @@ class TestItWillNotRunUngated:
         self, tmp_path, monkeypatch
     ):
         monkeypatch.setattr(
-            "aic_dc.agy.consultant.install.status",
-            lambda *_a, **_k: {"state": "absent", "path": "/fake/hooks.json"},
+            "aic_dc.agy.consultant.install.hook_runs",
+            lambda *_a, **_k: "exit 127: no such file",
         )
         monkeypatch.setattr("aic_dc.agy.consultant.shutil.which", lambda _n: "/bin/agy")
         consultant = AgyConsultant(tmp_path)
         with pytest.raises(ConsultationError) as caught:
             asyncio.run(consultant.second_opinion("does this hold?"))
-        assert "permission gate is not installed" in str(caught.value)
+        assert "permission gate cannot run" in str(caught.value)
 
     def test_a_missing_binary_says_so_rather_than_blaming_the_gate(
         self, tmp_path, monkeypatch
@@ -228,6 +286,25 @@ class TestItWillNotRunUngated:
         consultant = AgyConsultant(tmp_path)
         assert consultant.available is False
         assert "not on PATH" in consultant._unavailable_reason()
+
+    def test_constructing_one_retires_the_pre_ag21_entry(
+        self, tmp_path, monkeypatch
+    ):
+        """The consultant does it too, and not as a duplicate.
+
+        A user may never connect the `agy` engine and only ever ask for
+        second opinions, in which case the service's copy of this never
+        runs. Neither path can assume the other one did.
+        """
+        from aic_dc.agy import install as install_mod
+
+        theirs = tmp_path / "their-hooks.json"
+        monkeypatch.setattr(install_mod, "GLOBAL_HOOKS", theirs)
+        install_mod.install(tmp_path / "old-cfg", path=theirs)
+
+        AgyConsultant(tmp_path)
+
+        assert not theirs.exists()
 
     def test_the_pinned_model_is_googles(self, tmp_path):
         """AG-R-15: a second opinion has to be a second *vendor*.
@@ -439,7 +516,7 @@ class TestAnImage:
 
     def test_it_collects_the_image_into_the_repository(self, gated, tmp_path):
         build, repo, _cfg = gated
-        consultant = build(image_path=str(brain_image(tmp_path)))
+        consultant = build(image_in_brain=BRAIN_IMAGE)
         result = asyncio.run(
             consultant.generate_image("a hero image", output_name="docs/hero.png")
         )
@@ -453,7 +530,7 @@ class TestAnImage:
     ):
         """A ``.png`` holding JPEG bytes is a second lie told to tidy the first."""
         build, repo, _cfg = gated
-        consultant = build(image_path=str(brain_image(tmp_path)))
+        consultant = build(image_in_brain=BRAIN_IMAGE)
         result = asyncio.run(
             consultant.generate_image("a hero image", output_name="icon.png")
         )
@@ -490,7 +567,7 @@ class TestAnImage:
         """
         build, _repo, _cfg = gated
         log = tmp_path / "prompt.jsonl"
-        consultant = build(image_path=str(brain_image(tmp_path)), log=str(log))
+        consultant = build(image_in_brain=BRAIN_IMAGE, log=str(log))
         asyncio.run(consultant.generate_image("a hero image", output_name="icon.png"))
         sent = log.read_text("utf-8")
         assert "do not try to move, copy or save it" in sent.lower()

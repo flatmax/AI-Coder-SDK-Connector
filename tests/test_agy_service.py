@@ -25,6 +25,7 @@ import inspect
 import json
 import sys
 import types
+from pathlib import Path
 
 import pytest
 
@@ -122,42 +123,94 @@ class TestItMounts:
 class TestItWillNotRunUngated:
     """The refusal is the feature. Running anyway fails silently."""
 
-    def test_a_turn_is_refused_when_the_gate_is_not_installed(
+    def test_a_turn_is_refused_when_the_gate_cannot_be_installed(
         self, tmp_path, monkeypatch
     ):
-        # Pointed at a temp file rather than the real one. Without this the
-        # test reads the developer's own ~/.gemini/config/hooks.json and
-        # passes or fails on whether *they* have the gate installed — which
-        # is how it went green for a day and then red the moment one was.
-        monkeypatch.setattr(install, "GLOBAL_HOOKS", tmp_path / "hooks.json")
+        """AG-21 changed *who* has to have installed it, not whether.
+
+        The gate used to be a standing entry in the user's own
+        ``~/.gemini/config/hooks.json``, so "not installed" was a state a
+        session could find and had to refuse. It is now written into a
+        config root this app owns, on the way to starting the session — so
+        the only way to arrive ungated is for the install to fail, and the
+        refusal has to survive that.
+
+        ``install`` refuses to write a command it cannot run, which is the
+        failure being staged here, and the one that actually shipped: a
+        PyInstaller build whose hook command exited 2 on every call.
+        """
+        monkeypatch.setattr(
+            install, "hook_runs", lambda *_a, **_k: "exit 127: no such file"
+        )
         svc = gated_service(tmp_path)
         result = asyncio.run(svc.connect_engine())
         assert result["error"] == "gate_not_installed"
-        assert result["reason"] == "absent"
-        # The message says where to fix it, and that fixing it sticks —
-        # the gate is not removed on shutdown, so a session started later
-        # finds it ready.
-        assert "Settings" in result["message"]
-        assert "until you remove it" in result["message"]
+        assert result["reason"] == "unrunnable"
+        # And it says *why*. "The gate is not installed" sends a reader to
+        # a Settings button; "the command does not run here" sends them to
+        # the thing that is wrong.
+        assert "exit 127" in result["message"]
 
-    def test_a_stale_gate_is_refused_too(self, tmp_path, monkeypatch):
-        """A gate pointing at another checkout gates *that* one, not this.
+    def test_nothing_is_written_to_the_users_own_hooks_file(
+        self, tmp_path, monkeypatch
+    ):
+        """The permission AG-21 gave back.
 
-        Written rather than installed: since 2026-09-05 ``install`` probes
-        the command and refuses one that does not run, and
-        ``/other/python`` does not. This describes a file an installation
-        that has since moved left behind, which is a state that arrives on
-        disk rather than through the installer.
+        Pointed at a temp path rather than the real one, because a test
+        that got this wrong would install a hook into the developer's
+        ``~/.gemini`` and pass.
         """
-        hooks = tmp_path / "hooks.json"
-        monkeypatch.setattr(install, "GLOBAL_HOOKS", hooks)
+        theirs = tmp_path / "their-hooks.json"
+        monkeypatch.setattr(install, "GLOBAL_HOOKS", theirs)
+        svc = gated_service(tmp_path)
+        asyncio.run(svc.connect_engine())
+        assert not theirs.exists()
+        installed = (
+            tmp_path / "cfg" / "agy-roots" / "master" / ".gemini" / "config"
+            / "hooks.json"
+        )
+        assert installed.is_file()
+
+    def test_connecting_retires_the_pre_ag21_entry(self, tmp_path, monkeypatch):
+        """Not writing there is half of it; the other half is upgrading.
+
+        A machine that ran an older build already has our hook in the
+        user's own file, where it fires for `agy` sessions this app knows
+        nothing about. Leaving it until somebody finds the Settings button
+        would make AG-21's claim true of new installs and quietly false of
+        every existing one.
+        """
+        theirs = tmp_path / "their-hooks.json"
+        monkeypatch.setattr(install, "GLOBAL_HOOKS", theirs)
+        install.install(tmp_path / "old-cfg", path=theirs)
+        assert theirs.is_file()
+
+        asyncio.run(gated_service(tmp_path).connect_engine())
+
+        assert not theirs.exists()
+
+    def test_a_stale_entry_in_our_own_root_is_reinstalled_rather_than_refused(
+        self, tmp_path
+    ):
+        """The state that used to be a dead end is now just a write.
+
+        ``stale`` meant "another checkout owns the user's file", and the
+        only honest answer was to refuse and ask them to reinstall. In a
+        root this app owns there is nobody to ask: whatever is in the file
+        is ours to correct, so `connect` corrects it.
+        """
+        hooks = (
+            tmp_path / "cfg" / "agy-roots" / "master" / ".gemini" / "config"
+            / "hooks.json"
+        )
+        hooks.parent.mkdir(parents=True)
         _write_gate_entry(
             hooks, install.hook_command(tmp_path / "cfg", "/other/python")
         )
         svc = gated_service(tmp_path)
         result = asyncio.run(svc.connect_engine())
-        assert result["error"] == "gate_not_installed"
-        assert result["reason"] == "stale"
+        assert result.get("error") != "gate_not_installed"
+        assert svc.gate_status()["state"] == "current"
 
     def test_a_missing_binary_is_a_named_refusal(self, tmp_path):
         svc = service(tmp_path, executable="agy-does-not-exist")
@@ -381,9 +434,11 @@ class TestATurn:
         )
         launcher.chmod(0o755)
 
-        hooks = tmp_path / "hooks.json"
-        monkeypatch.setattr(install, "GLOBAL_HOOKS", hooks)
-        install.install(tmp_path / "cfg", path=hooks)
+        # Nothing global: AG-21 put the entry in the root the service
+        # spawns against, and the service writes it itself on connect.
+        # Pinned anyway so a regression that reaches for the user's own
+        # file lands in a temp path rather than in their home directory.
+        monkeypatch.setattr(install, "GLOBAL_HOOKS", tmp_path / "their-hooks.json")
 
         events: list = []
 
@@ -460,12 +515,29 @@ class TestATurn:
         assert registry.lookup(conv, config_dir=tmp_path / "cfg") is None
 
     def test_the_installed_hook_names_this_interpreter(self, wired, tmp_path):
-        """A gate pointing elsewhere gates a different build."""
+        """A gate pointing elsewhere gates a different build.
+
+        Read out of the master root rather than out of ``~/.gemini``, and
+        read *after* a connect rather than before one, because AG-21 made
+        the install part of starting the session instead of a precondition
+        of it.
+        """
         svc, _events = wired
+
+        async def go():
+            await svc.connect_engine()
+            await svc.shutdown()
+
+        asyncio.run(go())
         assert svc.gate_status()["state"] == "current"
-        data = json.loads((tmp_path / "hooks.json").read_text(encoding="utf-8"))
+        hooks = (
+            tmp_path / "cfg" / "agy-roots" / "master" / ".gemini" / "config"
+            / "hooks.json"
+        )
+        data = json.loads(hooks.read_text(encoding="utf-8"))
         command = data[install.HOOK_NAME]["PreToolUse"][0]["hooks"][0]["command"]
         assert sys.executable in command
+        assert not (tmp_path / "their-hooks.json").exists()
 
 
 class TestTheSessionContractTheServiceReadsThrough:
@@ -701,21 +773,30 @@ class _Reader:
         self.rows_for: list[str] = []
         self.descendants_for: list[str] = []
         self.loaded: list[str] = []
+        #: Every ``brain_dir`` the service handed over. Recorded because
+        #: AG-R-18 is precisely the argument being wrong: the functions
+        #: used to default it to a constant derived from the server's own
+        #: ``HOME`` at import time, which is the one tree no session's
+        #: ``agy`` ever writes to once AG-21 gives it a private root.
+        self.brains: list = []
 
-    def rows(self, conversation_id):
+    def rows(self, conversation_id, *, brain_dir):
         self.rows_for.append(conversation_id)
+        self.brains.append(brain_dir)
         if self._error is not None:
             raise self._error
         return self._rows
 
-    def descendants(self, conversation_id):
+    def descendants(self, conversation_id, *, brain_dir):
         self.descendants_for.append(conversation_id)
+        self.brains.append(brain_dir)
         if self._error is not None:
             raise self._error
         return self._owned
 
-    def load(self, conversation_id):
+    def load(self, conversation_id, *, brain_dir):
         self.loaded.append(conversation_id)
+        self.brains.append(brain_dir)
         return self._messages
 
 
@@ -749,6 +830,29 @@ class TestSubagentTranscripts:
     """
 
     # -- the listing -----------------------------------------------------
+
+    def test_the_brain_it_reads_is_the_root_the_session_runs_against(
+        self, tmp_path, monkeypatch
+    ):
+        """AG-R-18, at the surface where it would have been invisible.
+
+        These readers used to default ``brain_dir`` to a module constant
+        built from ``Path.home()`` at import time. AG-21 gives every
+        session a private root, so that constant names a tree the session's
+        ``agy`` never writes to — and the failure is not an exception, it
+        is a subagent list that is correctly empty for the wrong reason.
+        The argument is required now, and this is what says which value it
+        must carry.
+        """
+        reader = _Reader(rows=[{"agent_id": "child"}])
+        svc = _reading_service(tmp_path, monkeypatch, reader)
+        asyncio.run(svc.list_subagent_transcripts("sess"))
+        expected = (
+            tmp_path / "cfg" / "agy-roots" / "master" / ".gemini"
+            / "antigravity-cli" / "brain"
+        )
+        assert reader.brains == [expected]
+        assert Path.home() not in expected.parents
 
     def test_it_lists_the_session_it_was_given(self, tmp_path, monkeypatch):
         reader = _Reader(rows=[{"agent_id": "child"}])

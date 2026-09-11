@@ -1714,7 +1714,7 @@ failing.
 
 <a id="ag-21"></a>
 
-## AG-21 — The private config root is an environment variable, not a namespace **(measured 2026-09-11, unbuilt)**
+## AG-21 — The private config root is an environment variable, not a namespace **(measured and built 2026-09-11)**
 
 **This supersedes [AG-20](#ag-20) as the primary mechanism, one day after AG-20 was written, and the
 reason is worth more than the result: AG-20 solved a problem that a single environment variable already
@@ -1787,17 +1787,103 @@ A consultant hook that denies everything also needs **no socket and no daemon** 
 immutable script emitting a constant `deny`, which removes the socket lifecycle, the readiness race
 and the `sys.executable` resolution that caused the original incident.
 
-### Still unmeasured, and honestly so
+### Measured at v1.2.1, 2026-09-11 — the round-3 probes
 
-- **Headless auth.** The claim "it works in the default Docker container" is over-stated and was
-  corrected in review: an empty `HOME` was proven to authenticate **on a desktop with a session bus**.
-  A container typically has no D-Bus and no Secret Service, and how `agy` authenticates there is
-  unknown. This is the gating unknown for the containerised deployment, not `bubblewrap`.
-- **`hooks.json` at repo level.** Only `mcp_config.json` was probed for CWD precedence.
-- **Universal `PreToolUse` coverage.** Verified for `list_dir`. Not verified for `search_web`,
-  `read_url_content` or subagent invocation, and a tool that skips the hook is the failure that matters.
-- **Environment inheritance.** `agy` should be spawned with an explicit environment allowlist rather
-  than the parent's, so it inherits no `ANTHROPIC_API_KEY`, `AWS_*` or similar. Not yet done.
+**The version moved under the decision.** Everything above was measured against v1.2.0; the installed
+binary is **v1.2.1**, and every probe below was re-run against it. A decision whose evidence names a
+version the machine no longer runs is a decision nobody can re-check.
+
+| Probe | Result |
+|---|---|
+| Universal `PreToolUse` coverage | **Yes** at v1.2.1. `list_dir`, `run_command`, `view_file`, `read_url_content`, `search_web` and `invoke_subagent` all fire the hook and all honour `deny`. This was the gating unknown above — a tool that skips the hook is the failure that matters — and it is closed |
+| Do subagents inherit the gate? | **Yes.** With `invoke_subagent` allowed and everything else denied, the hook logged `invoke_subagent, view_file, grep_search, list_dir, manage_task, send_message, view_file, manage_subagents`; every denial held and a planted canary was never read |
+| `hooks.json` at repo level | **Not loaded**, across four paths. A hostile workspace planted `.gemini/config/hooks.json`, `.gemini/hooks.json`, `.agy/hooks.json` and `.antigravity/hooks.json`; only the root hook ran |
+| Workspace skills | **Not loaded.** A planted `.gemini/skills/probe/SKILL.md` carrying a nonce never reached the model's answer |
+| Does `HOME` survive `systemd-run --user --scope`? | **Yes**, and so do `DBUS_SESSION_BUS_ADDRESS` and `XDG_RUNTIME_DIR` — which is what keeps keyring auth working inside [AG-18](#ag-18)'s cgroup scope |
+| Cost of an empty root | **~1.7 s and 17 MB** on first use (cold 9.12 s against a 7.42 s warm baseline), because the `bin/` helpers are re-extracted per root. It also creates `~/.cache/ms-playwright-go/1.57.0` |
+| Cost of a **warm-seeded** root | **228 KB**, from symlinking `bin/` and `builtin/` alone — 17 MB → 228 KB, and ~1 s off the cold time. Nothing wrote back through the `bin` symlink |
+| Is `XDG_CACHE_HOME` honoured? | **No.** With it set elsewhere, `agy` created `$HOME/.cache/ms-playwright-go/1.57.0` anyway and left the XDG directory empty. It is an empty marker directory costing nothing, so the variable is neither load-bearing nor harmful — it is simply not read |
+| Teardown | **No race.** After the CLI exits no process holds the private `HOME` (checked through `/proc/*/environ`), and `shutil.rmtree` on the root succeeds immediately. The `finally` is safe as written |
+| A hook runner that is simply missing | **Fails closed cleanly** — `exit 127`, tool denied, CLI exits 0, no crash and no hang |
+
+**The warm-seed number is why the ephemeral root is affordable, and it refuted a position held here.**
+A stable *shared consultant* root was argued for on cost grounds — 17 MB and 1.7 s per consultation
+sounded like too much to pay — and the cost had never been priced against a seeded root. At 228 KB it
+is not a trade-off at all, so the per-invocation root in § *Two roots* stands on measurement rather
+than on preference.
+
+**It also refuted the first version of this entry, written an hour earlier.** The warm-seed probe
+symlinked `bin/` and `builtin/` **and** shared `XDG_CACHE_HOME`, and the saving was attributed to both.
+Isolating the two shows the cache variable does nothing at all: `agy` does not read it. A compound
+configuration measured once and written up as though each part had been tested is the same mistake this
+directory keeps recording one layer out — the difference here is only that it was caught before the code
+was written rather than after. **The seed is symlinks, and nothing else.**
+
+**The symlinks point at a copy this app owns, not at the user's tree.** Symlinking straight into
+`~/.gemini/antigravity-cli/bin` was measured and did not write back — no file under it was touched by a
+seeded run. It is still refused, because "did not write this time" is not "cannot write": a vendor
+upgrade re-extracting its helpers would do so *through* the symlink, into the tree the private root
+exists to stay out of. The helpers are copied once into a seed cache under this app's own config
+directory, and the ephemeral roots link at that.
+
+**The missing-runner number is why the fallback is deleted rather than replaced.** The alternative on
+the table was a structured deny — `|| printf '{"decision":"deny","reason":"…"}' $?` — which is a second
+code path whose only output is a verdict the vendor already reaches on its own, and which has to survive
+JSON-inside-shell-inside-JSON quoting to do it. Worse, it appends to whatever the runner already wrote:
+a runner that dies *after* emitting a partial object produces concatenated output that is not valid JSON
+at all. Internal faults are caught inside the runner and answered with a clean `deny`; external ones —
+missing interpreter, killed process, bad path — are the vendor's to fail closed on, and it does.
+
+**The environment allowlist, now that the load-bearing members are known.** `agy` is spawned with an
+explicit environment rather than the parent's, carrying `HOME` (the target root), `PATH`,
+`DBUS_SESSION_BUS_ADDRESS` and `XDG_RUNTIME_DIR` (auth), the locale, and the proxy and CA variables a
+corporate network needs. Dropping `DBUS_SESSION_BUS_ADDRESS` breaks authentication outright, which makes
+the allowlist a correctness constraint and not only a hygiene one against inherited `ANTHROPIC_API_KEY`
+or `AWS_*`. `XDG_CACHE_HOME` is **not** in it, because it is not read.
+
+### Built, 2026-09-11
+
+`src/aic_dc/agy/roots.py` is the module, and its rule is that **every path is a function of a root**:
+`vendor_dir(root)`, `brain_dir(root)`, `hooks_file(root)`. Exactly one function names the real home —
+`user_root()` — and it is the seed *source*, never a destination; a test reads the module's own source
+and asserts `Path.home()` appears once, because the fault being defended against is a second one
+creeping back.
+
+Two roots as specified: `<config_dir>/agy-roots/master` for the engine, and
+`<config_dir>/agy-roots/consultations/c-XXXXXX` per consultation, removed in a `finally` and swept at
+startup for the ones a killed process left. Both are warm-seeded by symlink at 228 KB. `agy` is spawned
+through `roots.environment(root)` — the allowlist above, plus `HOME`.
+
+Three things the specification did not contain, all of them consequences of the root rather than
+additions to it:
+
+- **`connect()` installs the gate instead of demanding it.** Installing into the user's own
+  configuration was a permission with effects outside this app, so it had a button and no default.
+  Installing into a directory this app made, for a process this app spawns, is not a decision. The
+  Settings surface stays as a status read, a repair affordance, and the removal path for the old entry.
+- **`install.installable()`**, because the consultant's availability check could no longer read a
+  standing file — there is none until a consultation starts. The question moved from *is it installed*
+  to *will it install*, same probes, one tense earlier.
+- **`install.retire_global()`**, because this decision's stated benefit — the user's own interactive
+  `agy` is untouched — is true of a new install and false of every upgraded machine until the
+  pre-AG-21 entry comes out. It runs on connect and on the first consultation, unasked, since the entry
+  is this app's and this app no longer reads it.
+
+See [§ The root that had to be the only thing that knew where anything was](delivery.md#the-root-that-had-to-be-the-only-thing-that-knew-where-anything-was-2026-09-11),
+which also records the two ways the *test suite* reached into the developer's home while passing.
+
+### What is still not measured
+
+- **Headless auth**, unchanged and still the gating unknown for a containerised deployment: an empty
+  `HOME` authenticates *on a desktop with a session bus*, and a container typically has neither D-Bus
+  nor a Secret Service.
+- **The vendor's own tool table.** The subagent probe surfaced four names — `grep_search`,
+  `manage_task`, `send_message`, `manage_subagents` — that [AG-5](#ag-5)'s table does not list. The gate
+  is unaffected, because coverage is universal and the hook is handed the name whether or not this plan
+  knew it; what is unmeasured is how many more there are.
+- **What moving the master root does to 189 existing conversations.** Raised as
+  [AG-R-21](risks.md#ag-r-21) rather than answered here, because it is a migration question and not a
+  containment one.
 
 ---
 

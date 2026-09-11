@@ -66,7 +66,7 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
-from aic_dc.agy import scope
+from aic_dc.agy import roots, scope
 from aic_dc.agy.gate_server import AgyGateServer
 from aic_dc.agy.steps import AgyTranslator, subagent_entries, unwrap
 from aic_dc.claude_code.messages import Event
@@ -136,6 +136,7 @@ class AgySession:
         model: str | None = None,
         executable: str = "agy",
         resume: str | None = None,
+        config_root: Path | str | None = None,
         clock: Any = None,
     ) -> None:
         self._repo_root = Path(repo_root)
@@ -143,6 +144,18 @@ class AgySession:
         self._model = model
         self._executable = executable
         self._resume = resume or None
+        #: The private ``HOME`` this process runs against (AG-21), or
+        #: ``None`` to inherit the server's whole environment — which is
+        #: what every session did before 2026-09-11, and what a test that
+        #: only reads :meth:`_argv` still does.
+        #:
+        #: ``None`` is not a neutral default in production and is not
+        #: treated as one: :meth:`start` says so in the log, because a
+        #: session running against the user's own ``~/.gemini`` is the
+        #: configuration the global fail-open hook existed for, and it
+        #: should be visible when it happens rather than inferred later
+        #: from where the files ended up.
+        self._config_root = Path(config_root) if config_root else None
         self._proc: Any = None
         self._conversation_id: str | None = None
         self._turn_active = False
@@ -272,10 +285,27 @@ class AgySession:
                 "cannot start. Install the Antigravity CLI or choose another "
                 "engine."
             )
+        # **The environment is built, not inherited** (AG-21). `agy` reads
+        # its whole configuration tree from `HOME`, so this is what puts
+        # the conversation store, the brain directory and — critically —
+        # the hooks file inside a root this app owns. The allowlist is the
+        # other half: a spawn carrying the parent's environment hands
+        # another vendor's agent every credential the developer has
+        # exported, and moving the config root would have done nothing
+        # about that.
+        if self._config_root is not None:
+            environment = roots.environment(self._config_root)
+        else:
+            environment = None
+            logger.warning(
+                "Starting agy with no private config root, so it will read "
+                "and write the user's own ~/.gemini (AG-21)"
+            )
         try:
             self._proc = await asyncio.create_subprocess_exec(
                 *self._argv(),
                 cwd=str(self._repo_root),
+                env=environment,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,

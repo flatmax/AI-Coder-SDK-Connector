@@ -1479,7 +1479,7 @@ how the other side writes things down, which is the same weakness `TestVocabular
 
 <a id="ag-r-18"></a>
 
-## AG-R-18 — `BRAIN_DIR` is pinned to this server's own `HOME`, which [AG-21](decisions.md#ag-21) moves the tree out from under
+## AG-R-18 — `BRAIN_DIR` is pinned to this server's own `HOME`, which [AG-21](decisions.md#ag-21) moves the tree out from under **(discharged 2026-09-11)**
 
 **Severity: moderate. Likelihood: certain on the day AG-21 is built, and silent when it happens.**
 **Raised 2026-09-11**, while checking a reviewer's advice against the tree during
@@ -1521,6 +1521,14 @@ code under test resolves it, and assert it lands under that root and not under `
 assertion must be on the **resolved path for a given root**, never on the constant's spelling — comparing
 strings is precisely how [AG-R-12](#ag-r-12) § *The second way it failed open* reported a gate `current`
 while every call was being auto-approved.
+
+**Discharged 2026-09-11, with AG-21 and before it.** The constant is gone; `steps.py` takes a
+`config_root` per translator and `subagents.py` takes `brain_dir` on all three of its readers, both
+resolved through `roots.brain_dir(root)`. The tripwire was built as written — three tests in
+`test_agy_steps.py` that assert on the resolved path for a given root — and one of them goes further
+than this entry asked: given **no** root, the translator must collect nothing *and log at `warning`
+naming AG-R-18. Silence was the entire risk, so a version of the fix that fails quietly would be the
+same defect in a new place.
 
 ---
 
@@ -1849,3 +1857,74 @@ throughput available in that case is zero at any deadline.
 V8 and `JSON.stringify` is **71 ms**, so a reviewer's prediction that main-thread parse cost would starve
 socket reads is refuted — the gate's budget is spent entirely on transfer, and on healthy loopback a
 full-size snapshot clears well inside 5 s.
+
+<a id="ag-r-21"></a>
+
+## AG-R-21 — Moving the master root orphans 189 conversations, and the cheap migration corrupts the originals
+
+**Severity: moderate. Likelihood: certain, the first time [AG-21](decisions.md#ag-21) ships.**
+**Raised 2026-09-11**, by the consultation about AG-21 rather than by AG-21 itself: neither AG-21 nor
+[AG-R-18](#ag-r-18) names the existing tree, and both are written as though the private root were the
+first root there had ever been. It is not. The user's real `~/.gemini/antigravity-cli` holds **189
+conversation databases (98 MB)** and a 34 MB brain tree, accumulated by this app and by the user's own
+interactive `agy`. The moment the master root moves, `--conversation <id>` on any of them fails, because
+the vendor looks for the database under the `HOME` it was given.
+
+**What actually breaks is narrower than it first looks, and that is measured.** This app keeps its own
+transcript mirror, so history remains readable in the UI with the vendor tree untouched — the browser
+does not read the vendor's databases. Two things do:
+
+- **vendor-side resume**, which is the feature `--conversation` exists for; and
+- **the subagent transcript scan** in `subagents.py`, which reads the vendor's files directly and is
+  already the subject of [AG-R-18](#ag-r-18).
+
+So the loss is "old conversations cannot be continued", not "old conversations are gone".
+
+**The obvious migration is worse than the problem.** Hardlinking the tree into the new root — `cp -al`,
+which is instant and costs no disk — was proposed during review and is **unsafe here**, measured:
+all 189 databases are `journal_mode=wal` with live `-wal` and `-shm` sidecars, and every one has a link
+count of 1. SQLite in WAL mode writes **in place, through the inode**. A hardlinked database is the same
+database, so the first checkpoint taken by an `agy` running under the private root would write into the
+user's real history — which is precisely the isolation AG-21 exists to create, inverted. The cheap
+mechanism silently reconnects the two roots it was asked to separate.
+
+**So the decision is clean slate, with the old tree left where it is.** New conversations live in the
+private master root; the existing 189 stay under `~/.gemini`, are never written by this app again, and
+remain readable in the UI through the mirror. If vendor-side resume of a specific old conversation is
+ever wanted, it is a **one-time real copy** of that conversation's database and brain directory — never
+a hardlink, and never lazily at resume time, because lazy migration means permanent runtime code that
+has to understand the vendor's `conversation_summaries.db` to keep the index consistent.
+
+**The generalisable part.** AG-21 was measured thoroughly against a *fresh* root and not at all against
+the *populated* one that exists, which is the same shape as this directory's recurring finding one layer
+out: the mechanism was probed, the artefact was not. A containment change is also a data-migration
+change whenever the thing being contained already has data.
+
+<a id="ag-r-22"></a>
+
+## AG-R-22 — A denied tool leaves the model writing fiction, and nothing in the transcript says it was denied
+
+**Severity: moderate, and it reads as high. Likelihood: every consultation that tries to reach the
+network.** **Raised 2026-09-11**, from a probe that was nearly written up as a gate failure.
+
+The consultant gate denies every tool. When the denied tool is `read_url_content` or `search_web`, `agy`
+does not report the denial to the user and does not decline — **it answers anyway**, in fluent prose,
+with invented page contents and invented search results, presented exactly as retrieved material would
+be. A reader of the consultation tab sees a confident, well-formed answer and has no signal that the
+model never left the process.
+
+**This was nearly reported as a containment bypass, and the artefact is what stopped it.** The model
+produced `example.com`'s HTML and plausible search results while the hook log recorded a `deny`, which
+looks like a gate that leaked. The check was a nonce: a local HTTP server serving a random token, with
+its access log as the evidence. Control run, hook absent — the model reported the token. Denied run —
+the model said the tool was blocked, the token never appeared, and **the server logged zero GET
+requests**. The gate held perfectly; the model was confabulating from memory. *Assert on the artefact,
+not on the mechanism* cuts both ways — it is also what keeps a working mechanism from being condemned.
+
+**It does not block [AG-21](decisions.md#ag-21), and it is not a containment defect.** Where the config
+root lives cannot change how a remote model narrates a tool error; the perimeter did its job. It is
+recorded here because the *product* consequence lands in this app's UI, not the vendor's: AIC⚡DC owns
+the gate, so it is the one component in the system that knows for certain that a tool was denied, and it
+currently keeps that to itself. The fix is presentational — a denial the consultation tab renders, so an
+answer built on blocked retrieval is marked as ungrounded rather than shipped as research. Unwritten, and
+on the list in [`README.md`](README.md#unbuilt-on-the-agy-transport-as-of-2026-09-10).

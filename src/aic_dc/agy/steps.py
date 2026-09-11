@@ -55,6 +55,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from aic_dc.agy import roots
 from aic_dc.agy import tools as agy_tools
 from aic_dc.antigravity.steps import TurnStats, terminal_reason_for
 from aic_dc.claude_code.messages import (
@@ -145,10 +146,12 @@ class AgyTranslator:
         agent_id: str | None = None,
         repo_root: Path | None = None,
         conversation_id: str | None = None,
+        config_root: Path | None = None,
     ) -> None:
         self.request_id = request_id
         # Both are needed to collect a generated image, and neither is in
-        # the stream: `generate_image` names no path (see `BRAIN_DIR`), so
+        # the stream: `generate_image` names no path (see the comment
+        # above `locate_generated_image`), so
         # the destination is this repository and the source is found under
         # the conversation's own directory. Supplied by the service, which
         # has the session, rather than scraped from frames — the engine's
@@ -161,6 +164,21 @@ class AgyTranslator:
         # back to the newest file in the directory.
         self._repo_root = Path(repo_root).resolve() if repo_root else None
         self._conversation_id = conversation_id or ""
+        # **The config root this turn's `agy` is running against**, which is
+        # where its brain and scratch directories are — not this server's
+        # `HOME`, which is what both were pinned to until 2026-09-11
+        # (AG-R-18). AG-21 gives the master and the consultant a root each,
+        # so there is no single right value for a module constant, and
+        # getting it wrong is silent in both directions: an image that is
+        # never found, and a diverted-write detector that never fires.
+        #
+        # Optional, because a translator can be built for a stream that
+        # carries neither — every test of text handling builds one. The two
+        # places that need it say so out loud when it is missing rather than
+        # returning a quiet empty string, because "no image was collected"
+        # and "nobody told this translator where to look" are different
+        # facts and only one of them is a bug.
+        self._config_root = Path(config_root) if config_root else None
         # A file older than the turn belongs to an earlier turn of the
         # same conversation. See `locate_generated_image`.
         self._started_at = time.time()
@@ -551,7 +569,7 @@ class AgyTranslator:
         # what `agy` told us, and the correction has to be louder than the
         # thing it corrects.
         if name in agy_tools.MUTATING_TOOLS:
-            diverted = _diverted_copy(params)
+            diverted = _diverted_copy(params, self._config_root)
             if diverted is not None:
                 target, copy = diverted
                 logger.warning("agy diverted a write: %s -> %s", target, copy)
@@ -657,9 +675,18 @@ class AgyTranslator:
         """
         if self._repo_root is None or not self._conversation_id:
             return ""
+        if self._config_root is None:
+            logger.error(
+                "agy generated an image named %r and this translator was built "
+                "without a config root, so there is nowhere to look for it "
+                "(AG-R-18)",
+                params.get("ImageName") or params.get("image_name") or "",
+            )
+            return ""
+        brain = roots.brain_dir(self._config_root)
         image_name = str(params.get("ImageName") or params.get("image_name") or "")
         source = locate_generated_image(
-            BRAIN_DIR,
+            brain,
             self._conversation_id,
             image_name,
             # A second of slack for coarse mtime granularity, not for a
@@ -670,7 +697,7 @@ class AgyTranslator:
             logger.warning(
                 "agy generated an image named %r and it was not found under %s",
                 image_name,
-                BRAIN_DIR / self._conversation_id,
+                brain / self._conversation_id,
             )
             return ""
         # `.name` because the model chose this string: the schema asks for
@@ -868,41 +895,59 @@ class AgyTranslator:
         ]
 
 
-#: Where ``agy`` puts a write it declined to make where it was asked.
-#: See :data:`aic_dc.antigravity.rules` for why this is not simply a
-#: ``trustedWorkspaces`` question.
-SCRATCH_DIR = Path.home() / ".gemini" / "antigravity-cli" / "scratch"
+def scratch_dir(root: Path | str) -> Path:
+    """Where ``agy`` puts a write it declined to make where it was asked.
 
-#: Where ``agy`` puts an image, because the caller cannot say.
-#:
-#: **Measured on 2026-09-08**, and it falsified the question AG-16 left
-#: open — *which name does ``generate_image``'s output path carry* — by
-#: showing there is no such argument on either transport. The binary's own
-#: declaration for that tool, read back out of the conversation store, has
-#: exactly six properties (``Prompt``, ``ImageName``, ``AspectRatio``,
-#: ``ImagePaths``, ``toolAction``, ``toolSummary``) under
-#: ``additionalProperties: false``, so a path cannot even be smuggled in:
-#: the call would be rejected inside ``agy`` while declaring permissions,
-#: which is before any hook runs. The harness chooses the location,
-#: ``brain/<conversation_id>/<ImageName>_<epoch_ms>.jpg``, and the
-#: requested extension is not honoured — a request for ``.png`` produced
-#: JPEG.
-#:
-#: ``output_path`` is a **result** field, which
-#: [`sdk-surface.md`](../../../specs5/plan-ag/sdk-surface.md) recorded in
-#: the right column all along. It reads as an argument on the SDK
-#: transport only because that stream merges a tool's results back into
-#: its ``args`` at ``DONE`` (phase 3, finding 1); ``agy`` does not merge,
-#: so on this transport the path is nowhere in the machine-readable stream
-#: at all — only in the model's prose, which AG-R-3 forbids believing.
-#:
-#: So the image is **collected** rather than requested, from data the
-#: frames do carry: the conversation's own id and the name the model
-#: chose. Lives here rather than in ``consultant.py``, where it was
-#: written, because the engine needs the same collection and two copies of
-#: a path into another product's application directory is the copy that
-#: drifts.
-BRAIN_DIR = Path.home() / ".gemini" / "antigravity-cli" / "brain"
+    See :data:`aic_dc.antigravity.rules` for why this is not simply a
+    ``trustedWorkspaces`` question.
+
+    A function of the config root rather than a constant pinned to this
+    server's ``HOME``, for [AG-R-18](../../../specs5/plan-ag/risks.md#ag-r-18)'s
+    reason and with this module's own twist on it: the diverted-write
+    check is a *diagnostic that fires only when something has gone
+    wrong*, so a wrong directory here does not misreport, it reports
+    nothing at all. A detector that has quietly stopped detecting is the
+    exact failure this directory keeps recording, and pinning it to a root
+    the agent no longer uses is how it would have happened.
+    """
+    return roots.vendor_dir(root) / "scratch"
+
+# Where ``agy`` puts an image, because the caller cannot say.
+#
+# **Measured on 2026-09-08**, and it falsified the question AG-16 left
+# open — *which name does ``generate_image``'s output path carry* — by
+# showing there is no such argument on either transport. The binary's own
+# declaration for that tool, read back out of the conversation store, has
+# exactly six properties (``Prompt``, ``ImageName``, ``AspectRatio``,
+# ``ImagePaths``, ``toolAction``, ``toolSummary``) under
+# ``additionalProperties: false``, so a path cannot even be smuggled in:
+# the call would be rejected inside ``agy`` while declaring permissions,
+# which is before any hook runs. The harness chooses the location,
+# ``brain/<conversation_id>/<ImageName>_<epoch_ms>.jpg``, and the
+# requested extension is not honoured — a request for ``.png`` produced
+# JPEG.
+#
+# ``output_path`` is a **result** field, which
+# [`sdk-surface.md`](../../../specs5/plan-ag/sdk-surface.md) recorded in
+# the right column all along. It reads as an argument on the SDK
+# transport only because that stream merges a tool's results back into
+# its ``args`` at ``DONE`` (phase 3, finding 1); ``agy`` does not merge,
+# so on this transport the path is nowhere in the machine-readable stream
+# at all — only in the model's prose, which AG-R-3 forbids believing.
+#
+# So the image is **collected** rather than requested, from data the
+# frames do carry: the conversation's own id and the name the model
+# chose. Lives here rather than in ``consultant.py``, where it was
+# written, because the engine needs the same collection and two copies of
+# a path into another product's application directory is the copy that
+# drifts.
+#
+# **The directory itself is** :func:`aic_dc.agy.roots.brain_dir`, and was
+# a module constant here until 2026-09-11 (AG-R-18). Where it lives is a
+# property of the config root the turn is running against, and this
+# module no longer has an opinion on which one that is.
+
+
 
 
 def locate_generated_image(
@@ -957,7 +1002,9 @@ def locate_generated_image(
     return None
 
 
-def _diverted_copy(params: dict[str, Any]) -> tuple[str, str] | None:
+def _diverted_copy(
+    params: dict[str, Any], config_root: Path | None
+) -> tuple[str, str] | None:
     """``(target, scratch_copy)`` when a write went somewhere else.
 
     [AG-R-3](../../../specs5/plan-ag/risks.md#ag-r-3) is the worst failure
@@ -986,13 +1033,13 @@ def _diverted_copy(params: dict[str, Any]) -> tuple[str, str] | None:
     be worse than the silence it replaces.
     """
     raw = params.get("TargetFile") or params.get("OutputPath")
-    if not isinstance(raw, str) or not raw:
+    if not isinstance(raw, str) or not raw or config_root is None:
         return None
     try:
         target = Path(raw)
         if target.exists():
             return None
-        candidate = SCRATCH_DIR / target.name
+        candidate = scratch_dir(config_root) / target.name
         if candidate.is_file():
             return (str(target), str(candidate))
     except OSError:  # noqa: BLE001 - a diagnostic, never a control path

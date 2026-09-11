@@ -6258,3 +6258,181 @@ fire-and-forget version left the broadcast tasks unstarted when `handle_connecti
 [AG-R-19](risks.md#ag-r-19) rather than done quietly here.
 
 5016 Python tests and 4519 webapp tests pass.
+
+## The root that had to be the only thing that knew where anything was (2026-09-11)
+
+[AG-21](decisions.md#ag-21) and [AG-R-18](risks.md#ag-r-18) are built, in that order, which is the
+order the [README's ordering constraints](README.md#ordering-constraints-that-are-not-obvious)
+required of them: the brain-tree derivation is a prerequisite of the private root and not a follow-up,
+because until it lands AG-21 silently breaks image collection and every subagent transcript.
+[§ Thirteen probes before a line was written](#thirteen-probes-before-a-line-was-written-and-the-five-positions-they-killed-2026-09-11)
+is the consultation that preceded it; this is what building it found.
+
+**The shape is one module and a rule.** `src/aic_dc/agy/roots.py` holds every path the vendor tree has,
+and each is a function of a root rather than a constant: `vendor_dir(root)`, `brain_dir(root)`,
+`hooks_file(root)`. One function in the module names the real home — `user_root()` — and it exists to
+be the seed *source*, never a destination. That is the whole of AG-R-18's mitigation, and it is
+enforced by a test that reads the module's own source and asserts `Path.home()` appears exactly once,
+because the failure being defended against is a second one creeping back in.
+
+Two roots, as specified: a stable `master` the engine resumes against, and an ephemeral
+`consultations/c-XXXXXX` removed in a `finally`. They exist because the same `hooks.json` wants
+opposite contents — the master routes to the approval dialog, the consultant denies everything — and a
+single root would have to rewrite the file between uses, which is a race with any concurrent session.
+
+### What the build changed about the design
+
+**Installing the gate stopped being a question, so the button stopped being the mechanism.** Three RPCs
+existed because the hook went into `~/.gemini/config/hooks.json`: a permission with consequences
+outside this app deserves a default of *no* and a button. A hook inside a directory this app created,
+for a process this app spawns, is not a decision — so `connect()` now installs it and refuses the turn
+if it cannot, and the Settings surface survives as a status read, a repair affordance, and the way the
+old global entry comes out. The specification did not say this; it follows from the private root and
+was only visible once the root existed.
+
+**The consultant could no longer ask whether the gate was installed.** Its availability check read
+`status() == "current"`, and after AG-21 there is no standing file to read — a consultation writes its
+own hooks file into a root that does not exist until it starts. So the question changed from *is it
+installed* to *will it install*: `install.installable()` probes the command and writes nothing. The
+same three probes, one tense earlier.
+
+**A killed process leaves a root behind, and nothing collected it.** `ephemeral` removes its own in a
+`finally`, which covers everything except the case that matters — `SIGKILL`, a power cut, an
+`os._exit`. `sweep_consultations()` takes them out, latched to the first call per process, and the
+latch is safety rather than thrift: nothing filters by age, because before this process has opened a
+root everything present is somebody else's litter, and after it has, that reasoning stops being true
+and a second sweep would delete a live consultation's root out from under it.
+
+**And the old hook had to come out by itself.** AG-21's stated benefit is that the user's own
+interactive `agy` is untouched. That is true of a new install and false of every upgraded machine,
+where our pre-AG-21 entry keeps firing for sessions this app knows nothing about, routed at a socket
+belonging to a process that may not be running — failing open, which is what makes it easy not to
+notice. `install.retire_global()` removes it on connect and on the first consultation, unasked,
+because it is ours and it is dead. Not latched: a latch would mean an entry written between two
+connects survives until restart.
+
+### The two faults the tests had, and both were about the developer's home
+
+Neither would have failed a test. Both were the recurrence this directory keeps recording — *the thing
+was broken and nothing said so* — and in both cases the broken thing was the suite.
+
+**646 MB of `/tmp`.** `ensure_seed` defaults its source to the real `~/.gemini`, correct in production
+and wrong in a test process, where every test that prepared a root copied the developer's actual 17 MB
+`bin/`. Measured at 646 MB across one run. Fixed by threading `source=` through `seed`, `prepare` and
+`ephemeral` and adding an autouse fixture that points `roots.user_root` at an empty directory — which
+is not a stub but a supported answer, exactly what a first run on a machine that has never run `agy`
+produces. Re-measured at 280 KB.
+
+**The run that added `retire_global` deleted the developer's real `~/.gemini/config/hooks.json`.**
+`install.GLOBAL_HOOKS` is resolved at import time against the real home, and the new call site runs on
+every connect — which a test process does hundreds of times. Nothing of the user's was lost, because
+`uninstall()` removes the file only when our entry was the last thing in it, but that is luck about
+that file's contents and not a property of the suite. A second autouse fixture now points the constant
+at a temp path. The general form is worth more than the incident: **a module constant resolved from
+the environment at import time is a test-isolation hazard the moment anything writes through it**, and
+this file now has two of them one function apart. Swept afterwards: `GLOBAL_HOOKS` is the **only**
+module-level constant in `src/aic_dc` built from `Path.home()` or the environment at import time, so the
+class is contained rather than merely patched in one place.
+
+A third fixture resets `sweep_consultations`'s once-per-process latch between tests. A test process is
+hundreds of notional processes in one, and a sweep returning `0` because another test already swept is
+indistinguishable, from inside the test, from a sweep that found nothing.
+
+### What it cost and what it proves
+
+31 new tests in `test_agy_roots.py`, a rewritten `TestItWillNotRunUngated` on both the service and the
+consultant, three tripwires in `test_agy_steps.py` that assert the brain tree is read *under the root
+the session was spawned with* and not merely that a path was passed, and the Settings surface — which
+had no tests at all — now has nine. 5,078 Python tests pass, and 4,520 in the webapp.
+
+The tripwires are the part that matters, and they are AG-R-18's own instruction followed literally:
+assert on the resolved path for a given root, never on the constant's spelling. One of them gives the
+translator no root at all and asserts that it collects nothing *and says so at `warning` naming
+AG-R-18* — because the failure this risk describes is not an exception, it is a picture that silently
+is not there.
+
+---
+
+## Thirteen probes before a line was written, and the five positions they killed (2026-09-11)
+
+[AG-21](decisions.md#ag-21) and [AG-R-18](risks.md#ag-r-18) were the next pair on the
+[README's ordering constraints](README.md#ordering-constraints-that-are-not-obvious), and the question
+put before building them was not *how* to build them but *whether the design was right*. Three rounds
+through [`consult-agy`](../../.claude/skills/consult-agy/SKILL.md) and eleven probe batches answered
+that, and the useful output is not the confirmation. It is that **four positions died — two of them
+mine, two of them the reviewer's** — and none of the four would have been caught by argument, because
+all four sides were arguing confidently and none of the four claims had been priced.
+
+### The two of mine
+
+**"The consultant needs a stable shared root, because a fresh one costs too much."** Measured: an empty
+root costs 17 MB and 1.7 s, which is a real number and is what I was defending. Then the reviewer's
+counter-proposal was measured rather than argued with, and the same root costs **228 KB**. The position
+was not wrong about the cost; it was wrong to treat a measured cost as a fixed one. A number that has
+only been taken under one configuration is not a constraint yet.
+
+### The one that was killed after it had already been written down
+
+The sentence above was first written as *"symlink `bin/` and `builtin/` **and** share `XDG_CACHE_HOME`"*,
+because that is the configuration the probe ran and the whole saving was attributed to all of it. It went
+into [AG-21](decisions.md#ag-21), into the README's unbuilt row, and into this file. Isolating the two
+before writing the allowlist — the cache variable is either load-bearing or it is not, and an allowlist is
+a bad place to guess — showed that **`agy` does not read `XDG_CACHE_HOME` at all**: with it pointed
+elsewhere, `$HOME/.cache/ms-playwright-go/1.57.0` was created under the private root anyway and the XDG
+directory stayed empty. The symlinks are the entire mechanism; 17 MB → 228 KB with nothing else changed.
+
+Three documents were corrected about twenty minutes after being written, which is the cheap version of
+this mistake. The expensive version is the one this directory keeps recording: **a compound configuration
+measured once, and every component in it credited with the result.** It is the same error as a green LED
+that proves only that the LED works, arriving in the measurement rather than in the code — and the only
+reason it was caught is that building the thing forced a question discussing it never had to answer.
+
+**"Migrate the existing conversations by symlinking them in."** Refuted twice over, and the second
+refutation is the interesting one. The reviewer proposed `cp -al` instead — hardlinks, instant, free —
+and that is worse: all 189 conversation databases are `journal_mode=wal` with live `-wal` sidecars, so a
+hardlinked database *is* the original database, and the first checkpoint from the private root writes
+straight into the user's real history. A migration mechanism that silently reconnects the two roots
+containment exists to separate. Recorded as [AG-R-21](risks.md#ag-r-21), with clean slate as the answer.
+
+### The two of the reviewer's
+
+**"Subagents escape the gate, and that blocks this build."** It was stated as the hard blocker of round
+2. With `invoke_subagent` allowed and every other tool denied, the hook logged eight calls from inside
+the subagent — `invoke_subagent, view_file, grep_search, list_dir, manage_task, send_message, view_file,
+manage_subagents` — every denial held, and a planted canary was never read. The gate is inherited. The
+probe also surfaced four tool names [AG-5](decisions.md#ag-5)'s table does not list, which is the finding
+neither side went looking for.
+
+**"Repo-local hook files are an RCE vector."** A hostile workspace planted four hook paths and a
+workspace skill carrying a nonce. Only the root hook ran and the nonce never appeared. The earlier
+round's objection that this was an inconclusive negative probe was fair against one path; it does not
+survive four paths plus a skill.
+
+### The one this nearly got wrong in the other direction
+
+The coverage probe showed `agy` producing `example.com`'s HTML and plausible search results **while the
+hook log recorded a deny**. That reads as a leaking gate, and writing it up as one was a keystroke away.
+The nonce test is what stopped it: a local server with a random token and its own access log, which
+recorded **zero GET requests** while the model answered confidently. The gate was perfect and the model
+was confabulating. *Assert on the artefact, not on the mechanism* is written in this directory as a rule
+for catching broken things that report themselves healthy; this is the first time it has run the other
+way and saved a working mechanism from being condemned. The behaviour itself is real and is
+[AG-R-22](risks.md#ag-r-22).
+
+### What the probes were, since the numbers are the point
+
+Version (v1.2.1, not the v1.2.0 AG-21 was written against); `HOME` survival through
+`systemd-run --user --scope`; the vendor tree inventory; empty-root cost; missing-runner behaviour;
+repo-level `hooks.json`; universal `PreToolUse` coverage; the fabrication nonce; what the mirror
+preserves; subagent inheritance; the warm-seeded root; alternate hook paths and workspace skills; the
+teardown race; the WAL check on 189 databases; and — after the write-up was already committed —
+`XDG_CACHE_HOME` in isolation. All in `mktemp -d` roots. Nothing of the user's was written, and the
+working tree stayed clean throughout.
+
+### The one recommendation that was already built
+
+The reviewer asked for a canary in `status()` rather than string comparison — correct, and the exact
+lesson [`risks.md`](risks.md) § *The second way it failed open* records. It has been built since:
+`install.py`'s `hook_runs()` executes the hook command before writing it. A consultation cannot see the
+tree, so it re-derives good advice that has already been taken, and the only defence against banking
+that as new work is to check every recommendation against the source before accepting it.

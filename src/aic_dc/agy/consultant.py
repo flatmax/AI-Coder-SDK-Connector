@@ -78,7 +78,8 @@ believe a write. Nothing here is a second copy of any of those.
 It borrowed a fourth, :func:`~aic_dc.claude_code.messages.files_written_by`,
 for which file a ``generate_image`` call wrote — and the first live run
 showed that question has no answer in that table, because the tool takes
-no path argument on either transport. See :data:`BRAIN_DIR`.
+no path argument on either transport. See
+:func:`~aic_dc.agy.roots.brain_dir`.
 
 The one thing it deliberately does *not* borrow is the turn's close.
 ``AgySession.stream_turn`` ends by emitting ``streamComplete``, which
@@ -101,7 +102,7 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
-from aic_dc.agy import install
+from aic_dc.agy import install, roots
 from aic_dc.agy.gate_server import AgyGateServer, StaticPolicy
 from aic_dc.agy.session import (
     AgyNotInstalledError,
@@ -109,7 +110,6 @@ from aic_dc.agy.session import (
     PromptNotSentError,
 )
 from aic_dc.agy.steps import (
-    BRAIN_DIR,
     AgyTranslator,
     locate_generated_image,
     unwrap,
@@ -275,6 +275,20 @@ class AgyConsultant:
         self._session: AgySession | None = None
         self._cancelled = False
         self._counter = 0
+        # Litter from a process that was killed mid-consultation, taken out
+        # here because this is the first place in the program that knows
+        # where it lives. Latched to the first call — see the function.
+        roots.sweep_consultations(self._config_dir)
+        # And the pre-AG-21 hook in the user's own tree, for a user who
+        # only ever consults and never connects the engine — the service
+        # does the same on connect, and neither path can assume the other
+        # ran.
+        if install.retire_global():
+            logger.info(
+                "Removed the pre-AG-21 gate from %s: consultations run in "
+                "their own root",
+                install.GLOBAL_HOOKS,
+            )
 
     def _resolve_model(self) -> str | None:
         """The model for the consultation about to run.
@@ -316,8 +330,20 @@ class AgyConsultant:
 
     @property
     def gate_status(self) -> dict[str, Any]:
-        """The hook's installation state, from the one authority on it."""
-        report = dict(install.status(self._config_dir))
+        """Whether a consultation *could* be gated, from the one authority.
+
+        **Not an installation state any more** (AG-21). A consultation gets
+        a fresh config root and writes its own hook into it, so there is no
+        standing file whose contents could be reported — asking
+        :func:`~aic_dc.agy.install.status` about a directory that will not
+        exist until the next consultation starts would answer ``absent``
+        for a gate that is going to work perfectly.
+
+        What is reportable is whether the command would run, which is the
+        thing that actually failed in the frozen-binary incident. ``ready``
+        or ``unrunnable``.
+        """
+        report = dict(install.installable(self._config_dir))
         report["agy_present"] = shutil.which(self._executable) is not None
         return report
 
@@ -325,17 +351,22 @@ class AgyConsultant:
     def available(self) -> bool:
         """Whether a consultation can be attempted at all.
 
-        **Two conditions, and the second is not a nicety.** Without the
-        hook installed in the user's ``agy`` configuration, our claim on
-        the conversation means nothing: the gate would never be asked,
-        and a consultation would run as an unreviewed agent with the
-        binary's whole tool set and the repository as its cwd. AG-9's
-        "hidden rather than stubbed" is the mild reason to answer false
-        here; AG-5 is the real one.
+        **Two conditions, and the second is not a nicety.** Without a hook
+        that runs, our claim on the conversation means nothing: the gate
+        would never be asked, and a consultation would run as an unreviewed
+        agent with the binary's whole tool set and the repository as its
+        cwd. AG-9's "hidden rather than stubbed" is the mild reason to
+        answer false here; AG-5 is the real one.
+
+        The second condition used to read ``state == "current"`` against
+        the user's global hooks file. It reads ``state == "ready"`` against
+        a probe now, because AG-21 moved the file into a root that is
+        created per consultation — the question changed from *is it
+        installed* to *will it install*.
         """
         return (
             shutil.which(self._executable) is not None
-            and self.gate_status.get("state") == "current"
+            and self.gate_status.get("state") == "ready"
         )
 
     def make_translator(
@@ -371,12 +402,19 @@ class AgyConsultant:
             raise ConsultationError("A second opinion needs a question to answer.")
 
         prompt = question if not context.strip() else f"{question}\n\n{context.strip()}"
-        translator, _ = await self._run(
-            prompt,
-            policy=SECOND_OPINION_POLICY,
-            observer=observer,
-            timeout=self._timeout,
-        )
+        # **One config root per consultation, removed when it ends**
+        # (AG-21). A consultation has no history, no resumption and no
+        # second turn, so it has no use for a root that outlives it — and
+        # a fresh one means two consultations cannot collide over the one
+        # file that decides what their agent may do.
+        with roots.ephemeral(self._config_dir) as config_root:
+            translator, _ = await self._run(
+                prompt,
+                policy=SECOND_OPINION_POLICY,
+                observer=observer,
+                timeout=self._timeout,
+                config_root=config_root,
+            )
         answer = translator.response_text().strip()
         if not answer:
             raise ConsultationError(
@@ -403,7 +441,7 @@ class AgyConsultant:
         measured on this one.
 
         **Collected, not requested**, and that is the correction the first
-        real run bought (see :data:`BRAIN_DIR`). ``agy``'s ``generate_image``
+        real run bought. ``agy``'s ``generate_image``
         takes a *name*, not a path, so asking it to write inside the
         repository asks for something the tool cannot do — and the first
         run showed what the model does when asked anyway: it reached for
@@ -431,27 +469,34 @@ class AgyConsultant:
             "save it anywhere — that is done for you."
         )
 
-        translator, frames = await self._run(
-            " ".join(instruction),
-            policy=IMAGE_POLICY,
-            observer=observer,
-            timeout=self._image_timeout,
-        )
-        summary = translator.response_text().strip()
-        call = _image_call(frames)
-        if call is None:
-            # No tool call at all: the honest reading is that prose claimed
-            # a picture nobody generated, which is what this wording says.
-            return verify_image_write("", self._repo_root, summary)
-        return verify_image_write(
-            self._collect(call, frames, output_name), self._repo_root, summary
-        )
+        # The root has to outlive the turn by exactly one step: the image
+        # is *collected* rather than requested, so it is still inside this
+        # root when `agy` exits. Collecting after the `with` would tidy the
+        # picture away before copying it.
+        with roots.ephemeral(self._config_dir) as config_root:
+            translator, frames = await self._run(
+                " ".join(instruction),
+                policy=IMAGE_POLICY,
+                observer=observer,
+                timeout=self._image_timeout,
+                config_root=config_root,
+            )
+            summary = translator.response_text().strip()
+            call = _image_call(frames)
+            if call is None:
+                # No tool call at all: the honest reading is that prose
+                # claimed a picture nobody generated, which is what this
+                # wording says.
+                return verify_image_write("", self._repo_root, summary)
+            collected = self._collect(call, frames, output_name, config_root)
+        return verify_image_write(collected, self._repo_root, summary)
 
     def _collect(
         self,
         call: dict[str, Any],
         frames: list[dict[str, Any]],
         output_name: str,
+        config_root: Path,
     ) -> str:
         """Copy the generated image into the repository, and say where.
 
@@ -472,13 +517,14 @@ class AgyConsultant:
         # conversation for the length of one call, so nothing else writes
         # into that directory. The engine, whose conversation outlives the
         # turn, must not pass it.
+        brain = roots.brain_dir(config_root)
         source = locate_generated_image(
-            BRAIN_DIR, conversation_id, image_name, allow_newest=True
+            brain, conversation_id, image_name, allow_newest=True
         )
         if source is None:
             raise ConsultationError(
                 f"Antigravity generated an image named {image_name!r} and it "
-                f"could not be found under {BRAIN_DIR / (conversation_id or '?')}. "
+                f"could not be found under {brain / (conversation_id or '?')}. "
                 "The generation itself succeeded, so this is where the image "
                 "is collected from rather than the generation being at fault."
             )
@@ -547,6 +593,7 @@ class AgyConsultant:
         policy: StaticPolicy,
         observer: Any,
         timeout: float,
+        config_root: Path,
     ) -> tuple[AgyTranslator, list[dict[str, Any]]]:
         """Spawn, ask one thing, drain it, and shut down.
 
@@ -582,11 +629,28 @@ class AgyConsultant:
         gate = AgyGateServer(
             self._socket_path(), policy=policy, config_dir=self._config_dir
         )
+        # **The hook goes into this consultation's own root** (AG-21). It
+        # used to rely on the entry in the user's global
+        # `~/.gemini/config/hooks.json`, which is what made the gate's
+        # correctness a property of somebody else's configuration file —
+        # and what forced the fail-open fallback, since a hook that could
+        # not run would otherwise have broken the user's own interactive
+        # sessions. Written per root rather than once, because the root is
+        # new every time and an unhooked root is an ungated agent.
+        report = install.install(self._config_dir, path=roots.hooks_file(config_root))
+        if report.get("state") != "current":
+            raise ConsultationError(
+                "The consultation could not be gated: "
+                + str(report.get("detail") or report.get("state"))
+                + " Antigravity is not run without a gate, because the "
+                "policy that denies it tools is the gate."
+            )
         session = AgySession(
             self._repo_root,
             gate=gate,
             model=self._resolve_model(),
             executable=self._executable,
+            config_root=config_root,
         )
         self._session = session
         stream: Any = None
@@ -675,12 +739,13 @@ class AgyConsultant:
                 f"{self._executable!r} is not on PATH, so the Antigravity "
                 "consultant cannot run over the CLI transport."
             )
-        state = self.gate_status.get("state")
+        report = self.gate_status
         return (
-            "The AIC-DC permission gate is not installed in the agy "
-            f"configuration (it reports {state!r}), so a consultation could "
-            "not be reviewed before it ran. Install it from Settings."
-        )
+            "The AIC-DC permission gate cannot run here (it reports "
+            f"{report.get('state')!r}), so a consultation could not be "
+            "gated before it ran. "
+            + str(report.get("detail") or "")
+        ).strip()
 
 
 def choose_consultant(
@@ -831,7 +896,7 @@ def _image_call(frames: list[dict[str, Any]]) -> dict[str, Any] | None:
     arguments*. ``generate_image`` has none on either transport, so the
     shared table cannot answer this question and adding a third spelling to
     it would encode the wrong belief rather than fix it. See
-    :data:`BRAIN_DIR`.
+    :func:`~aic_dc.agy.roots.brain_dir`.
 
     The last one wins because a turn may generate more than once and the
     caller asked for an image, singular — the most recent is the one the

@@ -26,6 +26,7 @@ Offline. No ``agy``, no network, no subprocess.
 
 from __future__ import annotations
 
+import logging
 import os
 
 import pytest
@@ -488,6 +489,35 @@ class TestTheSharedAccountingObject:
         assert t.stream_complete()[-1].payload["tool_calls"] == 1
 
 
+def config_root(tmp_path, name="root"):
+    """A private ``agy`` config root, laid out the way ``roots`` expects.
+
+    AG-21 made both the scratch directory and the brain tree properties of
+    the root a translator was built against, replacing the two module
+    constants these tests used to monkeypatch. That is the point of
+    AG-R-18: a constant pinned to the server's own ``HOME`` at import time
+    is silently wrong as soon as there is more than one root, and a test
+    that patches the constant cannot notice.
+    """
+    root = tmp_path / name
+    (root / ".gemini" / "antigravity-cli").mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def scratch_of(root):
+    """Where a diverted write lands, for the given root."""
+    path = root / ".gemini" / "antigravity-cli" / "scratch"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def brain_of(root, conversation):
+    """Where ``agy`` writes a conversation's artefacts, for the given root."""
+    path = root / ".gemini" / "antigravity-cli" / "brain" / conversation
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
 class TestADivertedWriteIsReported:
     """AG-R-3, turned from silence into a sentence.
 
@@ -522,7 +552,9 @@ class TestADivertedWriteIsReported:
     def test_a_write_that_landed_says_nothing(self, tmp_path):
         target = tmp_path / "landed.txt"
         target.write_text("x", encoding="utf-8")
-        events = AgyTranslator("r1").translate(self._done(target))
+        events = AgyTranslator(
+            "r1", config_root=config_root(tmp_path)
+        ).translate(self._done(target))
         assert not [e for e in events if e.name == "systemEvent"]
 
     def test_a_missing_file_alone_is_not_reported(self, tmp_path, monkeypatch):
@@ -533,19 +565,23 @@ class TestADivertedWriteIsReported:
         did land would be worse than the silence it replaces, so only the
         pair — missing *here*, present *there* — has no innocent reading.
         """
-        monkeypatch.setattr(steps, "SCRATCH_DIR", tmp_path / "scratch")
-        events = AgyTranslator("r1").translate(self._done(tmp_path / "gone.txt"))
+        root = config_root(tmp_path)
+        scratch_of(root)
+        events = AgyTranslator("r1", config_root=root).translate(
+            self._done(tmp_path / "gone.txt")
+        )
         assert not [e for e in events if e.name == "systemEvent"]
 
     def test_missing_here_and_present_in_scratch_is_reported(
         self, tmp_path, monkeypatch
     ):
-        scratch = tmp_path / "scratch"
-        scratch.mkdir()
+        root = config_root(tmp_path)
+        scratch = scratch_of(root)
         (scratch / "diverted.txt").write_text("the real content", encoding="utf-8")
-        monkeypatch.setattr(steps, "SCRATCH_DIR", scratch)
 
-        events = AgyTranslator("r1").translate(self._done(tmp_path / "diverted.txt"))
+        events = AgyTranslator("r1", config_root=root).translate(
+            self._done(tmp_path / "diverted.txt")
+        )
         notices = [e for e in events if e.name == "systemEvent"]
         assert len(notices) == 1
         message = notices[0].payload["data"]["message"]
@@ -563,19 +599,17 @@ class TestADivertedWriteIsReported:
         not, and the two disagreeing is exactly the information the user
         needs.
         """
-        scratch = tmp_path / "scratch"
-        scratch.mkdir()
-        (scratch / "d.txt").write_text("x", encoding="utf-8")
-        monkeypatch.setattr(steps, "SCRATCH_DIR", scratch)
-        events = AgyTranslator("r1").translate(self._done(tmp_path / "d.txt"))
+        root = config_root(tmp_path)
+        (scratch_of(root) / "d.txt").write_text("x", encoding="utf-8")
+        events = AgyTranslator("r1", config_root=root).translate(
+            self._done(tmp_path / "d.txt")
+        )
         assert [e.name for e in events] == ["toolUse", "systemEvent", "toolResult"]
 
     def test_a_read_is_never_checked(self, tmp_path, monkeypatch):
-        scratch = tmp_path / "scratch"
-        scratch.mkdir()
-        (scratch / "v.txt").write_text("x", encoding="utf-8")
-        monkeypatch.setattr(steps, "SCRATCH_DIR", scratch)
-        events = AgyTranslator("r1").translate(frame({
+        root = config_root(tmp_path)
+        (scratch_of(root) / "v.txt").write_text("x", encoding="utf-8")
+        events = AgyTranslator("r1", config_root=root).translate(frame({
             "conversation_id": "c", "step_index": 3, "state": "DONE",
             "step_type": "tool", "tool_name": "view_file",
             "tool_info": {
@@ -628,16 +662,18 @@ class TestAGeneratedImageIsCollected:
     user watched succeed and could not find.
     """
 
-    def _translator(self, tmp_path, monkeypatch, *, repo=None, brain=None):
-        monkeypatch.setattr(steps, "BRAIN_DIR", brain or (tmp_path / "brain"))
+    def _translator(self, tmp_path, monkeypatch, *, repo=None, root=None):
         repo = repo if repo is not None else tmp_path / "repo"
         repo.mkdir(parents=True, exist_ok=True)
-        return AgyTranslator("r1", repo_root=repo, conversation_id=CONVERSATION)
+        return AgyTranslator(
+            "r1",
+            repo_root=repo,
+            conversation_id=CONVERSATION,
+            config_root=root or config_root(tmp_path),
+        )
 
     def _generated(self, tmp_path, name="ai_test_pattern_1788856211696.jpg"):
-        directory = tmp_path / "brain" / CONVERSATION
-        directory.mkdir(parents=True, exist_ok=True)
-        source = directory / name
+        source = brain_of(config_root(tmp_path), CONVERSATION) / name
         source.write_bytes(b"\xff\xd8\xff\xe0 a jpeg")
         return source
 
@@ -753,7 +789,7 @@ class TestAGeneratedImageIsCollected:
         collected — refusing it would lose a picture over its name.
         """
         translator = self._translator(tmp_path, monkeypatch)
-        nested = tmp_path / "brain" / CONVERSATION / "sub"
+        nested = brain_of(config_root(tmp_path), CONVERSATION) / "sub"
         nested.mkdir(parents=True)
         (nested / "icon_1788856211696.jpg").write_bytes(b"x")
 
@@ -793,11 +829,12 @@ class TestAGeneratedImageIsCollected:
         twice under different names, since the consultant's caller supplies
         the destination and the engine derives one.
         """
-        monkeypatch.setattr(steps, "BRAIN_DIR", tmp_path / "brain")
         self._generated(tmp_path)
 
         result = self._result(
-            AgyTranslator("r1", agent_id="ag-1").translate(image_step())
+            AgyTranslator(
+                "r1", agent_id="ag-1", config_root=config_root(tmp_path)
+            ).translate(image_step())
         )
 
         assert result.payload["files_modified"] == []
@@ -1134,3 +1171,119 @@ class TestAToolResultIsPreviewedTheWayTheCardReadsIt:
         payload = self._result(AgyTranslator("r1"), "ok")
         assert payload["truncated"] is False
         assert payload["full_bytes"] == 2
+
+
+class TestTheRootIsNeverAssumed:
+    """AG-R-18, as a tripwire rather than as a comment.
+
+    ``BRAIN_DIR`` and ``SCRATCH_DIR`` were module constants derived from
+    ``Path.home()`` **at import time**. That was correct while there was
+    exactly one ``agy`` configuration on the machine and it was the
+    user's. AG-21 created a second and then a third — a stable master root
+    and an ephemeral one per consultation — and the constants went on
+    naming the server's own home, which is the one root no session ever
+    runs against.
+
+    The failure that would produce is this file's recurring register: not
+    an exception, but an image that was generated and then reported
+    missing, and a diverted write that was never noticed, with nothing
+    anywhere saying why. So the parameter is required rather than
+    defaulted, and these are the two assertions that keep it that way.
+    """
+
+    def test_a_translator_without_a_root_collects_nothing_and_says_so(
+        self, tmp_path, caplog
+    ):
+        """Loud, because the silent version is the bug being prevented.
+
+        A translator built without a root is a wiring mistake, and the
+        image it cannot collect looks exactly like an image ``agy`` never
+        produced. The log line is what separates those two for whoever
+        reads it.
+        """
+        self_root = config_root(tmp_path)
+        (brain_of(self_root, CONVERSATION) / "ai_test_pattern_1.jpg").write_bytes(
+            b"\xff\xd8\xff\xe0 a jpeg"
+        )
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        translator = AgyTranslator(
+            "r1", repo_root=repo, conversation_id=CONVERSATION
+        )
+
+        with caplog.at_level(logging.ERROR, logger="aic_dc.agy.steps"):
+            result = next(
+                e
+                for e in translator.translate(image_step())
+                if e.name == "toolResult"
+            )
+
+        assert result.payload["files_modified"] == []
+        assert "AG-R-18" in caplog.text
+
+    def test_an_image_under_another_root_is_not_collected(self, tmp_path):
+        """The assertion the old constants could not make.
+
+        Two roots exist at once here, and only one of them was given to the
+        translator. A collector reading a process-wide constant would find
+        this file — which is precisely the master-reads-the-consultant's-
+        history failure AG-R-18 names — so the test asserts the *absence*
+        of a collection rather than the presence of one.
+        """
+        other = config_root(tmp_path, "other-root")
+        (brain_of(other, CONVERSATION) / "ai_test_pattern_1.jpg").write_bytes(
+            b"\xff\xd8\xff\xe0 a jpeg"
+        )
+        mine = config_root(tmp_path, "mine")
+        brain_of(mine, CONVERSATION)  # exists and is empty
+        repo = tmp_path / "repo"
+        repo.mkdir()
+
+        result = next(
+            e
+            for e in AgyTranslator(
+                "r1",
+                repo_root=repo,
+                conversation_id=CONVERSATION,
+                config_root=mine,
+            ).translate(image_step())
+            if e.name == "toolResult"
+        )
+
+        assert result.payload["files_modified"] == []
+        assert not list(repo.iterdir())
+
+    def test_a_diverted_write_is_looked_for_under_the_given_root(self, tmp_path):
+        """Same shape, for the scratch directory.
+
+        The diverted-write notice is only correct if it names the scratch
+        of the root this turn ran against. Pointed at another root's, it
+        would report a file the user never wrote as the rescued copy of one
+        they did.
+        """
+        mine = config_root(tmp_path, "mine")
+        other = config_root(tmp_path, "other-root")
+        (scratch_of(other) / "d.txt").write_text("somebody else's", encoding="utf-8")
+        scratch_of(mine)
+
+        frame_ = frame({
+            "conversation_id": "c",
+            "step_index": 2,
+            "state": "DONE",
+            "step_type": "tool",
+            "tool_name": "write_to_file",
+            "tool_info": {
+                "name": "write_to_file",
+                "parameters": {
+                    "TargetFile": str(tmp_path / "d.txt"),
+                    "CodeContent": "x",
+                },
+            },
+        })
+        events = AgyTranslator("r1", config_root=mine).translate(frame_)
+        assert not [e for e in events if e.name == "systemEvent"]
+
+        (scratch_of(mine) / "d.txt").write_text("mine", encoding="utf-8")
+        events = AgyTranslator("r1", config_root=mine).translate(frame_)
+        notice = next(e for e in events if e.name == "systemEvent")
+        assert str(scratch_of(mine)) in notice.payload["data"]["message"]

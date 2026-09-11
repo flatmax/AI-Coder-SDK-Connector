@@ -622,14 +622,18 @@ second time about the fourth, and running the probes** — which re-specified th
 places and found that it and the reconnect gate would have defeated each other. See
 [§ Five probes, and the design that came back different](delivery.md#five-probes-and-the-design-that-came-back-different-2026-09-11).
 
-**Three of the six are specified and unwritten; the other three all landed on 2026-09-11.** The reconnect
+**One of the six is specified and unwritten; the other five all landed on 2026-09-11.** The reconnect
 gate was built the same day it was raised, because it is a prerequisite of the transport work rather than
 a follow-up to it
 ([§ The gate that had to have four ways out](delivery.md#the-gate-that-had-to-have-four-ways-out-2026-09-11)),
 and the sender and its eviction policy followed it the same day, which completed migration step 1
 ([§ The queue that had to prove it was a queue](delivery.md#the-queue-that-had-to-prove-it-was-a-queue-2026-09-11)).
 Three rows raised and discharged in a day is not the usual shape; it is what happens when the
-prerequisite chain is short and each link was measured before it was built.
+prerequisite chain is short and each link was measured before it was built. **The containment pair
+followed on the same day**, in the order its own constraint required — the brain-tree derivation first,
+then the private root — which makes five of the six, and leaves only
+[AG-R-22](risks.md#ag-r-22)'s denial rendering from that day's additions
+([§ The root that had to be the only thing that knew where anything was](delivery.md#the-root-that-had-to-be-the-only-thing-that-knew-where-anything-was-2026-09-11)).
 
 | What | Specified in | Size |
 |---|---|---|
@@ -639,8 +643,9 @@ prerequisite chain is short and each link was measured before it was built.
 | ~~Skip usage absorption on a non-`SUCCESS` result~~ ✅ | [`sdk-surface.md` § A failed turn reports the previous turn's usage](sdk-surface.md#a-failed-turn-reports-the-previous-turns-usage--measured-2026-09-10) | One condition in `AgyTranslator._absorb_usage`. A refused turn currently reports the *previous* turn's tokens as its own |
 | Standing guidance via `PreInvocation` `ephemeralMessage`, re-injected every invocation | [`sdk-surface.md` § There are five lifecycle events](sdk-surface.md#there-are-five-lifecycle-events-and-this-app-wires-one) | Replaces `agy_tools.WRITE_GUIDANCE` prepending text to the user's own prompt, which records guidance as though the user typed it. **Must fire on every `invocationNum`** — an ephemeral message evaporates after the invocation that received it |
 | Read `transcriptPath` from the hook payload | same § *Four details the probe did not have* | `subagents.py` derives it by hand today; the payload carries it, and carries the per-product directory name that differs. **Measured 2026-09-11** rather than only documented: it is on all three events' payloads |
-| A private config root via `HOME` — stable for the master, ephemeral per consultation | [AG-21](decisions.md#ag-21) | One environment variable on the spawn, plus a seeded `hooks.json` per root and a `finally` that removes the ephemeral one. Lets the `\|\| printf '{"decision":"allow"}'` fail-open line be **deleted** rather than replaced |
-| Derive the brain-tree path from the active config root instead of `Path.home()` | [AG-R-18](risks.md#ag-r-18) | **A prerequisite of the row above, not a follow-up.** `locate_generated_image` already takes `brain_dir` as its first parameter, so only its callers and the `subagents.py` transcript scan change — but until they do, AG-21 silently breaks image collection and every subagent transcript |
+| ~~A private config root via `HOME` — stable for the master, ephemeral per consultation~~ ✅ | [AG-21](decisions.md#ag-21) | **Built 2026-09-11.** One environment variable on the spawn, plus a seeded `hooks.json` per root, an explicit environment allowlist, and a `finally` that removes the ephemeral one. Lets the `\|\| printf '{"decision":"allow"}'` fail-open line be **deleted** rather than replaced — measured at v1.2.1, where a missing runner already fails closed. The ephemeral root is **warm-seeded** — `bin/` and `builtin/` symlinked at a seed cache this app owns: **228 KB instead of 17 MB**, and ~1 s off the cold time. Shipping it orphans 189 existing conversations for vendor-side resume — see [AG-R-21](risks.md#ag-r-21), which is a decision to accept that, not work. Building it moved three things the specification did not contain: `connect()` **installs** the gate rather than demanding it, so the Settings surface is now a status read and a repair affordance; `install.installable()` replaces a status read the consultant can no longer make; and `install.retire_global()` takes the pre-AG-21 entry out of the user's own file unasked, because this decision's benefit is false on an upgraded machine until it does. See [§ The root that had to be the only thing that knew where anything was](delivery.md#the-root-that-had-to-be-the-only-thing-that-knew-where-anything-was-2026-09-11) |
+| ~~Derive the brain-tree path from the active config root instead of `Path.home()`~~ ✅ | [AG-R-18](risks.md#ag-r-18) | **Built 2026-09-11, before the row above, which is the order it required.** `locate_generated_image` already takes `brain_dir` as its first parameter, so only its callers and the `subagents.py` transcript scan change — and that is how it went. The tripwire is on the **resolved path for a given root**, and one of the three goes further than the entry asked: given no root, the translator collects nothing *and logs at `warning` naming AG-R-18*, because silence was the whole risk |
+| Render a denied tool call in the consultation tab | [AG-R-22](risks.md#ag-r-22) | A denied `read_url_content` or `search_web` produces fluent invented content and **no statement that anything was blocked** — proven with a nonce and a server access log showing zero requests. This app owns the gate, so it is the only component that knows a denial happened, and it currently keeps that to itself. Presentational: the hook already reports the deny |
 | ~~One sender per client over a bounded **per-client FIFO**, so a stalled browser cannot pace a master turn~~ ✅ | [AG-R-19](risks.md#ag-r-19) | **Built 2026-09-11, completing migration step 1.** `broadcast.py` holds a `ClientSender` per client and `main`'s event callback enqueues instead of awaiting; events are notifications, so the 120 s per-event timeout task is gone with the reply nothing read. Engine bookkeeping stayed exactly where it was, as the correction required. The tripwire is on **buffer depth**, against a real deaf peer: fire-and-forget fails it at `1547187 <= 6146`. Building it found the seam one level lower than specified, restored a warning that deleting the acknowledgement had deleted, and closed a handshake-window drop nobody had reported. See [§ The queue that had to prove it was a queue](delivery.md#the-queue-that-had-to-prove-it-was-a-queue-2026-09-11) |
 | ~~Evict a stalled client with an explicit close code, instead of rehydrating it~~ ✅ | [AG-23](decisions.md#ag-23) | **Built 2026-09-11 with the row above.** Close code 4001, the backlog dropped, and the webapp's existing `_scheduleReconnect` doing the rest — the evicted client comes back and re-baselines behind [AG-R-20](risks.md#ag-r-20)'s gate. The close frame goes out under a two-second `wait_for` and the transport is aborted after it, because a peer that will not read its socket will not answer a close handshake either |
 | ~~Gate the socket while the reconnect snapshot is in flight~~ ✅ | [AG-R-20](risks.md#ag-r-20) | **Built 2026-09-11**, the same day it was raised, because it is the prerequisite of the row above rather than a follow-up. `app-shell/event-gate.js` holds server pushes from the snapshot request until it lands, with four ways out — a wedged gate would be a louder fault than the quiet corruption it prevents. Two of its eleven tests passed while asserting nothing until mutation found them |
@@ -690,13 +695,18 @@ any candidate has to pass.
   [AG-R-18](risks.md#ag-r-18) and [AG-21](decisions.md#ag-21), which are otherwise the next pair.
   **Both were discharged on 2026-09-11, in that order, and migration step 1 is complete.** The rule has
   therefore stopped applying: nothing is half-built, so [AG-R-18](risks.md#ag-r-18) and
-  [AG-21](decisions.md#ag-21) are the next pair again.
+  [AG-21](decisions.md#ag-21) became the next pair again — **and were built the same day, also in that
+  order.** With both tracks clear, the next thing is
+  [R-14](../plan/risks.md#r-14--two-refreshes-race-for-one-single-use-refresh-token)'s lock, which
+  [AG-22](decisions.md#ag-22) needs in front of it.
 - **Both prerequisite pairs go together or not at all.** [AG-R-18](risks.md#ag-r-18) before
   [AG-21](decisions.md#ag-21), and [AG-R-20](risks.md#ag-r-20) before [AG-R-19](risks.md#ag-r-19)'s
   overflow policy. In both cases the second item silently breaks something the first item protects, and in
   both cases the prerequisite was found by consulting about a *different* question — which is the argument
-  for consulting before building rather than after. **The second pair is discharged**: the gate shipped
-  first, as the rule requires, and the sender followed it the same day. The first pair has not moved.
+  for consulting before building rather than after. **Both pairs are discharged**, each in its stated
+  order: the reconnect gate before the sender, and the brain-tree derivation before the private root.
+  The second ordering paid for itself immediately — the `config_root` argument that AG-R-18 adds is the
+  thing AG-21's spawn then has to pass, so reversing them would have meant writing the spawn twice.
 
 - **The capability descriptor late, but specified early.** It cannot be built until there are two
   engines to describe, but every phase from 3 onward must record which surfaces it could not serve —
