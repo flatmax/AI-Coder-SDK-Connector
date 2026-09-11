@@ -58,6 +58,9 @@ import {
 } from './toasts.js';
 import { scheduleReconnect, attemptReconnect } from './reconnect.js';
 import {
+  installEventGate, holdEvents, releaseEvents, disposeEventGate,
+} from './event-gate.js';
+import {
   getDialogRect, onHeaderPointerDown, onHandlePointerDown,
   onPointerMove, onPointerUp, toggleMinimize,
   onWindowResize, handleWindowResize, dialogInlineStyle,
@@ -425,6 +428,10 @@ export class AppShell extends JRPCClient {
 
   connectedCallback() {
     super.connectedCallback();
+    // Before `addClass`, so no server push can reach an ungated handler.
+    // The gate starts held and is released by `setupDone` once the snapshot
+    // those events are relative to has landed — see AG-R-20 in event-gate.js.
+    installEventGate(this);
     this.addClass(this, 'AcApp');
     const port = getWebSocketPort();
     const host = window.location.hostname || 'localhost';
@@ -671,6 +678,9 @@ export class AppShell extends JRPCClient {
       clearTimeout(this._reconnectTimer);
       this._reconnectTimer = null;
     }
+    // Drops the buffer without replaying it: reducers must not run against a
+    // tree that is going away.
+    disposeEventGate(this);
     super.disconnectedCallback();
   }
 
@@ -701,7 +711,17 @@ export class AppShell extends JRPCClient {
     // the repo name (for the browser tab title), the message
     // history (restored from the last session on the server),
     // selected files, streaming status, and init_complete.
-    this._fetchCurrentState();
+    // AG-R-20: hold server pushes until the baseline they are relative to
+    // has landed, then replay them in order. `finally` rather than `then`,
+    // because a snapshot that *fails* must open the gate too — a wedged gate
+    // would be a worse fault than the race it closes. `fetchCurrentState`
+    // happens to catch its own errors today, but the gate must not depend on
+    // that staying true; the trailing `catch` is only here so releasing does
+    // not leave a rejection unhandled.
+    holdEvents(this);
+    Promise.resolve(this._fetchCurrentState())
+      .finally(() => releaseEvents(this))
+      .catch(() => {});
 
     // Initial context-usage fetch so the capacity bar reflects
     // a resumed session's tokens from the first paint.

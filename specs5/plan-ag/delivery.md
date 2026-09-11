@@ -5998,3 +5998,192 @@ found that nobody was looking for. The rule that earned it is the one in the ski
 produces a plausible essay; several rounds produce a decision* — with the amendment this session adds:
 **and the probes are what make the rounds worth having.** Round one's best content was a claim it could
 not check.
+
+## The gate that had to have four ways out (2026-09-11)
+
+[AG-R-20](risks.md#ag-r-20) is built. It is the smaller half of the pair that migration step 1 needs, and
+it exists because the previous day's consultation went looking for a fault in
+[AG-R-19](risks.md#ag-r-19) and found a different one, already shipped, in code nobody had asked about:
+`setupDone` asks the server for `get_current_state` over a socket that is **already live**, so a reconnect
+landing mid-turn takes events 101 and 102, applies them, and then applies a snapshot describing the world
+as of event 100 over the top.
+
+`webapp/src/app-shell/event-gate.js` holds server-pushed events from the moment the snapshot is requested
+until it has landed, then replays them in arrival order. Four lines of wiring in `app-shell/index.js`
+install it, hold, release, and dispose. The whole webapp suite is green at 4519 tests, 174 of them in
+`app-shell`.
+
+### The seam was already there, in a library
+
+Thirty-seven handlers on the shell take server pushes. Gating them one at a time would have been
+thirty-seven edits and thirty-seven chances to forget the thirty-eighth. The single seam turned out to be
+a property of jrpc-oo rather than of this app: `ExposeClass.getAllFns` walks the **prototype** to decide
+what to advertise to the server, while `exposeAllFns` resolves `classToExpose[name]` **per call**. Those
+two facts together mean an own property placed on the instance wins every dispatch without changing the
+exposed RPC surface by a single name. The gate is thirty-seven `Object.defineProperty` calls in a loop, and
+the server cannot tell.
+
+That is a load-bearing assumption about somebody else's library, so `event-gate.test.js` asserts both
+halves of it directly — the own property exists, the prototype method is still a function, and they are
+not the same function. If a jrpc-oo upgrade moves the resolution to install-time binding, the gate stops
+working silently, and that test is what says so.
+
+### Held-by-default was wrong, and the tests said so first
+
+The gate was written to arm itself at installation, which broke thirteen existing tests that call handlers
+directly without ever connecting. The reflex is to fix the tests. The reflex was wrong: the race is
+between a snapshot *request* and the events that overtake it, so before a request exists there is no
+baseline for anything to race — and a gate armed at construction would hold, and then warn, on a page
+that never manages to connect at all. The tests were describing the design, not obstructing it. The gate
+now installs **open** and is held by `setupDone` immediately before it asks.
+
+### Four ways out, because a wedged gate is worse than the race
+
+A gate that can get stuck holds the UI dead, which is a louder fault than the quiet corruption it
+prevents. So the snapshot landing is only the intended exit, and three others exist: a snapshot that
+*fails*, a snapshot that never arrives (5 s), and a flood that outruns the buffer (500 events). Overflow
+**releases rather than drops**, on the reasoning that releasing early is no worse than the behaviour
+before the gate existed, while a dropped event is a permanently missing row that nothing reports — the
+failure class this register keeps rediscovering and naming the same way — **the thing was broken and
+nothing said so** ([AG-R-18](risks.md#ag-r-18) is the most recent).
+
+### Two of the eleven tests passed while asserting nothing
+
+Every exit was checked by breaking the implementation and confirming the right test failed — the same
+"verified by reverting rather than by reading" discipline step 1's consultation half got. Four mutations,
+four expected failures. Except two of them did not fail, and both times the test was at fault rather than
+the mutation:
+
+- **The throwing-handler test made a DOM listener throw.** jsdom catches a listener that throws and
+  reports it as an unhandled error, so it never reached the gate's `try` at all. The test passed, and
+  would have passed with the `try` deleted. What actually needs isolating is the **handler body**, so the
+  test now runs against a four-line plain object whose handler throws, rather than against the shell whose
+  handlers all end in `dispatchEvent`.
+- **The failed-snapshot test passed with `.then` in place of `.finally`.** `fetchCurrentState` catches its
+  own errors, so the promise resolves either way and the comment claiming `finally` was load-bearing was
+  decoration. The gate should not depend on the internals of a function three files away staying the way
+  they are today: the wiring gained a trailing `.catch(() => {})` so releasing cannot leave a rejection
+  unhandled, and a second test stubs `_fetchCurrentState` to reject outright. `.then` now fails it.
+
+Both are the same mistake in different clothes — a test that exercises the *environment's* error handling
+and reads like it exercised the code's. Neither would have been found by reading the test, and both were
+found in about a minute by breaking the thing it claims to protect. That is the argument for mutation as
+a routine step rather than a special occasion: the cost is a `cp`, a `sed`, and a test run.
+
+### What is next
+
+[AG-R-19](risks.md#ag-r-19) itself — one sender task per client over a bounded shared ring buffer — which
+finishes migration step 1. Its overflow policy tells a fallen-behind client to rehydrate, which is exactly
+the reconnect this gate now makes safe. The cheaper version of this gate is still unbuilt and still
+correct: once the cursor exists, the snapshot can carry the sequence number it was taken at and the client
+can drop anything at or below it. The gate stays regardless, because something has to make the *first*
+snapshot safe.
+
+## Five probes, and the design that came back different (2026-09-11)
+
+A second consultation on [AG-R-19](risks.md#ag-r-19), run before building it rather than after. Nothing
+shipped from this session except a corrected comment; what it produced was measurement, and the
+measurement changed the design in four places, killed one of my own assumptions, refuted a line already
+shipped in `bridge.py`, and found that two mechanisms on this plan would have defeated each other.
+
+### The justification was wrong, and the design survived it
+
+The plan of record said the master path wants a serialised per-client sender **because it has an in-order
+delivery contract that fire-and-forget would break**. Reading `websockets` 16.1.1 rather than remembering
+it says otherwise: `send(str)` never suspends before `transport.write()`. The `send_in_progress` guard is
+set only for fragmented iterables; `send_context()` reaches its `yield` with no await; and `drain()` — the
+only await — runs *after* the bytes are in the buffer. `create_task` is FIFO, so fire-and-forget preserves
+order. Measured against a peer that never read a byte: 2000 frames, 1996 of them written while the
+transport was paused, **order perfect**.
+
+The same probe found the thing that does matter. The write buffer reached **8,040,846 bytes against a
+4 KiB high-water mark**, because the high-water mark only flips a flag — `transport.write()` never
+refuses. A stalled browser costs unbounded memory *below* the application layer, where no queue of mine
+can see it. Re-run with one task awaiting each send: **4,022 bytes**. A factor of two thousand.
+
+So the sender task is right, and the reason recorded for it was wrong. What it buys is backpressure
+propagation: a sender suspended in `drain()` cannot issue the next write, which forces the backlog up into
+a queue that can have a policy. Ordering comes along free and is not the argument.
+
+### The assumption I was most confident in was the one that died
+
+I had specified a single shared ring buffer read by per-client cursors, reasoning that the payloads are
+identical across clients so storing them once is cheaper. Python already stores them once — a deque holds
+a reference. Measured: 10 MB of payload, and five per-client deques cost **46,856 bytes more than one
+shared ring, 0.47%**, with an identity check confirming every deque holds the same string object.
+
+Per-client deques, then, and the shared ring goes. It would have bought nothing and cost the thing the
+whole entry exists to remove: a shared ring pins every entry until the slowest cursor passes it, which
+reintroduces in memory exactly the coupling AG-R-19 removes in time.
+
+### A comment this repo shipped, refuted by the probe it asked for
+
+`bridge.py`'s `_drain` records why it cancels nothing on expiry: *"a send interrupted mid-`await` is a
+half-written frame on a shared socket."* Given where the suspension point actually is, that cannot be
+true, and the first attempt to prove it failed honestly — the kernel absorbed all 60 KB on loopback, so
+the sender never blocked and the test measured nothing. Re-run with the pipe pre-filled until
+`ws.paused` was True: sender genuinely suspended, `CancelledError` raised, **403 frames parsed, zero
+malformed**, and the cancelled frame's full 60,004 bytes reached the peer.
+
+The decision stands and the reason is now the opposite one: cancelling cannot corrupt the stream, but it
+cannot **retract** the frame either. A caller that cancels and concludes "not delivered" is wrong — the
+frame arrives anyway, later. Cancelling buys nothing and costs the illusion of having withdrawn
+something. The docstring now says that, and says it was measured.
+
+### The finding neither of us was looking for
+
+The reviewer warned that rehydrate-on-overflow could be a feedback loop, on the general grounds that a
+snapshot costs more than the events it replaces. It had no number for "more". The number is
+**24.7 MB** — the largest real session on this machine, and the snapshot embeds the full transcript.
+
+That implicates [AG-R-20](risks.md#ag-r-20), shipped the same morning. The gate holds live events until
+the baseline lands, with a 5 s deadline and a 500-event ceiling so it cannot wedge. Against a
+rehydrate-on-overflow policy those stop being emergency exits and become the routine path: the deadline
+expires while a 24.7 MB snapshot crawls down the socket, the gate releases, 500 buffered events apply to
+the **pre-snapshot** baseline, and the snapshot then lands on top of them. **Early release is worse than
+no gate in that case** — it interleaves two inconsistent views of the world instead of overwriting one
+with the other. The sentence recorded as its justification, *"releasing early is no worse than the
+behaviour before this gate existed"*, was written for the ordinary reconnect and is false for the case the
+overflow policy would have created. I had built two mechanisms that defeat each other, on the same day,
+without noticing.
+
+### Where the measurement went further than either argument
+
+The reviewer's account of the failure was a divergent loop — a client falls behind, rehydrates, falls
+further behind, rehydrates again. The probe says it is simpler and worse than that. Parse cost is not the
+problem: `JSON.parse` of the 24.7 MB transcript is **43 ms** and `JSON.stringify` **71 ms**, which refutes
+the reviewer's specific prediction that a >100 ms main-thread freeze would starve socket reads. On healthy
+loopback the deadline holds comfortably.
+
+The failure is entirely in transfer, and only in one case — **and in that case transfer is not slow, it is
+zero**. Overflow is *defined* as the client not draining its socket; that is the only thing that fills the
+queue. So the channel the snapshot would travel down has zero throughput at the moment the snapshot is
+needed. It is not a loop that diverges under load. It is a cure delivered through the blockage it is
+curing, and it fails at any snapshot size and any link speed. That is why
+[AG-23](decisions.md#ag-23) records eviction as a decision rather than a tuning parameter: there is no
+deadline long enough, because the denominator is zero.
+
+### What the rules refused
+
+Asked whether the per-client queue justifies coalescing `streamChunk`, prioritising `permissionRequest`
+ahead of backlogged traffic, and shedding low-value events under congestion, the reviewer initially said
+yes and listed all three as reasons to prefer a sender task. Put against this codebase's two standing
+rules — no consumer may be load-bearing, and silent loss is worse than loud degradation — it withdrew all
+three, and it was right to. Prioritising a `permissionRequest` ahead of the `toolUse` that motivated it
+shows a dialog about something the user has not been shown, which is the same causal inversion AG-R-19
+already corrects on the engine side. Coalescing is lossless only if every reducer is append-only, which is
+unverified. Shedding is silent loss by definition. The queue is a strict FIFO, and the sender earns its
+place on the 4,022-versus-8,040,846 measurement alone.
+
+### The protocol, again
+
+Five probes, two of which failed to measure anything on the first attempt and had to be rebuilt — the
+deaf client that wasn't deaf enough, and the cancellation that happened after the send had already
+completed. Both failures were quiet: they printed a plausible result. The habit that caught them is the
+same one that caught two empty tests this morning — break the thing the measurement claims to detect, and
+check that the measurement notices. A probe that cannot fail is an essay with numbers in it.
+
+Two rounds converged, and the reviewer stated plainly where it had changed its mind. Of its eight
+substantive claims, five were confirmed by measurement, one was refuted by measurement (the parse
+freeze), and two were withdrawn under the standing rules. That ratio is the argument for the protocol:
+**not that the reviewer is right, but that it is wrong in checkable ways.**

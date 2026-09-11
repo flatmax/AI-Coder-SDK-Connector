@@ -1891,3 +1891,71 @@ lock rather than becoming an IPC design.
   environment, which is what leaks to every shell child; a `0600` file inside a `0700` root is the better
   of the two, and inside a consultation the `StaticPolicy` denies the file tools that could read it. That
   is an argument, not a measurement.
+
+<a id="ag-23"></a>
+
+## AG-23 — A stalled client is evicted, not rehydrated **(measured 2026-09-11, unbuilt)**
+
+**The question.** [AG-R-19](risks.md#ag-r-19)'s sender needs an overflow policy: what happens to a client
+whose queue fills because it is not draining its socket. The plan of record said *tell it to rehydrate*,
+on the reasoning that a dropped event is a permanently missing row nothing reports, whereas a fresh
+snapshot is self-correcting. [AG-R-20](risks.md#ag-r-20)'s gate was built the same morning specifically to
+make that rehydration safe.
+
+**The answer: neither drop nor rehydrate — close the socket with an explicit code and let the existing
+reconnect path do it.** Rehydration over the event channel is not a policy that degrades under load. It
+is incoherent, and the measurement is what makes that plain.
+
+**Why it cannot work, stated as a construction rather than as a risk.** Overflow is *defined* as the
+client not consuming its socket — that is the only thing that fills the queue, since
+`transport.write()` never refuses and the serialised sender only blocks when `drain()` does. So the
+channel through which the snapshot would be delivered has, by construction, **zero throughput at the
+moment the snapshot is needed**. Sending a 24.7 MB cure down the blockage it is curing is not a loop that
+diverges; it is a loop that never starts. This holds at any snapshot size and any link speed, which is
+why it is recorded here as a decision rather than as a tuning parameter.
+
+**The two mechanisms would have defeated each other.** The gate holds live events until the snapshot
+lands, with a 5 s deadline and a 500-event ceiling so it cannot wedge. Against a rehydrate-on-overflow
+policy those escape hatches stop being emergency exits and become the routine path: the deadline expires
+while a snapshot crawls down a socket nobody is reading, the gate releases, and 500 buffered events apply
+to the *pre-snapshot* baseline — after which the snapshot lands and clobbers them. **Early release is
+worse than no gate at all in that case**, because it interleaves two inconsistent views of the world
+instead of merely overwriting one with the other. The recorded justification for the escape hatches —
+"releasing early is no worse than the behaviour before this gate existed" — was sound for the ordinary
+reconnect it was written for and false for the case this policy would have created.
+
+**Measured, so the numbers are not guessed.** `JSON.parse` of a real 24.7 MB transcript takes **43 ms** in
+V8, and `JSON.stringify` **71 ms** — so parse cost is *not* the problem, and a reviewer's prediction that a
+>100 ms main-thread freeze would starve socket reads is refuted. On healthy loopback the gate's 5 s
+deadline holds comfortably. The failure is entirely in the transfer, and only in the one case where
+transfer has stopped. Session sizes on this machine: 24.7 MB largest, 382 sessions totalling 345 MB.
+
+**What eviction gets right that the alternatives do not.**
+
+- **It keeps the rule.** No consumer may be load-bearing. A client that has stopped reading has already
+  failed the contract; keeping it attached and attempting a repair in-band spends server memory on a peer
+  that is not listening.
+- **It is loud.** A close with an explicit application code and a client banner is exactly the
+  "loud degradation over silent corruption" this register keeps asking for. A client thrashing between
+  rehydrations is the other thing — broken, with nothing saying so.
+- **It reuses a path that already exists and is already gated.** Reconnect tears down client state,
+  opens a fresh socket, requests the baseline behind [AG-R-20](risks.md#ag-r-20)'s gate, and resumes. There
+  is no mid-stream interleaving of deltas and snapshots, and therefore no split-brain state space to
+  reason about. **This is what the gate is for, and eviction is what makes the gate's escape hatches
+  emergency exits again rather than the common case.**
+
+**A consequence for the sender: the queue is a strict FIFO and nothing in it may be clever.** A reviewer
+argued the per-client queue justifies coalescing `streamChunk`, prioritising `permissionRequest` ahead of
+backlogged traffic, and shedding low-value events under congestion. All three are forbidden here, and the
+reviewer withdrew them when the rules were put to it. Prioritising a `permissionRequest` ahead of the
+`toolUse` that motivated it shows a dialog asking about something the user has not been shown —
+the same causal inversion [AG-R-19](risks.md#ag-r-19) already corrects on the engine side. Coalescing is
+only lossless if every reducer is append-only, which is unverified. Dropping is silent loss by
+definition. **The sender earns its place on transport grounds alone** — Probe B below — and does not need
+queue acrobatics to justify itself.
+
+**Also settled: the acknowledgement goes, rather than being bounded.** Server-to-client events become
+JSON-RPC *notifications* — no `id`, no reply, no future, and no 120 s `timeout_handler` task per event.
+Nothing reads the result today, delivery confirmation at the application layer confirms only that a
+browser's event loop ran, and liveness is already available twice over: the websocket's own ping/pong, and
+the write-buffer depth that Probe B shows flags a stalled peer within ~19 frames.

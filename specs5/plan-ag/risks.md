@@ -1623,6 +1623,70 @@ A third tripwire, added by the correction above: a `subagentEvent(terminal)` tha
 must reach a client **before** the `permissionResolved` it causes. That is the assertion which fails if
 anyone moves engine bookkeeping ahead of the enqueue again.
 
+**Correction, 2026-09-11 (second consultation): ordering is not what the sender buys, and the shared ring
+is wrong.** The entry above justified a serialised per-client sender by saying the master path has an
+in-order delivery contract that fire-and-forget would break. **That is false, and it is now measured.**
+The mitigation survives; its stated reason does not.
+
+In websockets 16.1.1, `await ws.send(str)` runs from task start through `transport.write()` **without a
+single suspension point**. The `send_in_progress` guard is set only in the fragmented-iterable branches,
+never for a `str`; `send_context()` reaches its `yield` with no await; and the one await —
+`await self.drain()` — sits *after* `send_data()` and suspends only when `self.paused`. Since
+`create_task` is FIFO, fire-and-forget preserves wire order even against a peer that never reads a byte.
+
+    Probe A — 2000 concurrent sends of ~4 KB to a deaf peer, limits high=4096/low=2048:
+        frames written before the stall bit:  2000/2000
+        writes issued while transport paused: 1996
+        peak transport write-buffer bytes:    8,040,846   (high-water 4096)
+        write order == create_task order:     True
+
+**What the sender actually buys is backpressure propagation, and the same probe shows why that matters
+more than ordering did.** The high-water mark does not bound anything — it only flips a flag;
+`transport.write()` never refuses — so a stalled browser costs unbounded memory *below* the application
+layer, where no application-level buffer can see it. A single sender awaiting each send cannot issue the
+next write while suspended in `drain()`, which forces the backlog up into a queue that can have a policy:
+
+    Probe B — identical conditions, one task awaiting each send before the next:
+        sends completed before the peer stalled the sender: 19/2000
+        peak transport write-buffer bytes:                  4,022
+        (concurrent shape, same conditions:             8,040,846)
+
+A factor of two thousand, and it is the whole argument for the design. **The in-order contract is
+preserved by the sender for free, but it is not the reason to build it.**
+
+**The shared ring buffer was a false economy.** The entry above specified one `deque(maxlen=…)` read by
+per-client cursors, on the grounds that the payloads are identical across clients and storing them once is
+cheaper. Python already stores them once: a deque holds a *reference*, so N queues cost N pointers, not N
+payloads.
+
+    Probe C — 1000 frames of 10 KB, tracemalloc:
+        payload actually allocated:                  10,000,000 bytes
+        1 shared deque of 1000 refs:                      9,864 bytes
+        +5 per-client deques on top:                     46,856 bytes
+        ratio of 5-deque overhead to payload:            0.0047x
+        identity check — same object in every deque:      True
+
+0.47% for complete lifecycle isolation. **Per-client deques, then** — a stalled client's queue fills,
+overflows and is evicted without any cursor shared with anyone, which removes in memory the coupling this
+entry removes in time. A shared ring would have pinned every entry until the slowest cursor passed it.
+
+**The overflow policy moved out of this entry entirely.** "Tell the client to rehydrate" is not a policy
+that degrades badly; it is incoherent, because overflow is *defined* as the client not draining its
+socket, so the channel the snapshot would travel down has zero throughput at the moment it is needed. It
+is recorded as [AG-23](decisions.md#ag-23) — evict, do not rehydrate — together with the finding that
+this policy and [AG-R-20](#ag-r-20)'s gate would have defeated each other, and the consequence that the
+queue must be a strict FIFO with no coalescing, no prioritisation and no shedding.
+
+**And the acknowledgement is deleted rather than bounded.** Events become JSON-RPC notifications: no
+`id`, no future, no 120 s `timeout_handler` task per event. Liveness comes from the websocket's ping/pong
+and from write-buffer depth, which Probe B shows flags a stalled peer within about nineteen frames.
+
+**A tripwire this correction adds.** A test that issues two sends fire-and-forget and asserts wire order
+would pass today and prove nothing, because ordering holds for reasons unrelated to the design. The test
+that bites is on **buffer depth**: stall a peer, push more than the queue bound, and assert that
+`transport.get_write_buffer_size()` stays within one frame of the low-water mark and that the client is
+evicted with the documented close code — not that the frames arrived in order.
+
 <a id="ag-r-20"></a>
 
 ## AG-R-20 — A reconnecting browser applies live events against a baseline it has not received yet
@@ -1661,3 +1725,62 @@ client drops anything at or below it.
 **Tripwire.** A webapp test that connects, holds the `get_current_state` response open, delivers two
 events, then releases the response — and asserts both events survive in the rendered state rather than
 being overwritten by the baseline.
+
+**Built 2026-09-11**, in `webapp/src/app-shell/event-gate.js` and four lines of wiring in
+`app-shell/index.js`. See
+[§ The gate that had to have four ways out](delivery.md#the-gate-that-had-to-have-four-ways-out-2026-09-11).
+Three things differ from the mitigation as written above, and each is a correction rather than a shortcut:
+
+- **The gate holds from the snapshot *request*, not from socket-open.** "Buffer from socket-open" was
+  tried first and was wrong: until a request has been made there is no baseline for anything to race, and
+  a gate armed at construction holds — and then warns — on a page that never manages to connect at all. It
+  also broke thirteen existing tests that call handlers directly, which is the tree saying the same thing.
+- **The seam is own-property wrappers over the prototype methods**, one per server-pushed handler. jrpc-oo's
+  `ExposeClass` resolves `classToExpose[name]` per call, so an own property wins every dispatch, while it
+  enumerates the *prototype* when deciding what to expose — so all 37 handlers are gated in one place and
+  the RPC surface is unchanged. `event-gate.test.js` asserts both halves of that, because the gate silently
+  stops working if either changes.
+- **There are four ways out, not one.** The snapshot landing is the intended one; a snapshot that *fails*,
+  a snapshot that never arrives (5 s), and a flood that outruns the buffer (500 events) are the other
+  three. Overflow **releases rather than drops**: releasing early is no worse than the behaviour before the
+  gate existed, whereas a dropped event is a permanently missing row that nothing reports — which is the
+  failure class this whole register keeps hitting.
+
+**What the tripwire caught that reading would not have.** Each of the four exits was mutation-tested by
+breaking the implementation and confirming the right test failed. Two did not bite on the first attempt
+and both were the test's fault:
+
+- The throwing-handler test made a **DOM listener** throw, and jsdom reports that as an unhandled error
+  without it ever reaching the gate's `try`. It passed while asserting nothing. Rewritten against a plain
+  host whose handler body throws.
+- The failed-snapshot test passed with `.then` as well as `.finally`, because `fetchCurrentState` catches
+  its own errors — so the gate was leaning on a property of a function three files away. The wiring now
+  carries a trailing `.catch(() => {})` and a second test stubs `_fetchCurrentState` to reject outright,
+  which is what makes `finally` load-bearing and checkable.
+
+The remaining unbuilt half is the cheap version named above: once AG-R-19's cursor exists, the snapshot can
+carry the sequence number it was taken at and the client can drop anything at or below it, with no
+buffering. The gate stays either way — it is what makes the cursor's *first* snapshot safe.
+
+**A condition on the escape hatches, added 2026-09-11 after the second [AG-R-19](#ag-r-19) consultation.**
+The 5 s deadline and 500-event ceiling are safe *because* [AG-23](decisions.md#ag-23) evicts a stalled
+client rather than rehydrating it. Under the rehydrate-on-overflow policy this entry was originally
+written to support, they would have stopped being emergency exits and become the routine path: the
+deadline expires while a 24.7 MB snapshot crawls down a socket nobody is reading, the gate releases, 500
+buffered events apply to the **pre-snapshot** baseline, and the snapshot then lands on top of them. That
+is strictly worse than having no gate, because it interleaves two inconsistent views of the world instead
+of overwriting one with the other — and the sentence recorded above, *"releasing early is no worse than
+the behaviour before this gate existed"*, would have been false. It is true for the ordinary reconnect the
+gate was built for, and it stays true only while overflow means eviction.
+
+**So the two are coupled in both directions, and the README's ordering note now understates it.** AG-R-20
+is a prerequisite of AG-R-19's overflow policy, as recorded; but AG-R-19's overflow policy is also a
+*constraint on AG-R-20*, and reintroducing rehydration without revisiting these two constants would
+silently convert this gate into a state scrambler. Anyone raising the deadline to accommodate a slow
+snapshot should read [AG-23](decisions.md#ag-23) first: the answer is not a longer deadline, because the
+throughput available in that case is zero at any deadline.
+
+**Measured, so the constants are not guesses.** `JSON.parse` of a real 24.7 MB transcript is **43 ms** in
+V8 and `JSON.stringify` is **71 ms**, so a reviewer's prediction that main-thread parse cost would starve
+socket reads is refuted — the gate's budget is spent entirely on transfer, and on healthy loopback a
+full-size snapshot clears well inside 5 s.

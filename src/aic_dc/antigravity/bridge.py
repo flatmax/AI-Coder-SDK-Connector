@@ -382,12 +382,25 @@ class ConsultantBridge:
         Every caller runs inside the tool call the model is blocked on.
 
         **Nothing is cancelled on expiry, and that is the deliberate half.**
-        A send interrupted mid-``await`` is a half-written frame on a shared
-        socket, which is worse for the next consultation than a late frame
-        is for this one; the tasks stay anchored in ``_tasks`` and finish or
-        fail on their own time. What expiry gives up is only the guarantee
-        about *order*, and it is logged, because a tab that settled early
-        is indistinguishable from a model that stopped talking.
+        The original reason recorded here was that a send interrupted
+        mid-``await`` leaves a half-written frame on a shared socket.
+        **Measured 2026-09-11: that is false, and the real reason is
+        better.** In websockets 16.1.1 a ``send(str)`` runs to
+        ``transport.write()`` with no suspension point; the only await,
+        ``drain()``, comes after the bytes are already in the transport
+        buffer. Cancelling a genuinely suspended send left 403 frames
+        parsing cleanly with none malformed, and the cancelled frame's full
+        60,004 bytes still reached the peer.
+
+        So cancelling cannot corrupt the stream — but it cannot *retract*
+        the frame either, which is why it stays forbidden: a caller that
+        cancels and concludes "not delivered" would be wrong, and the frame
+        arrives anyway, later. Cancelling would buy nothing and cost the
+        illusion of having withdrawn something. The tasks stay anchored in
+        ``_tasks`` and finish or fail on their own time. What expiry gives
+        up is only the guarantee about *order*, and it is logged, because a
+        tab that settled early is indistinguishable from a model that
+        stopped talking. See ``specs5/plan-ag/risks.md`` § AG-R-19.
         """
         if not pending:
             return
