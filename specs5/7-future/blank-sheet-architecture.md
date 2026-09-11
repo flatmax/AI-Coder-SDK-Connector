@@ -220,7 +220,7 @@ change.
 
 | step | size | what the costing turned on |
 |---|---|---|
-| 1 — every sink an observer | 2–3 d | The shipped bridge fix is two-thirds of the test set already. **Consultation half done 2026-09-11**; the master-turn half is [AG-R-19](../plan-ag/risks.md#ag-r-19) |
+| 1 — every sink an observer | ~~2–3 d~~ 4–6 d | The shipped bridge fix is two-thirds of the test set already. **Consultation half done 2026-09-11**; the master-turn half is [AG-R-19](../plan-ag/risks.md#ag-r-19), and **revised upward the same day** when consulting it added [AG-R-20](../plan-ag/risks.md#ag-r-20) as a prerequisite |
 | 2 — a Claude consultant through `query()` | 3–5 d | Includes [R-14](../plan/risks.md#r-14--two-refreshes-race-for-one-single-use-refresh-token)'s lock, which it must not ship without |
 | 3 — inline rendering as the default surface | 3–5 d | Webapp work, and the read-only tab it replaces already exists |
 | 4 — reach the consultant from `agy` | 4–6 d | **Down.** A spawned stdio server and a third credential holder were both deleted by measurement — see below |
@@ -249,9 +249,16 @@ roughly 40% of the estimate**. A costing exercise that only ever adds is not mea
    connected browser through an `asyncio.gather` and sequences engine bookkeeping behind the broadcast.
    Measured and graduated to [AG-R-19](../plan-ag/risks.md#ag-r-19), because it is a hazard in shipped
    code and nothing may depend on this layer. **The bridge's fix is the wrong fix there** — the master
-   path has the in-order contract this step names as a must-not-break, so it wants an outbound queue per
-   client rather than a bounded wait. That is the remaining half of this step, and the estimate above
-   covered it.
+   path has the in-order contract this step names as a must-not-break, so it wants a serialised sender
+   per client rather than a bounded wait. The mechanism is specified in AG-R-19 and is deliberately not
+   restated here; **it changed on 2026-09-11** after a consultation refuted part of it, which is the
+   argument for keeping mechanism out of this layer.
+
+   **The estimate above no longer covers it.** Step 1 was costed at 2–3 d when this half looked like a
+   queue; it has since acquired a prerequisite ([AG-R-20](../plan-ag/risks.md#ag-r-20), a webapp change
+   rather than a server one) and a shape with a cursor in it. Call the remainder 3–4 d and the step 4–6 d
+   in total. Recorded rather than quietly absorbed: *a costing exercise that only ever adds is not
+   measuring*, and one that never adds is not either.
 2. **A Claude consultant through `query()`.** Headless resolver, `max_turns` above 2, and
    `token_refresh.ensure_fresh()` serialised first — a consultation adds a credential consumer, so the
    lock is a prerequisite rather than a follow-up. *Must not break:* the master engine, and no mutation

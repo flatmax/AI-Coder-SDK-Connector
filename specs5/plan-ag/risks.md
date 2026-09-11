@@ -1547,6 +1547,24 @@ So the stall is **bounded at 120s per event, not unbounded** — the difference 
 deadlock, and the reason this is moderate rather than severe. It is also 120s of a turn that has already
 produced its answer, which no user will read as anything but a hang.
 
+**What the turn is actually waiting for, and it is not the network.** Measured a round into the
+consultation below. `JRPC2.call` is a *synchronous* `def`: it `create_task`s the transmit and a timeout
+handler and returns immediately, so **the socket write is already fire-and-forget**. The await comes from
+`JRPCCommon.setup_fns`'s `remote_call` wrapper, which creates a future, calls that synchronous `call`, and
+awaits the future — and the future resolves only when the *browser's JSON-RPC reply* arrives. Every client
+handler is a thin re-dispatcher ending `return true`, whose value `call_all_remotes` packs into a
+`{uuid: result}` dict that neither `_make_real_callback` nor `_dispatch` ever reads.
+
+So the master turn blocks for up to 120s **waiting for an acknowledgement nobody consumes**, and the bound
+is a browser-JS-thread bound rather than a network one.
+
+The sting is in the second half. **Today's in-order delivery is an accident of that round-trip**: because
+`remote_call` awaits the reply, only one `transmit` is ever in flight per remote, so `await ws.send(msg)`
+is serialised by the waiting rather than by design. Dropping the await without putting a serialiser in its
+place gives N concurrent `create_task(_transmit_message(...))` racing on one websocket, which breaks the
+exact contract the migration order names as a must-not-break. *The acknowledgement is useless, and it is
+also the only thing currently holding the ordering up.*
+
 **The part worth more than the latency.** Engine state is sequenced *behind* the browser. `_dispatch`
 puts `_sweep_ended_subagent` and the footer after the broadcast on purpose, and the reason given is
 sound — a subagent that ended with a dialog open needs the terminal status to explain the denial that
@@ -1555,15 +1573,91 @@ conflation named in [`../7-future/blank-sheet-architecture.md`](../7-future/blan
 one mechanism serving a presentation consumer and a data consumer, with the presentation consumer's
 condition in front. The empty consultation tab is what that shape looks like when it fails.
 
+**Correction, 2026-09-11: engine state must NOT move ahead of the enqueue.** This entry said it should,
+"where it never needed a browser at all". That sentence was wrong, and a consultation caught it before it
+was built — see [`delivery.md` § A consultation that refuted a line already committed](delivery.md#a-consultation-that-refuted-a-line-already-committed-2026-09-11).
+`_dispatch` is **re-entrant**: dispatching one event synchronously causes the dispatch of another. Traced
+end to end, `_dispatch(subagentEvent, terminal)` → `_sweep_ended_subagent` → `permissions.cancel_for_agent`
+→ `_deny_unanswered` → `_announce` → `_broadcast(Event("permissionResolved", …))`. Bookkeeping is an event
+*producer*, so running it before the enqueue would put the denial in the queue **ahead of the termination
+that explains it** — a browser showing a dialog denied for a subagent that still appears to be running,
+which is the precise failure the after-the-broadcast placement exists to prevent.
+
+The resolution is better than the reordering would have been: **leave the statement order exactly as it
+is.** Once `_dispatch` enqueues instead of awaiting, bookkeeping no longer waits on a browser *because
+nothing does*. The conflation named above dissolves without moving a line, and causal order is preserved
+for free, since the cause is enqueued before the bookkeeping that produces the consequence runs.
+
 **Mitigation, and it is deliberately not the one used on the bridge.** The bridge could
 schedule-and-briefly-wait because a consultation's frames have no ordering contract beyond *terminal
 last*. The master path has one — in-order websocket delivery, which the migration order names as a
-must-not-break — so fire-and-forget per event is wrong here. What fits is an **outbound queue per
-client**: the pump appends and returns, one consumer task per remote drains in order, and a client that
-stops reading grows its own queue and is dropped on a bound rather than holding the turn. Engine state
-moves ahead of the enqueue, where it never needed a browser at all.
+must-not-break — so fire-and-forget per event is wrong here. What fits is **one sender task per client,
+over a bounded shared ring buffer read by a per-client cursor**:
+
+- One sender per socket is what preserves order, and it must `await ws.send` **only** — never the RPC
+  reply, which is the discarded acknowledgement measured above.
+- The backlog lives once in a `deque(maxlen=…)` rather than once per client, so memory is O(buffer)
+  rather than O(clients × buffer).
+- A client whose cursor falls off the tail is **told to rehydrate**, not dropped. `get_current_state`
+  exists on both services and already carries `pending_permissions`, so re-baselining is a supported
+  operation rather than a loss. Overflow becomes cursor arithmetic instead of an emergency disconnect
+  issued during an active send — which matters, because a wedged `ws.send` cannot be cancelled safely and
+  `ws.close()` on a wedged socket hangs for the same reason the send does.
+- Bound the buffer by **bytes as well as frames**. A `turnUsage` payload is a few hundred bytes and a tool
+  result can be megabytes, so a frame count is not a memory bound.
+- The rehydrate path needs [AG-R-20](#ag-r-20) first, or a routine rehydrate walks into a race that is
+  rare today.
+
+**What is settled by measurement, and what is only settled by argument.** Everything above the mitigation
+is measured. The ring buffer is not: it came from a reviewer arguing against the per-client queues this
+entry originally specified, and it won on memory and on overflow-as-arithmetic. The shape above is a
+synthesis of both positions that the consultation has **not** attacked, because it stopped at two rounds.
+That is where to look first if this proves awkward to build.
 
 **Tripwire.** Not a unit test on `_dispatch` — an event-loop test on the artefact: a turn against a sink
 that never returns must complete, and **a second client must receive its events at full speed while the
 first is stalled**. The second half is the one that would have caught `gather`, and nothing in the suite
 asserts it today.
+
+A third tripwire, added by the correction above: a `subagentEvent(terminal)` that sweeps an open dialog
+must reach a client **before** the `permissionResolved` it causes. That is the assertion which fails if
+anyone moves engine bookkeeping ahead of the enqueue again.
+
+<a id="ag-r-20"></a>
+
+## AG-R-20 — A reconnecting browser applies live events against a baseline it has not received yet
+
+**Severity: moderate. Likelihood: every reconnect that overlaps a running turn, and it corrupts quietly.**
+**Raised 2026-09-11**, by the [AG-R-19](#ag-r-19) consultation rather than by the risk it was consulted
+about. This is shipped behaviour and is independent of anything AG-R-19 changes — which is why it is here
+and not in layer 7.
+
+`setupDone` runs on every connect, first or subsequent, and ends by calling `_fetchCurrentState()`. That
+is an RPC round-trip, and the websocket is already live while it is in flight. So a reconnect that lands
+mid-turn takes events **before** the snapshot they are relative to:
+
+1. the socket connects and the client's handlers are installed;
+2. the client asks for `get_current_state`;
+3. the server, still mid-turn, emits events 101 and 102, and the client's reducers apply them at once;
+4. the snapshot resolves — describing the world as of event 100 — and is applied over the top.
+
+There is no gate. `state-fetch.js` does `const raw = await fn()` and applies the result, with nothing
+suppressing or buffering inbound events while the request is outstanding. Whether the overwrite corrupts
+anything depends on each component's reducer — one keyed by id will probably survive it, one that appends
+will not — and **that half is untraced**, which is the honest limit of this entry.
+
+**Why it is worth recording now rather than when it bites.** It is latent today because reconnects are
+rare: a restarted server, or a refresh. [AG-R-19](#ag-r-19)'s mitigation makes a rehydrate the *routine*
+answer to a slow client, turning a rare race into a regular one. **So the gate is a prerequisite of
+AG-R-19's overflow policy rather than a follow-up to it** — the same relation [AG-R-18](#ag-r-18) has to
+[AG-21](decisions.md#ag-21), and the second time on this plan that a prerequisite was found by consulting
+about something else.
+
+**Mitigation.** Buffer inbound events in the shell from socket-open until `_fetchCurrentState()` resolves,
+then apply the snapshot and replay the buffer. Once AG-R-19's cursor exists there is a cheaper version
+that does not need buffering at all: the snapshot carries the sequence number it was taken at, and the
+client drops anything at or below it.
+
+**Tripwire.** A webapp test that connects, holds the `get_current_state` response open, delivers two
+events, then releases the response — and asserts both events survive in the rendered state rather than
+being overwritten by the baseline.

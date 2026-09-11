@@ -5900,3 +5900,101 @@ being a deadlock, as [AG-R-19](risks.md#ag-r-19) — and deliberately not fixed 
 path has an ordering contract the consultation path does not, so the bridge's answer to a stalled
 consumer is the wrong answer there. It needs an outbound queue per client, which is its own change with
 its own tests, on the riskiest path in the app.
+
+*Superseded the same day, and left standing as the record of what was believed when this was written: a
+queue is not quite the shape, and part of what this paragraph implied about ordering was wrong. The
+section immediately below is the correction.*
+
+## A consultation that refuted a line already committed (2026-09-11)
+
+The consultation half of migration step 1 shipped in the section above, and the master-turn half was
+recorded as [AG-R-19](risks.md#ag-r-19) with a mitigation written into it. Before building that
+mitigation it went to a second opinion over two rounds, and **the first round refuted a sentence that
+was already committed to this plan.**
+
+The sentence was the last line of AG-R-19's mitigation: *"Engine state moves ahead of the enqueue, where
+it never needed a browser at all."* It reads as obviously right — bookkeeping does not need a browser, so
+why would it wait behind one. The reviewer called it a causal inversion and said the bookkeeping methods
+are re-entrant event producers. It could not check that claim, having no repository access; this side
+could, and it is true:
+
+```
+_dispatch(subagentEvent, terminal=True)
+  → _sweep_ended_subagent(payload)
+    → permissions.cancel_for_agent(agent_id)
+      → _deny_unanswered(pending, "cancelled", reason)
+        → _announce(...)
+          → _broadcast(Event("permissionResolved", {...}))
+```
+
+Dispatching one event synchronously causes the dispatch of another, so the relative order the browser
+sees is decided by whether bookkeeping runs before or after the enqueue. Ahead of it, the denial is
+queued before the termination that explains it, and the browser draws a dialog denied for a subagent that
+still appears to be running — which is exactly what the after-the-broadcast placement was put there to
+prevent, in a comment that says so. The plan had been about to delete a guard by describing it as an
+accident.
+
+**The resolution is smaller than either the error or the fix.** Leave the statement order alone. Once
+`_dispatch` enqueues rather than awaits, bookkeeping stops waiting on a browser *because nothing waits on
+a browser* — the conflation AG-R-19 names dissolves without moving a line, and causality is preserved for
+free.
+
+### Two of the reviewer's objections did not survive the tree
+
+Rounds two and three of the protocol are *run the probes and bring the measurements back*, and two came
+back against it.
+
+| the objection | what the tree says |
+|---|---|
+| "The Disconnect Paradox" — dropping an overflowed client cements the desync, because there is no full-state fetch to recover from | `get_current_state` exists on **both** engine services, and the shell's `setupDone` calls it on every connect, first or subsequent, with `remoteDisconnected` already scheduling the reconnect |
+| A disconnect mid-turn loses an open permission dialog forever, because a pending request is an in-memory `Future` and not committed history | `service.py:1235` is `"pending_permissions": self.permissions.pending()`, with a docstring saying the field exists precisely for a client that connects while a dialog is open |
+
+Both were good reasoning from a model that could not see the code, and both were answered by looking. The
+second is the more interesting one: the objection describes a real defect that somebody on this project
+had already found and fixed, and the fix is *why* AG-R-19's overflow policy is affordable.
+
+### The measurement neither side was looking for
+
+The reviewer asked, in passing, why a fire-and-forget broadcast uses two-way JSON-RPC with a 120s timeout
+at all. The answer turned out to be worse than the question assumed, and it reframes the whole risk.
+
+`JRPC2.call` is a **synchronous** `def` that schedules the transmit as a task and returns. The socket
+write was never being awaited. The await is in `remote_call`, which blocks on the *browser's reply* — and
+every client handler is `window.dispatchEvent(...); return true`, whose value is packed into a result dict
+that nothing anywhere reads.
+
+**The master turn stalls for up to two minutes waiting for an acknowledgement no code consumes.**
+
+And the part that constrains the fix: *today's in-order delivery is a side effect of that useless
+round-trip.* One reply in flight means one `ws.send` in flight. Remove the await and N transmits race on
+one socket, breaking the contract migration step 1 lists as a must-not-break. The acknowledgement is
+worthless and it is simultaneously the only thing holding the ordering up — which is why the mitigation
+is a sender task per client rather than the one-line deletion the diagnosis first suggests.
+
+### What changed in the plan, and one new risk
+
+- AG-R-19's mitigation is rewritten: **one sender per client over a bounded shared ring buffer read by a
+  per-client cursor**, awaiting `ws.send` and never the reply, with a fallen-off cursor told to rehydrate
+  rather than dropped. The ring buffer is the reviewer's, against the per-client queues this side
+  proposed; it won on memory (O(buffer), not O(clients × buffer)) and on making overflow cursor
+  arithmetic instead of an emergency disconnect issued during an active send.
+- A third tripwire on AG-R-19, which is the one that would have caught the refuted sentence: the terminal
+  subagent event must reach a client before the `permissionResolved` it causes.
+- [AG-R-20](risks.md#ag-r-20) is new and is **shipped behaviour, not a consequence of any of this**: a
+  reconnecting browser applies live events against a baseline still in flight, because nothing gates the
+  socket while `_fetchCurrentState()` is outstanding. Latent today because reconnects are rare; AG-R-19's
+  overflow policy would make rehydration routine, so the gate is a **prerequisite** of it. That is the
+  second time on this plan that consulting about one thing surfaced the prerequisite of another —
+  [AG-R-18](risks.md#ag-r-18) arrived the same way, out of [AG-22](decisions.md#ag-22)'s consultation.
+
+**Where it stopped.** Two rounds, not converged — the reviewer's last round was an attack, not an
+agreement, and the synthesis above answers it but has not been put back to it. The measured parts of
+AG-R-19 are settled. The ring buffer is settled by argument alone, and the entry says so.
+
+**What this cost, and what it bought.** Two consultation calls and eight probes against the tree, against
+which: one wrong line caught before it was built into the riskiest path in the app, one 120-second stall
+correctly diagnosed as an unread acknowledgement rather than as a network problem, and one shipped race
+found that nobody was looking for. The rule that earned it is the one in the skill — *a single round
+produces a plausible essay; several rounds produce a decision* — with the amendment this session adds:
+**and the probes are what make the rounds worth having.** Round one's best content was a claim it could
+not check.
