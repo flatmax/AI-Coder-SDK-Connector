@@ -609,6 +609,13 @@ into the warm process, and a `stop_acknowledged` card says the screen is final, 
 nobody announces is indistinguishable from a hang. See
 [§ The stop that read like a hang](delivery.md#the-stop-that-read-like-a-hang-2026-09-12).
 
+**Three rows joined the list on 2026-09-11**, from
+[§ The consultation that cost a step and a half](delivery.md#the-consultation-that-cost-a-step-and-a-half-and-one-it-moved-into-this-directory-2026-09-11).
+The list therefore got longer on a day when four items left it, and that is the honest shape: the two
+transport items are the *asymmetry* work rather than more of the gate work, and the third is a defect
+the consultation surfaced only because its advice was checked against the tree. All three are
+specified and none is written.
+
 | What | Specified in | Size |
 |---|---|---|
 | ~~`PostInvocation` → `terminate` while ⏹ is latched~~ ✅ | [AG-19](decisions.md#ag-19) | A handler on the socket `AgyGateServer` already runs; `hook.py` gains an event argument, `install.py` a second registration |
@@ -617,6 +624,9 @@ nobody announces is indistinguishable from a hang. See
 | ~~Skip usage absorption on a non-`SUCCESS` result~~ ✅ | [`sdk-surface.md` § A failed turn reports the previous turn's usage](sdk-surface.md#a-failed-turn-reports-the-previous-turns-usage--measured-2026-09-10) | One condition in `AgyTranslator._absorb_usage`. A refused turn currently reports the *previous* turn's tokens as its own |
 | Standing guidance via `PreInvocation` `ephemeralMessage`, re-injected every invocation | [`sdk-surface.md` § There are five lifecycle events](sdk-surface.md#there-are-five-lifecycle-events-and-this-app-wires-one) | Replaces `agy_tools.WRITE_GUIDANCE` prepending text to the user's own prompt, which records guidance as though the user typed it. **Must fire on every `invocationNum`** — an ephemeral message evaporates after the invocation that received it |
 | Read `transcriptPath` from the hook payload | same § *Four details the probe did not have* | `subagents.py` derives it by hand today; the payload carries it, and carries the per-product directory name that differs. **Measured 2026-09-11** rather than only documented: it is on all three events' payloads |
+| A private config root via `HOME` — stable for the master, ephemeral per consultation | [AG-21](decisions.md#ag-21) | One environment variable on the spawn, plus a seeded `hooks.json` per root and a `finally` that removes the ephemeral one. Lets the `\|\| printf '{"decision":"allow"}'` fail-open line be **deleted** rather than replaced |
+| Derive the brain-tree path from the active config root instead of `Path.home()` | [AG-R-18](risks.md#ag-r-18) | **A prerequisite of the row above, not a follow-up.** `locate_generated_image` already takes `brain_dir` as its first parameter, so only its callers and the `subagents.py` transcript scan change — but until they do, AG-21 silently breaks image collection and every subagent transcript |
+| An authenticated HTTP MCP listener, and a per-spawn `mcp_config.json` in the private root | [AG-22](decisions.md#ag-22) | A second listener on `127.0.0.1:0`, a `token → {repo_root, session_id}` map, and the config written at spawn. This is what makes `claude` reachable as a **consultant** and closes the half of [AG-1](decisions.md#ag-1) that has never existed. Needs [R-14](../plan/risks.md#r-14--two-refreshes-race-for-one-single-use-refresh-token)'s lock first |
 
 One thing deliberately **not** on this list, so that a future reader does not re-open it:
 **consultation continuity** ([AG-16](decisions.md#ag-16) § *The answer, after asking Antigravity*) —
@@ -626,7 +636,12 @@ measurement that settles it. **A private config root for the gate** used to be t
 the `--gemini_dir` variant is still wrong for the reason recorded there — a hook that exists only for
 processes carrying a flag does not fire for the ones that escape — but that reason is specific to
 argv, and [AG-20](decisions.md#ag-20) measures a **mount-namespace** variant that carries nothing on
-the command line and contains all four escapes. Re-opened, not scheduled.
+the command line and contains all four escapes. Re-opened — and then, on 2026-09-11, settled a third
+way and put on the list above: [AG-21](decisions.md#ag-21) measures that the vendor reads its whole
+config tree from `HOME`, so the root moves with one environment variable and needs neither a flag nor
+a namespace. **What that retires is the mechanism, not the goal** — AG-20's `bwrap` reasoning stands
+as the record of why a cheaper answer was worth looking for, and its four escapes are still the test
+any candidate has to pass.
 
 
 ## Ordering constraints that are not obvious

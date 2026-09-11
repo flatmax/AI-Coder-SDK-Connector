@@ -1798,3 +1798,96 @@ and the `sys.executable` resolution that caused the original incident.
   `read_url_content` or subagent invocation, and a tool that skips the hook is the failure that matters.
 - **Environment inheritance.** `agy` should be spawned with an explicit environment allowlist rather
   than the parent's, so it inherits no `ANTHROPIC_API_KEY`, `AWS_*` or similar. Not yet done.
+
+---
+
+<a id="ag-22"></a>
+
+## AG-22 — Claude reaches `agy` over authenticated HTTP MCP, and the token carries the workspace **(measured 2026-09-11, unbuilt)**
+
+**[AG-1](#ag-1) requires both directions and only one of them exists: `claude` can be master and has
+no consultant path at all.** Closing that is a transport question, and it went through
+[`.claude/skills/consult-agy`](../../.claude/skills/consult-agy/SKILL.md)'s convergence protocol framed
+deliberately as *what is the cheapest mechanism* rather than *how do we build an MCP server* — because
+[AG-21](#ag-21) is the record of what the other framing costs. This time the cheapest mechanism was
+probed first, and the answer overturned the maintainer's proposal rather than the reviewer's.
+
+### What was proposed, and why it was refused
+
+The maintainer's position was to avoid MCP entirely: prepend a line to the turn's first message
+advertising a shell command (`aic-dc --consult "…"`), let the model reach it through `run_command`, and
+implement the flag as a thin JSON-RPC client back to this process with the RPC port passed in `agy`'s
+environment. It is cheap in setup lines and wrong on five counts — four from the reviewer, the fifth
+from the probe that followed:
+
+- **Quoting.** A consultation carries diffs, stack traces and code. Through `run_command` the calling
+  model must escape nested quotes, backticks, `$()` and `$VAR` correctly, in a shell string it composes
+  itself. An MCP argument is a JSON string and the escaping is a serialiser's job.
+- **`ARG_MAX`.** A 300-line diff in an argv string meets the OS argument buffer.
+- **Schema priors.** A native tool schema outranks a prompt preamble under context load: a
+  preamble-advertised command gets forgotten, misspelled, `--help`'d, or printed in a fence instead of
+  run. Recorded as a plausible prior rather than a measurement — neither side measured it, and it is
+  moot now.
+- **Three failure modes the design did not name.** The port in `agy`'s environment is inherited by
+  every `run_command` child, so any test or build script in the working tree can reach it.
+  `run_command` is synchronous, so a 60s consultation blocks the master's own turn and may hit a tool
+  timeout. And on cancel `agy` kills the child, the socket drops, and this process keeps spending the
+  subscription on an answer nobody will read.
+- **It has nowhere to put a credential.** This is the one that settles it, and it is the second row
+  below.
+
+### Measured, 2026-09-11
+
+| Probe | Result |
+|---|---|
+| Does `agy` speak MCP over anything but stdio? | **Yes, and with arbitrary headers.** `agy mcp add --help`, v1.2.0: `--type` takes `'stdio' or 'http'`, `<commandOrUrl>` is *"the URL for an http server"*, `--header`/`-H` is *"HTTP header Key: Value (repeatable)"*, and the shipped example is `agy mcp add --header "Authorization: Bearer TOKEN" api https://example.com/mcp` |
+| Does this server's RPC listener authenticate anything? | **No.** `rpc.py` binds `127.0.0.1`, and its own comment says the `host` argument is *"currently recorded but not passed through to jrpc-oo"*. No token, no origin check, no handshake secret. The port is found by scanning and written to no file |
+| Where does a private-root `mcp_config.json` land? | Already measured in [AG-21](#ag-21): `HOME=/tmp/fakehome agy mcp add …` writes `/tmp/fakehome/.gemini/config/mcp_config.json` and leaves the real tree byte-identical |
+
+**The second row is why the first one decides it.** An endpoint that can spend the account's Claude
+subscription, reachable on an unauthenticated localhost port, is a capability handed to every process
+on the machine. `--header` is therefore load-bearing rather than decorative — and the shell variant had
+no header, no handshake and no file, so there was nowhere to put a secret at all. Note which way this
+cuts: the port is *not* a secret today and cannot become one by being hidden, so the environment-leak
+objection is weak on its own terms. What has to exist is the **credential**, and only one of the two
+mechanisms has a place for one.
+
+### The mechanism
+
+- **A second listener, not the existing one.** Bound `127.0.0.1:0`, so the OS allocates the port and
+  nothing scans for it. `rpc.py` is WebSocket JSON-RPC over `jrpc-oo` and MCP is HTTP; wedging an
+  authenticated path into an unauthenticated listener produces a boundary nobody could state.
+- **The config is written per spawn**, into the private root [AG-21](#ag-21) already provisions,
+  carrying that spawn's port and a freshly minted token. This composes with AG-21 § *Two roots, not
+  one* rather than adding a mechanism: the master's stable root gets a config naming the live port, the
+  consultant's ephemeral root goes away with the invocation.
+- **The token carries the workspace.** The server holds `token → {repo_root, session_id}` in memory and
+  resolves the caller's repository from the `Authorization` header. Two repositories consulting
+  concurrently are two tokens, and **the model is never asked which workspace it is in** — a question it
+  could answer wrongly, and [AG-R-3](risks.md#ag-r-3) is about writes escaping the repository on exactly
+  that kind of answer.
+
+### What it deletes
+
+The costed plan for this work assumed a spawned stdio MCP server, and every part of that assumption was
+expensive: a new process, a new entry point, and a second holder of the Claude credential. The last is
+the one that mattered. This process is the **sole** holder of a single-use refresh token by design, and
+[R-14](../plan/risks.md#r-14--two-refreshes-race-for-one-single-use-refresh-token) is already open on two
+in-process callers racing inside the refresh margin; a separately spawned server would have added a
+third that no in-process lock could reach. Serving MCP from the process that already holds the
+credential removes that case entirely. R-14's lock is still a prerequisite of this work — it stays a
+lock rather than becoming an IPC design.
+
+### Still unmeasured, and honestly so
+
+- **Whether the vendor reads `mcp_config.json` only at start.** A per-spawn rewrite assumes it does, and
+  assumes no *concurrent* `agy` is reading the same root — which AG-21's two-roots split makes unlikely
+  rather than impossible.
+- **Whether `call_mcp_tool`'s hook payload carries the inner server and tool names**, or only the outer
+  proxy name. The gate classifies `call_mcp_tool` as `exec` and so fails closed either way (`agy/tools.py`:
+  *"arbitrary tool by proxy … must not assume is read-only"*), so this decides the dialog's **wording**,
+  not its safety. It needs one live authenticated turn against a canary hook, and is not a prerequisite.
+- **Whether a bearer token at rest in the private root is acceptable.** The alternative is the
+  environment, which is what leaks to every shell child; a `0600` file inside a `0700` root is the better
+  of the two, and inside a consultation the `StaticPolicy` denies the file tools that could read it. That
+  is an argument, not a measurement.

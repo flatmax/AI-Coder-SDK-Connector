@@ -45,13 +45,14 @@ reviewer's own final list are marked, because the disagreements are the useful p
 | | Item | Verdict |
 |---|---|---|
 | **1** | **Containment placement** — give `agy` a private config root, keep the hook and make it fail-closed | The one item with a realized failure and a validated replacement. **Amended 2026-09-11:** the mechanism is `HOME`, not a mount namespace, and the hook is *relocated* rather than deleted — see [AG-21](../plan-ag/decisions.md#ag-21), which supersedes [AG-20](../plan-ag/decisions.md#ag-20) as the primary mechanism |
-| **2** | **Consultant plumbing** — consultations as child sessions on the master pipeline | *Departure.* The reviewer ranked this MEDIUM in round 2 and then omitted it from its round-3 list without saying why. Promoted here instead, because a defect landed in exactly this seam within the hour — [`known-issues.md`](../known-issues.md) § *An empty consultation tab* |
+| **2** | **Consultant plumbing** — consultations as child sessions on the master pipeline | *Departure.* The reviewer ranked this MEDIUM in round 2 and then omitted it from its round-3 list without saying why. Promoted here instead, because a defect landed in exactly this seam within the hour — [`known-issues.md`](../known-issues.md) § *An empty consultation tab*. **Amended 2026-09-11:** the rank stands, the mechanism does not — not child sessions, one pump with two coordinators, and the second coordinator already exists. See § *A fourth reversal* |
 | **3** | **Static engine contract** — `typing.Protocol` validated at registration, replacing reflection over a reference implementation | Cheap enough (hours) that the rank barely matters; do it whenever the file is open. Both reviewers called the present scheme a smell with near-zero blast radius, and that is right: three engines, a mismatch caught by the first local run |
 | **4** | **Surgical extraction from `claude_code/`** — `review.py` (402), `turn_hud.py` (366), the decoupled part of `commit.py` (514) | ~1.3k lines move as-is. *Not* the 6.3k first claimed — see the reversal below |
 | **5** | **`chat-panel/`** — leave it alone | Ordinary feature maintenance. Diagnosis of structural rot was raised and withdrawn under measurement |
 
 The structural shape the reviewer would build toward, kept because it names the seam rather than the
-files: a **session supervisor** owning turn lifecycle, event multiplexing and history as
+files — **and its last clause is refuted; see § *A fourth reversal***: a **session supervisor** owning
+turn lifecycle, event multiplexing and history as
 engine-agnostic core; adapters demoted to I/O **drivers** translating vendor frames to internal
 events; consultations as **child sessions** of that supervisor, so the `second_opinion` MCP tool
 becomes a thin bridge over `spawn_child_session(...)` rather than a parallel pipeline.
@@ -150,6 +151,29 @@ paragraph is the part that generalises:
   `install.py` afterwards, unprompted and correct — and that is what makes "relocate the hook and make
   it fail-closed" available at all. The recommendation it argued for (delete the hook, fail closed
   without `bwrap`) is now moot. The diagnosis it supplied on the way is what survived.
+
+## A fourth reversal, and this time it is the structural shape
+
+**Rank 2's mechanism does not survive, and neither does the sentence above that names it.** The
+"consultations as **child sessions** of the supervisor, so `second_opinion` becomes a thin bridge over
+`spawn_child_session(...)`" shape was the reviewer's, was adopted here without challenge, and is
+refuted twice over — the shape stays in the table because the *ranking* was right and only the
+mechanism was wrong.
+
+- **Conceptually**, by this doc's companion: a consultation has no history, no resumption and no second
+  turn, so a session gave it a tab, a lifecycle and a write lock it has no use for — and the tab
+  lifecycle is what the shipped defect was entangled with. See
+  [`blank-sheet-architecture.md` § What the exercise deleted](blank-sheet-architecture.md#what-the-exercise-deleted).
+- **Empirically**, on 2026-09-11: the correct shape is *one execution pump with two coordinators*, and
+  `agy/consultant.py` already drives `AgySession` as one, with containment installed as a policy object
+  rather than a mode tested inline. So the seam rank 2 identifies is real and **most of the work behind
+  it is already standing** — what is missing is an invariant, not a supervisor.
+
+Rank 2 was promoted here over the reviewer's own omission because a defect had just landed in that
+seam. That promotion was right and is worth separating from the mechanism: the seam earned its rank on
+evidence, and then the first design offered for it was wrong. **A correct rank does not validate the
+design that arrives attached to it**, and this file has now recorded that twice in two days — once for
+rank 1's mount namespace, once for rank 2's child session.
 
 This is the fourth entry in the pattern below, in a different key: not a component that broke while
 reporting itself healthy, but a design that was argued at length while its premise went unprobed.

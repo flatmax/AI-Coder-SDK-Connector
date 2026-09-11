@@ -5759,3 +5759,80 @@ payload the browser is given. Two webapp tests cover the card and its collapse.
 **The mechanism's gap is still open and still deliberate.** Closing it means killing the process:
 3.7s of dead session to save a few seconds of text from a turn that holds no locks, runs no commands
 and touches no files.
+
+## The consultation that cost a step and a half, and one it moved into this directory (2026-09-11)
+
+Nothing was built here. Three questions about the *unbuilt* work were put through
+[`.claude/skills/consult-agy`](../../.claude/skills/consult-agy/SKILL.md)'s convergence protocol over two
+rounds, the reviewer declared all three converged, and the result is
+[AG-22](decisions.md#ag-22), [AG-R-18](risks.md#ag-r-18), a note under
+[AG-R-12](risks.md#ag-r-12) and a smaller programme than the one that went in. Recorded because the
+*shape* of how it went is the reusable part, and because two claims died on each side.
+
+The three questions came out of [`../7-future/blank-sheet-architecture.md`](../7-future/blank-sheet-architecture.md)'s
+migration order, which had five steps and no costing. They were: how does a Claude consultant become
+reachable from `agy` at all; do model-to-model and user-to-model consultation earn two code paths or one;
+and is unifying ~4k lines of permission code behind an `ApprovalResolver` protocol worth doing.
+
+### What each side got wrong
+
+**The maintainer lost question 1 outright**, and the losing proposal is in AG-22 for the record: advertise
+a shell command in a message preamble, reach it through `run_command`, pass the RPC port in `agy`'s
+environment. The reviewer's four objections were good and its fifth — a mechanism with nowhere to put a
+credential — only became visible after the probe. **Its own preferred variant was better than the argument
+it made for it**: it proposed HTTP MCP on the guess that `agy` might support it, and `agy mcp add --help`
+turned out to document `--type http` with repeatable `--header`, example included.
+
+**The reviewer lost question 3 outright, and said so plainly** once the import graph was put in front of
+it: *"The ~3,000-line figure was an illusion created by summing the total line counts of an import spine
+and mistaking dialog coordination and payload normalization for duplicated authorization engines."* There
+is one spine — `agy/gate_server.py` → `antigravity/permissions.py` → `claude_code/permissions.py` — and
+`PermissionBroker.can_use_tool` contains no policy evaluation at all beyond one early return for this
+app's own read-only tools. The vendor CLI decides what to ask about; the broker renders, broadcasts,
+awaits and times out. What survives is two pure functions worth isolating and the socket double now noted
+under AG-R-12.
+
+**Question 2 split.** The reviewer's vocabulary was better than the maintainer's — one execution pump with
+two coordinators, not "one path with two configurations" — and its predicted failure was absent: it
+forecast `if not config.is_consultation:` branches accumulating in a shared turn function, and
+`agy/consultant.py` already imports and drives `AgySession` as a separate coordinator class, with
+containment installed as a `StaticPolicy` object rather than tested inline. So the residual work is an
+invariant, not a restructuring. It did name three failure modes separate coordinators do not prevent, and
+those are worth keeping: cancellation propagating into the pump, the accumulator resolving on abnormal
+engine exit, and shared conversation-id or brain-tree state bleeding master history into a consultation.
+The third is what led to AG-R-18.
+
+### The two findings the consultation did not produce
+
+Both came from checking its recommendations against the tree afterwards, which is protocol step 5 and is
+the step that earned its keep here.
+
+- **Its fix for the config-file race was wrong, and this directory was already right.** It proposed an
+  ephemeral `HOME` per spawn, never rewritten. That breaks resume for a master session, whose brain tree
+  must persist — and [AG-21](decisions.md#ag-21) § *Two roots, not one* had already decided the split for
+  a different reason, the two modes wanting opposite contents in one `hooks.json`.
+- **`BRAIN_DIR` is a module constant resolved from this server's own `HOME` at import time**, so AG-21
+  moves the vendor's tree out from under both of its readers, silently, in the register's recurring shape.
+  That is [AG-R-18](risks.md#ag-r-18), and neither reviewer saw it, because neither was looking at
+  `steps.py`.
+
+The reviewer also proposed attesting interception in CI with a socket-level test double. Useful, and
+weaker than `install.hook_runs`, which already executes the command string actually written to
+`hooks.json` — the PyInstaller failure was upstream of the socket, so a double would have replayed past
+it. Noted under AG-R-12 rather than adopted as the mitigation.
+
+### What it did to the size of the work
+
+The five steps were costed against the tree before the consultation and again after. Two moved:
+step 4 fell because HTTP MCP from this process beats a spawned stdio server and adds no credential
+holder, and **step 5 collapsed from roughly 40% of the programme to about 5%** once its premise was
+refuted. Against this repo's 1.11:1 test-to-source ratio the whole set is now ~2–3 weeks and ≈3–5k lines
+including tests, where step 5 alone had been costed at 1–2 weeks.
+
+**The generalisable part, and it is the same as [AG-21](decisions.md#ag-21)'s.** Both rounds were framed
+as *what is the cheapest mechanism* rather than *how do we build the thing I have in mind*, deliberately,
+because AG-21 records three rounds spent on mount namespaces to obtain what one environment variable
+gives. Framing that way cost the maintainer question 1 and saved the fortnight in question 3. The
+reviewer cannot see the repository, so the framing it is handed is the framing it works in — and every
+claim it made that was checkable and checked came back either sharpened or refuted, never merely
+confirmed.

@@ -7,6 +7,13 @@ prior exchange forward as third-party evidence, and no claim is accepted until i
 the tree. The reviewer declared the position converged at the end of round 3 with no open
 disagreements, which is one fewer than last time.
 
+**Revisited on 2026-09-11**, two rounds further, on the three things the migration order below had left
+unanswered: how a Claude consultant becomes reachable from `agy` at all, whether the two consultation
+features earn two code paths, and whether step 5 was worth doing. Those rounds cost the maintainer the
+first question outright, cost step 5 four-fifths of its estimate, and closed two of the four items under
+[§ Still open](#still-open-honestly). Changes are marked in place; the narrative and what each side got
+wrong is in [`../plan-ag/delivery.md`](../plan-ag/delivery.md#the-consultation-that-cost-a-step-and-a-half-and-one-it-moved-into-this-directory-2026-09-11).
+
 This is the companion to [`rearchitecture-review.md`](rearchitecture-review.md) and asks a different
 question. That review asked *what would we rebuild*, and answered *no rewrite*. This one strips the
 design back to no classes at all and asks what concepts have to exist — with one constraint made
@@ -205,6 +212,23 @@ which is why the lock is a prerequisite of step 2 rather than a tidy-up after it
 Not scheduled. Ordered so that each step is provable before the next depends on it, against this
 repo's ~1.1:1 test-to-source ratio.
 
+**Costed on 2026-09-11**, after a two-round consultation on the three questions this order left open —
+see [`../plan-ag/delivery.md` § The consultation that cost a step and a half](../plan-ag/delivery.md#the-consultation-that-cost-a-step-and-a-half-and-one-it-moved-into-this-directory-2026-09-11).
+The figures are days of work against the 15,475 source lines of the two engine packages, with tests at
+the repo's measured 1.114:1. **Two of the five moved, and both moved down**; the ordering did not
+change.
+
+| step | size | what the costing turned on |
+|---|---|---|
+| 1 — every sink an observer | 2–3 d | The shipped bridge fix is two-thirds of the test set already |
+| 2 — a Claude consultant through `query()` | 3–5 d | Includes [R-14](../plan/risks.md#r-14--two-refreshes-race-for-one-single-use-refresh-token)'s lock, which it must not ship without |
+| 3 — inline rendering as the default surface | 3–5 d | Webapp work, and the read-only tab it replaces already exists |
+| 4 — reach the consultant from `agy` | 4–6 d | **Down.** A spawned stdio server and a third credential holder were both deleted by measurement — see below |
+| 5 — formalise `ApprovalResolver` | 1–2 d | **Down hard, from 1–2 weeks.** Its ~3,000-line premise was refuted by the import graph |
+
+≈3–5k lines including tests, ~2–3 weeks in total, where **step 5 alone had been informally carrying
+roughly 40% of the estimate**. A costing exercise that only ever adds is not measuring.
+
 1. **Make every sink an observer.** Separate result resolution from frame dispatch: the driver feeds an
    accumulator that fulfils the result, and dispatch to sinks is non-blocking and exception-isolated.
    *Must not break:* in-order websocket delivery; explicit cancellation still terminating the driver and
@@ -222,15 +246,42 @@ repo's ~1.1:1 test-to-source ratio.
    detachment non-destructive.
 4. **Provision `agy`'s MCP root as a build step.** It has no MCP servers configured today, so this is
    construction, not configuration — the correction that turned a claimed half-day into a build task.
+   **The mechanism has since left this layer**: `agy mcp add` documents `--type http` with repeatable
+   `--header`, so this process exposes a second authenticated listener and writes a per-spawn config
+   into [AG-21](../plan-ag/decisions.md#ag-21)'s private root, and the bearer token carries the
+   workspace so the model is never asked which repository it is in. Specified as
+   [AG-22](../plan-ag/decisions.md#ag-22). What is refuted, and stays here as the finding: the
+   maintainer's design of a shell command advertised in a preamble, reached through `run_command`, with
+   the port passed in `agy`'s environment — five objections, of which the fatal one is that it has
+   nowhere to put a credential.
 5. **Formalise ApprovalResolver and the policy tiers**, folding the `agy` hook in as a headless resolver
    and modelling containment-unavailable as `absent` with a reason, per the existing three-way
-   descriptor.
+   descriptor. **Its size was refuted.** The claim that this unifies ~4k lines of duplicated
+   authorisation was, in the reviewer's own words once the import graph was put in front of it, *"an
+   illusion created by summing the total line counts of an import spine"*: there is one spine —
+   `agy/gate_server.py` → `antigravity/permissions.py` → `claude_code/permissions.py` — and
+   `PermissionBroker.can_use_tool` evaluates no policy at all beyond one early return for this app's own
+   read-only tools. The vendor CLI decides what to ask about; the broker renders, broadcasts, awaits and
+   times out. Two pure functions are worth isolating, and the concept above is still real — the
+   *savings* were not.
 
 ## Still open, honestly
 
-- **Whether a user can type into a consultation tab.** Asserted here as no, from the UI as built, and
-  not verified against the code. It is the only support for rejecting "tabs imply session semantics",
-  so if it is wrong that argument weakens.
+**Two of these four closed on 2026-09-11** and are struck through rather than deleted, because in both
+cases the resolution says something the open question did not: one was right for a better reason than
+the one offered, and the other was posed in a vocabulary that had the answer excluded. Both that closed
+were settled by reading the tree; **both that remain need a live call to settle**, and they differ only
+in what the call costs — one is a single consultation, the other risks the login.
+
+- ~~**Whether a user can type into a consultation tab.**~~ **Closed by measurement, 2026-09-11: they
+  cannot, and the assertion was right for a better reason than the one given here.** It is not an
+  emergent property of the UI — it is set deliberately in three places.
+  [`subagent-tabs.js:318`](../../webapp/src/chat-panel/subagent-tabs.js) marks the tab
+  `readOnly` on creation; [`rendering.js:222`](../../webapp/src/chat-panel/rendering.js) reads that off
+  the active tab and line 286 renders a read-only note **instead of** the input surface, so there is no
+  element to type into; and [`input.js:155`](../../webapp/src/chat-panel/input.js) still guards the send
+  path and toasts if it is ever reached. The support for rejecting "tabs imply session semantics"
+  therefore holds: the consultation surface is a view because it was built as one.
 - **What the auth server does on a replayed refresh token.** That the token is single-use is
   established from this repo's own prior work; whether a superseded redemption fails softly or revokes
   the grant is not, and it is the difference between a retry and an interactive re-login. Not worth a
@@ -239,6 +290,15 @@ repo's ~1.1:1 test-to-source ratio.
 - **`interrupt=True` and `max_turns=1` behaviour** are reasoned from the SDK source and the CLI flag,
   not observed. Both are cheap to settle with one live consultation each, and step 2 should settle them
   before shipping rather than after.
-- **Whether the two-features split earns two code paths or one path with two configurations.** Settled
-  in concept, unsettled in structure, and it is the decision that determines how much of step 1 is
-  refactor and how much is new code.
+- ~~**Whether the two-features split earns two code paths or one path with two configurations.**~~
+  **Closed, 2026-09-11 — and the question's own vocabulary was the wrong half of it.** The answer is
+  *one execution pump with two coordinators*, which is neither of the two options as posed; "one path
+  with two configurations" invites the `if not config.is_consultation:` branches that the reviewer
+  predicted would accumulate. Those branches are absent, because `agy/consultant.py` already drives
+  `AgySession` as a separate coordinator and installs containment as a `StaticPolicy` object rather than
+  testing for a mode inline. **So step 1 is an invariant to enforce, not a structure to build** — which
+  is why it costs 2–3 days above and not a week. What separate coordinators do *not* prevent, and what
+  step 1's tests are therefore for: cancellation propagating from a detaching sink into the pump, the
+  accumulator resolving on abnormal engine exit, and shared conversation-id or brain-tree state bleeding
+  master history into a consultation. The third of those is now
+  [AG-R-18](../plan-ag/risks.md#ag-r-18) and is a live defect rather than a design concern.

@@ -665,6 +665,25 @@ that state with its reason. The deeper lesson is a third instance of this entry'
 is correct is not a mechanism that works**, and `status` comparing strings was measuring the first
 while claiming the second.
 
+### What a socket-level test double can and cannot attest — noted 2026-09-11
+
+Raised by the reviewer in [AG-22](decisions.md#ag-22)'s consultation, which asked how gating could be
+attested in CI without live auth or a vendor binary. Its proposal: a test double that connects to the
+gate socket and replays canned payloads — symlinked paths, unicode, relative paths — so normalisation,
+classification and timeout handling are covered deterministically in milliseconds.
+
+**That is worth building, and it is not attestation of interception.** The failure above happened
+*upstream of the socket*: the hook process never started, so a double that speaks to the socket replays
+straight past the break and reports healthy for the same reason `status` did. The distinction is this
+entry's own lesson in a new place — a payload a socket answers correctly is not evidence that the vendor
+ever reaches that socket.
+
+`hook_runs` is the part that already attests interception, and it is stronger than the proposal because
+it executes **the command string actually written to `hooks.json`**, left side only, and requires a JSON
+decision back. So the split to keep is: `hook_runs` attests that the vendor's invocation reaches us; a
+socket double attests what we decide once it has. Neither substitutes for the other, and only the second
+is cheap enough to run per-case.
+
 ---
 
 <a id="ag-r-13"></a>
@@ -1455,3 +1474,50 @@ how the other side writes things down, which is the same weakness `TestVocabular
 `streamChunk`.
 
 `THEIRS_ALONE` is back to one entry — `request_id`, a genuine difference — on both tripwires.
+
+---
+
+<a id="ag-r-18"></a>
+
+## AG-R-18 — `BRAIN_DIR` is pinned to this server's own `HOME`, which [AG-21](decisions.md#ag-21) moves the tree out from under
+
+**Severity: moderate. Likelihood: certain on the day AG-21 is built, and silent when it happens.**
+**Raised 2026-09-11**, while checking a reviewer's advice against the tree during
+[AG-22](decisions.md#ag-22)'s consultation — not by the consultation, which never saw this file.
+
+`agy/steps.py` holds the path to the vendor's artefact tree as a module constant, resolved at **import
+time** from the *server's* environment:
+
+```python
+BRAIN_DIR = Path.home() / ".gemini" / "antigravity-cli" / "brain"
+```
+
+[AG-21](decisions.md#ag-21) spawns `agy` under a different `HOME`, and measured that the whole tree
+follows it: `artifactDirectoryPath` came back as `<private>/.gemini/antigravity-cli/brain/<conversationId>`.
+So on the day AG-21 ships, the vendor writes into the private root while both readers of this constant
+look in the user's real one. AG-21's own *Still unmeasured* list does not name it, and it is not a
+consequence of AG-21 being wrong — the constant was correct until the root moved.
+
+**Two readers, and neither raises.**
+
+| reader | what it does when the tree is not where it looked |
+|---|---|
+| `locate_generated_image`, called from `consultant.py` | Reports *"could not be found under `<BRAIN_DIR>/<id>`"* — a sentence that blames the model for a path this side got wrong. Phase 10's exit criterion is a picture verified inside the repository ([AG-R-3](#ag-r-3)), and it would fail as *"the model did not write one"* |
+| `subagents.py`, scanning every `transcript_full.jsonl` under the tree | Finds **zero** files where it found 121, and a subagent transcript surface with no transcripts renders as a subagent that did nothing |
+
+Both are this register's recurrence again: **the thing was broken and nothing said so.** Neither raises,
+neither logs at `error`, and both read as the *engine's* failure rather than as ours — which is the
+[AG-R-12](#ag-r-12) shape, one layer out.
+
+**Mitigation.** The constant becomes a function of the active config root, derived from the `HOME` the
+invocation was spawned with, which is the only thing that knows. The seam already exists on the harder
+of the two readers: `locate_generated_image(brain_dir, conversation_id, image_name, …)` takes the
+directory as its **first parameter**, so it is the callers passing a module constant that are wrong, not
+the function. The transcript scan needs the same argument. This is small; it is invisible until looked
+for, which is why it is recorded before AG-21 is written rather than after.
+
+**Tripwire.** A test that spawns nothing: set a private `HOME`, resolve the brain directory the way the
+code under test resolves it, and assert it lands under that root and not under `Path.home()`. The
+assertion must be on the **resolved path for a given root**, never on the constant's spelling — comparing
+strings is precisely how [AG-R-12](#ag-r-12) § *The second way it failed open* reported a gate `current`
+while every call was being auto-approved.
