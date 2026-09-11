@@ -1310,44 +1310,31 @@ async def run(
     logger.info("WebSocket server started on ws://%s:%d", bind_host, server_port)
 
     # Wire the event callback now that the server is up.
-    # It dispatches to AcApp.{event_name}(...) on all connected
-    # browsers. jrpc-oo injects get_call() onto instances
-    # registered via add_class, so the proxy lands on the **router**,
-    # which is the object that was registered — not on the service
-    # behind it. Reading it off the service would find nothing and
-    # every server-push event would be dropped with a warning.
+    #
+    # AG-R-19. This used to resolve jrpc-oo's `call` proxy and await
+    # `AcApp.<event>` on it. That proxy gathers over every connected
+    # remote and each of its futures resolves on the *browser's reply* —
+    # so a turn that had already produced its answer could sit for up to
+    # 120s per event, waiting for an acknowledgement nothing reads, with
+    # the slowest browser pacing all the others.
+    #
+    # Now it queues. `broadcast` is synchronous and returns as soon as
+    # the frame is on each client's deque; one task per client awaits
+    # `ws.send` before taking the next frame, which is what propagates
+    # backpressure into a queue that has a policy (AG-23: evict a client
+    # that stops draining, never rehydrate it down the socket it is not
+    # reading). The events are JSON-RPC notifications — no id, no reply,
+    # no per-event timeout task.
+    #
+    # Kept `async` because `service._dispatch` awaits it, and kept as a
+    # factory so the ref-cell wiring above is unchanged.
     def _make_real_callback() -> Any:
         async def _cb(event_name: str, *args: Any) -> None:
-            # Try both get_call() (method form) and .call
-            # (attribute form) — jrpc-oo's injection shape
-            # varies by version.
-            call = None
             try:
-                call = engine_router.get_call()
-            except AttributeError:
-                call = getattr(engine_router, "call", None)
-            if call is None:
-                logger.warning(
-                    "Event callback: no call proxy available for %s",
-                    event_name,
-                )
-                return
-            method_key = f"AcApp.{event_name}"
-            try:
-                method = call[method_key]
-            except (KeyError, TypeError) as exc:
-                logger.warning(
-                    "Event callback: no remote method %s (%s)",
-                    method_key, exc,
-                )
-                return
-            try:
-                result = method(*args)
-                # jrpc-oo methods may return coroutines or
-                # plain values; await when awaitable.
-                if hasattr(result, "__await__"):
-                    await result
+                server.broadcaster.broadcast(event_name, args)
             except Exception as exc:
+                # No sink may be load-bearing, this one included: a turn
+                # completes whether or not any browser hears about it.
                 logger.warning(
                     "Event callback %s raised: %s",
                     event_name, exc,
@@ -1356,15 +1343,8 @@ async def run(
 
     event_callback_ref[0] = _make_real_callback()
     logger.info(
-        "Event callback wired (service=%s)",
-        type(engine_router).__name__,
-    )
-    # Log what jrpc-oo has injected so we can diagnose which
-    # form of the call proxy is available.
-    logger.info(
-        "engine_router attributes: get_call=%s call=%s",
-        hasattr(engine_router, "get_call"),
-        hasattr(engine_router, "call"),
+        "Event callback wired to %s",
+        type(server.broadcaster).__name__,
     )
 
     # Step 7: Open browser

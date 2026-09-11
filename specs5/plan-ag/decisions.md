@@ -1894,7 +1894,7 @@ lock rather than becoming an IPC design.
 
 <a id="ag-23"></a>
 
-## AG-23 — A stalled client is evicted, not rehydrated **(measured 2026-09-11, unbuilt)**
+## AG-23 — A stalled client is evicted, not rehydrated **(measured and built 2026-09-11)**
 
 **The question.** [AG-R-19](risks.md#ag-r-19)'s sender needs an overflow policy: what happens to a client
 whose queue fills because it is not draining its socket. The plan of record said *tell it to rehydrate*,
@@ -1959,3 +1959,19 @@ JSON-RPC *notifications* — no `id`, no reply, no future, and no 120 s `timeout
 Nothing reads the result today, delivery confirmation at the application layer confirms only that a
 browser's event loop ran, and liveness is already available twice over: the websocket's own ping/pong, and
 the write-buffer depth that Probe B shows flags a stalled peer within ~19 frames.
+
+**Built 2026-09-11, in `src/aic_dc/broadcast.py`.** `ClientSender._evict` warns with the client's queue
+depth and byte count, closes with `CLOSE_CODE_QUEUE_OVERFLOW` (4001, private-use range — `collab` already
+uses 1008 for a denied admission, and this is a different thing) and drops the backlog. The webapp's
+`remoteDisconnected` already calls `_scheduleReconnect`, so the reconnect path this decision relies on
+needed no change: the evicted client comes back, asks for `get_current_state`, and applies it behind
+[AG-R-20](risks.md#ag-r-20)'s gate.
+
+One thing the eviction path had to learn the hard way. `await ws.close()` on a peer that is not reading
+its socket hangs for the same reason `ws.send` does — the close *handshake* waits for a reply the peer
+will not send. Evicting by awaiting a close would therefore have traded one stuck task for another. The
+close frame goes out under a two-second `wait_for`, and the transport is aborted when that expires.
+
+The strict-FIFO consequence is enforced by construction rather than by a test: the queue is a `deque` and
+the only operations on it are `append` and `popleft`. There is nowhere for a coalescer or a priority to
+live, which is the point.

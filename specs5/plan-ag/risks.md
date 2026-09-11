@@ -1687,6 +1687,71 @@ that bites is on **buffer depth**: stall a peer, push more than the queue bound,
 `transport.get_write_buffer_size()` stays within one frame of the low-water mark and that the client is
 evicted with the documented close code — not that the frames arrived in order.
 
+**Built 2026-09-11.** `src/aic_dc/broadcast.py` holds a `ClientSender` — one websocket, one bounded
+`deque`, one task that awaits `ws.send` before taking the next frame — and a `Broadcaster` that owns one
+per connected client. `main._make_real_callback` no longer resolves jrpc-oo's `call` proxy; it calls
+`server.broadcaster.broadcast(event_name, args)`, which is a plain `def` and therefore cannot be paced by
+anything. Events go out as JSON-RPC notifications: no `id`, no future, no 120 s `timeout_handler` task per
+event. `service._dispatch` is **unchanged**, which was the point of the correction above.
+
+Four departures from the mitigation as specified, all found by building it:
+
+**The seam is `create_remote`, not `_run_admitted_connection`.** The plan named `collab.py`'s admitted
+path because that is where `remote.uuid` and the websocket are both in scope. They are also both in scope
+one level down, in `JRPCCommon.create_remote(ws)` — which *every* connection passes through, the collab
+server's and the solo server's alike. Overriding it on `MaxSizeJRPCServer` covers both with one edit, and
+`rm_remote` is the matching teardown on every disconnect path.
+
+**The acknowledgement was carrying one signal worth keeping.** Deleting the reply also deletes the
+`KeyError` that used to warn when no remote exposed `AcApp.<event>`, and the browser's JSON-RPC library
+drops an unknown method *silently* when there is no `id` to answer with — measured in
+`webapp/node_modules/jrpc/jrpc.js:491`, which returns without emitting anything. So a renamed handler
+would have stopped events arriving with nothing anywhere saying so, which is the failure class this
+register keeps hitting. `Broadcaster._warn_if_unexposed` puts it back, checked against the remote's `rpcs`
+and warned once per client per method.
+
+**And it fixed a drop nobody had noticed.** The old path resolved `self.call["AcApp.<event>"]`, and that
+key does not exist until the client's `system.listComponents` reply has been processed — so every event
+dispatched during the handshake window was dropped with a warning. The sender queues them instead: they
+wait behind the handshake and arrive after it. `test_the_handshake_window_does_not_warn_or_drop`.
+
+**Eviction cannot simply `await ws.close()`.** This entry already noted that a wedged socket's close hangs
+for the same reason its send does, and that is exactly what happens: a peer not reading its socket does
+not answer a close handshake either. `_close_socket` sends the close frame under
+`wait_for(CLOSE_HANDSHAKE_TIMEOUT)` and aborts the transport when that expires, so evicting a stalled
+client cannot acquire a second stuck task. Relatedly, `close()` **cancels** the sender task — which the
+[consultation bridge forbids itself](../../src/aic_dc/antigravity/bridge.py) — and the difference is
+stated there: cancelling a suspended send cannot corrupt the stream but cannot retract the frame either,
+and on the bridge the stream continues. Here it does not, because this only runs while the socket is
+being torn down.
+
+**What the tripwire caught, and it is the one this entry specified.** `tests/test_broadcast.py` runs a
+real `websockets` server against a peer that completes the handshake by hand and then never reads a byte,
+with the transport's water marks pinned at 4096/2048 and both socket buffers at 2048. Mutation-tested
+rather than assumed:
+
+| mutation | what fails |
+|---|---|
+| `await ws.send(frame)` → `create_task(ws.send(frame))` | the clamp: `assert 1547187 <= (2048 + 4098)`. Probe B's factor of two thousand, reproduced as an assertion |
+| overflow drops instead of evicting | the eviction and close-code assertions, and the byte-bound test |
+| `_sweep_ended_subagent` moved ahead of the enqueue | the causal-order test — `permissionResolved` reaches the wire before the `subagentEvent` explaining it |
+
+The frame-order test this entry warned against was not written. What was written instead is a **control**
+for the tripwire — `test_a_deaf_peer_really_does_stall_the_sender` — because a "deaf" peer whose backlog
+the kernel quietly absorbs is not deaf, and every assertion built on one would pass while measuring
+nothing. That is the same trap two of [AG-R-20](#ag-r-20)'s tests fell into the same morning, caught there
+by mutation and here by anticipating it.
+
+**What this did not change, and should be looked at next.** `Collab._push_event` is a second, independent
+route to `AcApp.*` — `clientJoined`, `clientLeft`, `roleChanged`, `admissionRequest`, `admissionResult` —
+and it still resolves the `call` proxy and awaits it, with the same `gather` and the same 120 s bound.
+It was left alone deliberately: those events fire on connect and disconnect rather than inside a turn, and
+`_handle_disconnect` awaits them for a *recorded* reason — an earlier fire-and-forget version left the
+broadcast tasks unstarted when `handle_connection` returned, so `clientLeft` never arrived. Moving it is a
+separate change with its own tripwire. The consequence meanwhile is that collab events and engine events
+are no longer ordered with respect to each other, which nothing depends on today — the roster and the turn
+are unrelated — but which is now true rather than merely likely.
+
 <a id="ag-r-20"></a>
 
 ## AG-R-20 — A reconnecting browser applies live events against a baseline it has not received yet

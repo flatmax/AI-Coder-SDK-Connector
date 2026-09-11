@@ -459,16 +459,26 @@ class TestStartupUsesTheRouter:
         assert "server.add_service(engine_router, name=RPC_NAME)" in source
         assert "server.add_service(claude_code_service)" not in source
 
-    def test_the_call_proxy_is_read_off_the_router(self):
-        """jrpc-oo injects ``get_call`` onto the *registered* instance.
+    def test_server_push_does_not_go_back_to_waiting_on_a_browser(self):
+        """AG-R-19: the event callback queues, it does not await a reply.
 
-        Reading it off the service behind the router would find nothing,
-        and every server-push event — every streamed chunk, every
-        permission dialog — would be dropped with a warning.
+        This used to assert that jrpc-oo's ``call`` proxy was read off the
+        *router* rather than off the service behind it, because reading it
+        off the service found nothing and dropped every server-push event
+        with a warning. That proxy is gone from this path: it gathered over
+        every connected remote and each of its futures resolved on the
+        browser's reply, so a turn that had already produced its answer
+        could sit for up to 120s per event with the slowest browser pacing
+        all the others.
+
+        What replaces it is ``Broadcaster.broadcast`` — synchronous, one
+        sender task per client. The proxy is what must not come back.
+        See ``tests/test_broadcast.py`` for the behaviour; this only guards
+        the one-line wiring mistake, which is silent.
         """
         source = self.source()
-        assert "engine_router.get_call()" in source
-        assert "claude_code_service.get_call()" not in source
+        assert "server.broadcaster.broadcast(event_name, args)" in source
+        assert "get_call()" not in source
 
 
 # ----------------------------------------------------------------------

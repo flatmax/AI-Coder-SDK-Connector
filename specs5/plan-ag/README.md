@@ -617,13 +617,19 @@ the consultation surfaced only because its advice was checked against the tree. 
 differently — from **building** migration step 1 rather than from discussing it, which found the same
 fault one layer out on the master turn. The fifth arrived a third way again — from **consulting about
 the fourth before building it**, which refuted a line already committed to that entry and surfaced a
-shipped race nobody had gone looking for. Four are specified and unwritten; the fifth — the reconnect gate — **was built the same day it was
-raised**, because it is a prerequisite of the transport work rather than a follow-up to it. See
-[§ The gate that had to have four ways out](delivery.md#the-gate-that-had-to-have-four-ways-out-2026-09-11).
-The sixth arrived a fourth way again — from **consulting a second time about the fourth, and running the
-probes** — which re-specified the transport row in four places and found that it and the reconnect gate
-would have defeated each other. See
+shipped race nobody had gone looking for. The sixth arrived a fourth way again — from **consulting a
+second time about the fourth, and running the probes** — which re-specified the transport row in four
+places and found that it and the reconnect gate would have defeated each other. See
 [§ Five probes, and the design that came back different](delivery.md#five-probes-and-the-design-that-came-back-different-2026-09-11).
+
+**Three of the six are specified and unwritten; the other three all landed on 2026-09-11.** The reconnect
+gate was built the same day it was raised, because it is a prerequisite of the transport work rather than
+a follow-up to it
+([§ The gate that had to have four ways out](delivery.md#the-gate-that-had-to-have-four-ways-out-2026-09-11)),
+and the sender and its eviction policy followed it the same day, which completed migration step 1
+([§ The queue that had to prove it was a queue](delivery.md#the-queue-that-had-to-prove-it-was-a-queue-2026-09-11)).
+Three rows raised and discharged in a day is not the usual shape; it is what happens when the
+prerequisite chain is short and each link was measured before it was built.
 
 | What | Specified in | Size |
 |---|---|---|
@@ -635,8 +641,8 @@ would have defeated each other. See
 | Read `transcriptPath` from the hook payload | same § *Four details the probe did not have* | `subagents.py` derives it by hand today; the payload carries it, and carries the per-product directory name that differs. **Measured 2026-09-11** rather than only documented: it is on all three events' payloads |
 | A private config root via `HOME` — stable for the master, ephemeral per consultation | [AG-21](decisions.md#ag-21) | One environment variable on the spawn, plus a seeded `hooks.json` per root and a `finally` that removes the ephemeral one. Lets the `\|\| printf '{"decision":"allow"}'` fail-open line be **deleted** rather than replaced |
 | Derive the brain-tree path from the active config root instead of `Path.home()` | [AG-R-18](risks.md#ag-r-18) | **A prerequisite of the row above, not a follow-up.** `locate_generated_image` already takes `brain_dir` as its first parameter, so only its callers and the `subagents.py` transcript scan change — but until they do, AG-21 silently breaks image collection and every subagent transcript |
-| One sender per client over a bounded **per-client FIFO**, so a stalled browser cannot pace a master turn | [AG-R-19](risks.md#ag-r-19) | The consultation half of migration step 1 shipped on 2026-09-11; this is the half that did not, and it is **not** the same fix — the master path has an in-order delivery contract, so it wants a serialised sender rather than the bridge's bounded wait. Engine bookkeeping **stays where it is** — `_dispatch` is re-entrant, and moving it ahead of the enqueue inverts cause and consequence. **Re-specified 2026-09-11 after a second consultation and five probes**: ordering is *not* what the sender buys (fire-and-forget preserves it — measured), backpressure propagation is (4,022 bytes buffered versus 8,040,846 — measured); the shared ring is dropped for per-client deques (0.47% overhead — measured); the overflow policy moves to [AG-23](decisions.md#ag-23); and the acknowledgement is **deleted rather than bounded** |
-| Evict a stalled client with an explicit close code, instead of rehydrating it | [AG-23](decisions.md#ag-23) | **Part of the row above, recorded separately because it is a decision rather than a mitigation.** Rehydration over the event channel is incoherent, not merely slow: overflow *is* the client not draining its socket, so the snapshot's channel has zero throughput exactly when it is needed. Also records why the queue must be a strict FIFO — no coalescing, no prioritising, no shedding |
+| ~~One sender per client over a bounded **per-client FIFO**, so a stalled browser cannot pace a master turn~~ ✅ | [AG-R-19](risks.md#ag-r-19) | **Built 2026-09-11, completing migration step 1.** `broadcast.py` holds a `ClientSender` per client and `main`'s event callback enqueues instead of awaiting; events are notifications, so the 120 s per-event timeout task is gone with the reply nothing read. Engine bookkeeping stayed exactly where it was, as the correction required. The tripwire is on **buffer depth**, against a real deaf peer: fire-and-forget fails it at `1547187 <= 6146`. Building it found the seam one level lower than specified, restored a warning that deleting the acknowledgement had deleted, and closed a handshake-window drop nobody had reported. See [§ The queue that had to prove it was a queue](delivery.md#the-queue-that-had-to-prove-it-was-a-queue-2026-09-11) |
+| ~~Evict a stalled client with an explicit close code, instead of rehydrating it~~ ✅ | [AG-23](decisions.md#ag-23) | **Built 2026-09-11 with the row above.** Close code 4001, the backlog dropped, and the webapp's existing `_scheduleReconnect` doing the rest — the evicted client comes back and re-baselines behind [AG-R-20](risks.md#ag-r-20)'s gate. The close frame goes out under a two-second `wait_for` and the transport is aborted after it, because a peer that will not read its socket will not answer a close handshake either |
 | ~~Gate the socket while the reconnect snapshot is in flight~~ ✅ | [AG-R-20](risks.md#ag-r-20) | **Built 2026-09-11**, the same day it was raised, because it is the prerequisite of the row above rather than a follow-up. `app-shell/event-gate.js` holds server pushes from the snapshot request until it lands, with four ways out — a wedged gate would be a louder fault than the quiet corruption it prevents. Two of its eleven tests passed while asserting nothing until mutation found them |
 | An authenticated HTTP MCP listener, and a per-spawn `mcp_config.json` in the private root | [AG-22](decisions.md#ag-22) | A second listener on `127.0.0.1:0`, a `token → {repo_root, session_id}` map, and the config written at spawn. This is what makes `claude` reachable as a **consultant** and closes the half of [AG-1](decisions.md#ag-1) that has never existed. Needs [R-14](../plan/risks.md#r-14--two-refreshes-race-for-one-single-use-refresh-token)'s lock first |
 
@@ -682,13 +688,15 @@ any candidate has to pass.
   each step is provable before the next depends on it, and a half-built step is provable of nothing. That
   puts [AG-R-19](risks.md#ag-r-19) — with [AG-R-20](risks.md#ag-r-20) in front of it — ahead of
   [AG-R-18](risks.md#ag-r-18) and [AG-21](decisions.md#ag-21), which are otherwise the next pair.
-  **AG-R-20 was discharged on 2026-09-11**, so AG-R-19 is now unblocked and is what step 1 is waiting on.
+  **Both were discharged on 2026-09-11, in that order, and migration step 1 is complete.** The rule has
+  therefore stopped applying: nothing is half-built, so [AG-R-18](risks.md#ag-r-18) and
+  [AG-21](decisions.md#ag-21) are the next pair again.
 - **Both prerequisite pairs go together or not at all.** [AG-R-18](risks.md#ag-r-18) before
   [AG-21](decisions.md#ag-21), and [AG-R-20](risks.md#ag-r-20) before [AG-R-19](risks.md#ag-r-19)'s
   overflow policy. In both cases the second item silently breaks something the first item protects, and in
   both cases the prerequisite was found by consulting about a *different* question — which is the argument
-  for consulting before building rather than after. **The second pair is now half-discharged**: the gate
-  shipped first, as the rule requires, and AG-R-19 may proceed.
+  for consulting before building rather than after. **The second pair is discharged**: the gate shipped
+  first, as the rule requires, and the sender followed it the same day. The first pair has not moved.
 
 - **The capability descriptor late, but specified early.** It cannot be built until there are two
   engines to describe, but every phase from 3 onward must record which surfaces it could not serve —

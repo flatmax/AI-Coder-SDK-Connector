@@ -6187,3 +6187,74 @@ Two rounds converged, and the reviewer stated plainly where it had changed its m
 substantive claims, five were confirmed by measurement, one was refuted by measurement (the parse
 freeze), and two were withdrawn under the standing rules. That ratio is the argument for the protocol:
 **not that the reviewer is right, but that it is wrong in checkable ways.**
+
+---
+
+## The queue that had to prove it was a queue (2026-09-11)
+
+[AG-R-19](risks.md#ag-r-19) is built, and migration step 1 is complete. Server-push events no longer
+travel down jrpc-oo's `call` proxy. `src/aic_dc/broadcast.py` gives every connected client one bounded
+FIFO and one task that awaits `ws.send` before taking the next frame off it; `main._make_real_callback`
+enqueues and returns. The events are JSON-RPC notifications, so the 120 s `timeout_handler` task that used
+to be armed per event per client is gone along with the reply nothing read.
+
+### The test that was almost worthless, and what saved it
+
+The register said the tripwire must be on buffer depth rather than frame order, and it said why: Probe A
+had already measured fire-and-forget preserving wire order against a peer that never reads. A test
+asserting order would have passed before the change and after it.
+
+So the test stalls a real peer and watches `transport.get_write_buffer_size()`. Writing it surfaced a
+second way to assert nothing, one the register had not anticipated: **a deaf peer is not deaf if the
+kernel is listening for it.** With default socket buffers, two hundred frames disappear into the OS, the
+sender never suspends, the write buffer stays near zero, and every assertion passes for reasons that have
+nothing to do with the design. The probe scripts had already hit this once — 126 KB absorbed with
+`paused: False` — which is the only reason it was recognised on sight.
+
+The fix is the same one the probes used: pin `SO_SNDBUF` and `SO_RCVBUF` to 2048, pin the transport's
+water marks to 4096/2048, and pad every frame to 4 KB. Then a *control test* —
+`test_a_deaf_peer_really_does_stall_the_sender` — asserts under those exact conditions that the queue
+genuinely backs up. The tripwire also asserts `peak > 0`, so a sender that never wrote anything cannot
+satisfy the clamp by default.
+
+Mutation confirms all of it. Replace the awaited send with `create_task` and the assertion reads
+
+    assert 1547187 <= (2048 + 4098)
+
+which is Probe B's factor of two thousand, restated as a test that fails. Make overflow drop instead of
+evict and two tests go. Move `_sweep_ended_subagent` ahead of the enqueue — the thing an earlier revision
+of the entry told us to do, and a consultation talked us out of — and the causal-order test fails with
+`permissionResolved` reaching the wire ahead of the `subagentEvent` explaining it.
+
+### Three things building it found that discussing it had not
+
+**The seam was one level lower than planned.** The entry named `collab.py`'s `_run_admitted_connection`,
+because that is where a remote's UUID and its websocket are both in scope. So is `create_remote`, one
+level down — and *every* connection goes through it, collab or solo. One override on `MaxSizeJRPCServer`,
+one matching `rm_remote`, and both servers are covered.
+
+**Deleting the acknowledgement deleted a warning too.** The old path failed loudly when no remote exposed
+`AcApp.<event>`: the key was missing and `KeyError` produced a log line. A notification has no reply, and
+`webapp/node_modules/jrpc/jrpc.js:491` drops an unknown method *silently* when there is no `id` to answer
+with. Renaming a handler would have stopped events arriving with nothing anywhere saying so — the exact
+shape of *the thing was broken and nothing said so*. The check moved server-side, into
+`Broadcaster._warn_if_unexposed`, checked against the remote's own `system.listComponents` reply.
+
+**And it closed a drop nobody had reported.** `self.call["AcApp.<event>"]` does not exist until that
+handshake reply has been processed, so every event dispatched during the connect window was dropped with
+a warning. The sender has no such window: the frame queues, waits behind the handshake, and arrives.
+Nobody had filed this, and nobody would have — the events lost are startup progress on a connect that is
+about to render a full snapshot anyway. It is fixed as a side effect, which is worth recording precisely
+because the old behaviour was invisible.
+
+### What was deliberately not touched
+
+`Collab._push_event` still resolves the `call` proxy and awaits it, for `clientJoined`, `clientLeft`,
+`roleChanged` and the two admission events. It has the same `gather` and the same 120 s bound, and it is
+the obvious next thing — but it is not the master turn, it fires on connect and disconnect rather than
+inside a turn, and `_handle_disconnect` awaits it for a reason already written down: a previous
+fire-and-forget version left the broadcast tasks unstarted when `handle_connection` returned, and
+`clientLeft` never arrived. Changing it needs its own tripwire, and it is recorded in
+[AG-R-19](risks.md#ag-r-19) rather than done quietly here.
+
+5016 Python tests and 4519 webapp tests pass.
