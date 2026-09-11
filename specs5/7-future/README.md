@@ -9,6 +9,16 @@ recording rather than quietly deleting, because "we planned this and then got it
 strongest available evidence for the conversion's premise — see
 [`../plan/README.md`](../plan/README.md).
 
+## Reviews
+
+- [`rearchitecture-review.md`](rearchitecture-review.md) — **"if we started again", answered against
+  measurements rather than taste.** Three rounds through the `second_opinion` consultant, converged
+  2026-09-11. Concludes *no rewrite*: the descriptor-driven router, per-engine adapters and the
+  no-engine-branching rule stand. Carries a five-item ranking, two claims refuted under measurement
+  (one of them ours), one disagreement left standing, and the recurrence that outranks the ranking —
+  four subsystems that broke while reporting themselves healthy. The transport measurements it produced
+  changed a live decision and live in [AG-20](../plan-ag/decisions.md#ag-20) instead.
+
 ## Retired Because the Platform Implements It
 
 | Design | Superseded by | Notes |

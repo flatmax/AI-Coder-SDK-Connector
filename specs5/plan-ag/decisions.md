@@ -1356,6 +1356,11 @@ The last two are precisely the escapes that kill the marker design and its ances
 
 ### The private config root, re-raised and re-rejected — 2026-09-10
 
+> **Superseded in part by [AG-20](#ag-20) (2026-09-11).** The rejection below is specific to the
+> `--gemini_dir` variant, because its whole weight rests on the override travelling by argv. A
+> mount-namespace variant carries nothing on the command line and was measured containing all four
+> escapes. Do not act on this section without reading AG-20.
+
 Recorded because it was proposed again the same day, by a consultation that did not know this table
 existed, and because the *measurements* that came with it are new even though the conclusion is not.
 
@@ -1571,3 +1576,93 @@ toast; the escalation stays with `stop_ignored`, which appears only if the wind-
 invocation cannot be stopped without killing the process, which costs 3.7s of dead session to save a
 few seconds of text from a turn that holds no locks, runs no commands and touches no files. That
 trade remains the user's to make, through the force restart the `stop_ignored` card offers.
+
+## AG-20 — The private config root returns as a mount namespace **(measured 2026-09-11, unbuilt)**
+
+**Raised 2026-09-11 in a three-round architecture consultation, and recorded because it reverses
+the disposition of [AG-18](#ag-18) § *The private config root, re-raised and re-rejected*.** That
+section is not wrong; it is now known to be about the wrong variant.
+
+### What AG-18 actually killed
+
+AG-18 rejected a private config root on one argument, and only one — **the override travels by
+argv**. `--gemini_dir` does not reach an `agy` the model spawns through `run_command`, and does not
+reach the two cases [AG-R-14](risks.md#ag-r-14) exists for: a subagent whose first tool call beats
+its own announcement onto disk, and a grandchild announced to nobody. *Ungated and undetectable is
+worse than gated and passed-through*, so identity went to the kernel instead.
+
+The argument is sound. It is also specific to argv. A **mount namespace** delivers a private config
+root with no flag on the command line at all, by the same kernel-enforcement property that justified
+cgroup identity in the first place: bind a private directory over `~/.gemini`, and every descendant
+resolves our hook because there is no other `~/.gemini` for it to find.
+
+### Measured, on this machine, 2026-09-11
+
+| Probe | Result |
+|---|---|
+| `unshare -rm` unprivileged | **Refused** — `write failed /proc/self/uid_map`. `kernel.apparmor_restrict_unprivileged_userns = 1`, the Ubuntu 24.04+ default |
+| `bwrap` unprivileged | **Works** — it ships its own AppArmor profile. `0.11.1-1ubuntu0.1`, `Priority: optional`, installed **automatically** as a dependency of `libwebkit2gtk-4.1-0`, `xdg-desktop-portal` and `libgnome-desktop-*` |
+| Bind a private dir over `~/.gemini` | **Works** — empty inside, host unchanged after. A `touch ~/.gemini/CANARY` inside left no CANARY on the host |
+| Does auth survive an empty root? | **Yes** — a real turn authenticated against the subscription and returned its output. Credentials do not live under `~/.gemini` |
+| Does the CLI use the mounted root? | **Yes** — it populated `brain/`, `cache/`, `conversations/`, `knowledge/`, `installation_id` inside it |
+| Does a hook in `<private>/config/hooks.json` fire? | **Yes**, with a real `PreToolUse` payload for `run_command` |
+
+And the four escapes, re-run against the namespace — the same four that killed the environment
+marker and the ancestry walk in AG-18's table:
+
+| descendant | sees the host `~/.gemini`? |
+|---|---|
+| direct child | no — sees ours |
+| subshell | no — sees ours |
+| `env -i`, environment fully stripped | no — sees ours |
+| `setsid` double-fork | no — sees ours |
+
+**A first run reported "hook never fired" and was wrong**: the probe's `hooks.json` used an invented
+schema rather than the vendor's (`{"<name>": {"PreToolUse": [{"matcher": "*", "hooks": [...]}]}}`).
+Recorded because the failure looked exactly like the mechanism not working, and a conclusion drawn
+there would have been confidently backwards.
+
+### Two things in the record that the payload contradicts
+
+- **`workspacePaths` is not always empty.** [AG-14](#ag-14) chose `conversationId` because
+  `workspacePaths` was empty in every captured payload. In this capture it is `["/tmp/nsprobe/work"]`.
+  Whether that is 1.2.0 or the presence of `--add-dir` is not established, and the scoping decision
+  does not rest on it, but the stated premise no longer holds unconditionally.
+- **`transcriptPath` is on the payload**, confirming the README's unbuilt entry from a second capture.
+
+### What the consultation converged on, and the one disagreement
+
+Three rounds, `gemini-3.8-flash-high`. It conceded two of its own round-1 claims under measurement —
+that the vendor CLI is inherently fail-open (it blocks on four of five failure modes; the fail-open
+line is ours), and that `chat-panel/` had collapsed (34,407 lines is 18,112 tests plus 3,035 of
+CSS-in-JS, leaving ~13.3k across 17 modules). Its causal argument survived intact and is the reason
+this section exists:
+
+> The hook is global → therefore it cannot fail closed without breaking unmanaged terminal sessions →
+> therefore `|| printf '{"decision":"allow"}'` → therefore a runtime crash is a silent pass-through →
+> therefore `status()` can only compare command strings, never observe execution.
+
+That chain is the PyInstaller incident in [`risks.md`](risks.md) stated as a structure rather than as
+an accident. Confined, each link breaks: nothing unmanaged enters the namespace, so the gate may fail
+closed, so a broken interpreter halts the first tool call loudly instead of approving everything.
+
+**The disagreement, left on the record rather than resolved.** It holds that `bwrap` must become a
+hard prerequisite for the `agy` engine and the global hook deleted outright — that keeping it as a
+fallback preserves the fail-open line, the cgroup classifier and the static attestation blindness,
+and buys a bifurcated QA matrix. The position here is weaker: `bwrap` is `Priority: optional` and
+arrives via desktop dependencies, so it is near-universal on a developer workstation and absent on a
+stripped headless box, which is exactly where CI runs. Failing closed at the health check with an
+actionable message is the honest version of its recommendation, and is what this repo's standing
+instruction about missing commands already requires.
+
+### If this is built
+
+It retires rather than adds: `scope.py` and the cgroup lookup in `hook.py` become dead code, because
+nothing that is not ours can reach a hook that exists only inside our namespace. Session identity can
+then travel on the hook's own argv, which the namespace guarantees. Consultations take an ephemeral
+root — they are one-shot by [AG-16](#ag-16) and pollute the user's `brain/` today. `agy`-as-master
+needs a durable app-owned root, since `--conversation` resume state would live there.
+
+**Not scheduled.** `agy`-as-master is rare in real traffic and the consultant is the load it actually
+carries, so this is a correctness improvement to a path that works, not a fix to a path that is
+failing.

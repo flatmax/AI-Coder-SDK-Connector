@@ -618,13 +618,15 @@ nobody announces is indistinguishable from a hang. See
 | Standing guidance via `PreInvocation` `ephemeralMessage`, re-injected every invocation | [`sdk-surface.md` § There are five lifecycle events](sdk-surface.md#there-are-five-lifecycle-events-and-this-app-wires-one) | Replaces `agy_tools.WRITE_GUIDANCE` prepending text to the user's own prompt, which records guidance as though the user typed it. **Must fire on every `invocationNum`** — an ephemeral message evaporates after the invocation that received it |
 | Read `transcriptPath` from the hook payload | same § *Four details the probe did not have* | `subagents.py` derives it by hand today; the payload carries it, and carries the per-product directory name that differs. **Measured 2026-09-11** rather than only documented: it is on all three events' payloads |
 
-Two things deliberately **not** on this list, so that a future reader does not re-open them:
+One thing deliberately **not** on this list, so that a future reader does not re-open it:
 **consultation continuity** ([AG-16](decisions.md#ag-16) § *The answer, after asking Antigravity*) —
 one-shot is now a decision rather than an inheritance, and `agy`'s silent context compaction is the
-measurement that settles it; and **a private config root for the gate**
-([AG-18](decisions.md#ag-18) § *The private config root, re-raised and re-rejected*) — `--gemini_dir`
-works and its usual objections dissolved under measurement, and it is still wrong, because a hook that
-exists only for processes carrying a flag does not fire for the ones that escape.
+measurement that settles it. **A private config root for the gate** used to be the second
+([AG-18](decisions.md#ag-18) § *The private config root, re-raised and re-rejected*) and is no longer:
+the `--gemini_dir` variant is still wrong for the reason recorded there — a hook that exists only for
+processes carrying a flag does not fire for the ones that escape — but that reason is specific to
+argv, and [AG-20](decisions.md#ag-20) measures a **mount-namespace** variant that carries nothing on
+the command line and contains all four escapes. Re-opened, not scheduled.
 
 
 ## Ordering constraints that are not obvious

@@ -531,3 +531,148 @@ class TestTheConsultationGetsATab:
         assert beats, "no heartbeat at all"
         assert not any("queued behind paid traffic" in m for m in beats)
         assert any("Antigravity is working" in m for m in beats)
+
+
+class TestTheTabAndTheAnswerAgree:
+    """One stream, two consumers, and they used to be able to disagree.
+
+    A consultation's text reaches the browser as ``streamChunk`` deltas
+    and reaches the *calling model* through ``response_text()``, which on
+    the ``agy`` transport prefers the prose assembled in the ``result``
+    frame. Nothing tied those two together, so a complete answer beside an
+    empty tab was a reachable state — and it shipped
+    (``specs5/known-issues.md`` § *An empty consultation tab*). The first
+    two tests fail against the bridge as it shipped; the third passes there
+    and guards the fix against over-reaching.
+    """
+
+    class Recording:
+        """A translator that says what it was asked, and holds an answer.
+
+        Stands in for both real translators, which agree on the three
+        methods the bridge uses: ``translate``, ``turn_usage``,
+        ``response_text``.
+        """
+
+        def __init__(self, answer="", events=()):
+            self.answer = answer
+            self.seen: list = []
+            self._events = list(events)
+
+        def translate(self, step):
+            self.seen.append(step)
+            return list(self._events)
+
+        def turn_usage(self):
+            return {}
+
+        def response_text(self):
+            return self.answer
+
+    def bridge_with(self, translator, *, request_id="req-1", body=None):
+        """A bridge whose consultant hands back ``translator``.
+
+        ``request_id`` is read as a callable on every emit, so a test can
+        close the gate part-way through a consultation — which is the state
+        the first test is about, and is not reachable by passing ``None``
+        up front (``_tab`` then never opens at all).
+        """
+        seen = []
+        live = {"id": request_id}
+
+        async def emit(event, rid):
+            seen.append((event, rid))
+
+        class Consultant(FakeConsultant):
+            def make_translator(self, request_id, agent_id):
+                return translator
+
+            async def second_opinion(self, question, context="", observer=None):
+                if body is not None:
+                    body(observer, live)
+                return translator.answer or "ok"
+
+        bridge = ConsultantBridge(
+            Consultant(answer="ok"),
+            emit=emit,
+            request_id=lambda: live["id"],
+        )
+        return bridge, seen
+
+    @pytest.mark.asyncio
+    async def test_a_step_is_translated_even_with_no_tab_to_stream_to(self):
+        """Translation is how the answer is *built*, not how it is shown.
+
+        ``AgyConsultant._run`` calls ``observer(frame)`` **instead of**
+        ``translator.translate(frame)`` whenever a browser is attached, so
+        the observer holds the only pass over the stream. The old guard
+        returned before translating when there was no live turn to emit to,
+        which meant a window of ``request_id is None`` shortened the reply
+        the model received — a rendering condition silently corrupting the
+        answer.
+        """
+        translator = self.Recording(answer="the answer")
+
+        def stream(observer, live):
+            live["id"] = None  # the tab is open; the turn is now gone
+            observer(_step("hello"))
+
+        bridge, seen = self.bridge_with(translator, body=stream)
+        await bridge.second_opinion("Well?")
+
+        assert translator.seen, (
+            "the step was never translated, so response_text() could not "
+            "have seen it — the answer, not just the tab, loses text"
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_turn_that_streamed_no_text_seeds_the_tab_from_its_answer(self):
+        """No deltas is not the same as nothing to say.
+
+        Seeded from the translator the answer came out of, so the tab and
+        the tool result cannot disagree about what was said.
+        """
+        translator = self.Recording(answer="the whole answer", events=())
+
+        def stream(observer, live):
+            observer(_step("ignored — translate() yields nothing"))
+
+        bridge, seen = self.bridge_with(translator, body=stream)
+        await bridge.second_opinion("Well?")
+
+        chunks = [e for e, _ in seen if e.name == "streamChunk"]
+        assert chunks, "a consultation with prose left an empty tab"
+        assert chunks[-1].payload["content"] == "the whole answer"
+        assert chunks[-1].payload["done"] is True
+        # Same identity as the tab, or the block lands nowhere.
+        announced = [e for e, _ in seen if e.name == "subagentEvent"]
+        assert chunks[-1].payload["agent_id"] == announced[0].payload["agent_id"]
+
+    @pytest.mark.asyncio
+    async def test_a_turn_that_did_stream_is_not_seeded_on_top_of_itself(self):
+        """The seed is a fallback, not a footer.
+
+        A turn whose deltas arrived already has its text in the tab;
+        appending the assembled prose would render the answer twice.
+        """
+        from aic_dc.antigravity.bridge import Event
+
+        chunk = Event(
+            "streamChunk",
+            {"block_id": "b", "seq": 1, "content": "streamed", "done": True},
+        )
+        translator = self.Recording(answer="assembled", events=[chunk])
+
+        def stream(observer, live):
+            observer(_step("hello"))
+
+        bridge, seen = self.bridge_with(translator, body=stream)
+        await bridge.second_opinion("Well?")
+
+        contents = [
+            e.payload.get("content") for e, _ in seen if e.name == "streamChunk"
+        ]
+        assert contents == ["streamed"], (
+            f"the assembled prose was appended to a tab that already had "
+            f"text: {contents}"
+        )

@@ -232,10 +232,40 @@ class ConsultantBridge:
         def observe(step: Any) -> None:
             if progress is not None:
                 progress["steps"] += 1
+            # **Translate first, and unconditionally.** On this transport
+            # the answer exists *because* a frame was absorbed here:
+            # ``AgyConsultant._run`` calls ``observer(frame)`` instead of
+            # ``translator.translate(frame)`` whenever a browser is
+            # attached, so this is the only pass over the stream, and
+            # ``response_text()`` reads back what it accumulated. An
+            # earlier version returned before this loop when there was
+            # nothing to emit to, which entangled rendering with
+            # answer-extraction: any window where ``_turn()`` read ``None``
+            # silently shortened the reply as well as the tab.
+            events = translator.translate(step)
             request_id = self._turn()
             if self._emit is None or request_id is None:
+                # Once per consultation rather than once per step — a gate
+                # that closes stays closed, and the whole reason this is
+                # logged is that its silence made an empty tab
+                # undiagnosable (`specs5/known-issues.md` § *An empty
+                # consultation tab*).
+                if progress is not None and not progress.get("muted"):
+                    progress["muted"] = True
+                    logger.warning(
+                        "Consultation %s has nothing to stream to "
+                        "(emit=%s, request_id=%s) — the answer is unaffected, "
+                        "the tab will be seeded from the result frame",
+                        agent_id,
+                        self._emit is not None,
+                        request_id,
+                    )
                 return
-            for event in translator.translate(step):
+            for event in events:
+                # Counted so the tab can tell "said nothing" from "said
+                # nothing *here*", which is what `_tab` seeds against.
+                if progress is not None and event.name == "streamChunk":
+                    progress["text"] = progress.get("text", 0) + 1
                 # Fire-and-forget: an observer is called from inside the
                 # step loop and must not block it, and a dropped chunk
                 # costs a frame of text rather than the consultation.
@@ -300,7 +330,7 @@ class ConsultantBridge:
         # Mutable, shared with the heartbeat: it is the only way the
         # heartbeat can tell a queued consultation from a working one, and
         # that distinction is the whole of what it has to say.
-        progress = {"steps": 0}
+        progress = {"steps": 0, "text": 0}
         heartbeat = asyncio.ensure_future(self._heartbeat(agent_id, progress))
         try:
             yield self._observer(agent_id, translator, progress)
@@ -312,9 +342,20 @@ class ConsultantBridge:
             # Including cancellation: a consultation the user stopped did
             # not complete, and saying so is the point of the ⏹ button.
             raise
-            raise
         else:
             status = "completed"
+            # **The tab and the answer are not fed by the same frames.**
+            # Text reaches the tab as ``streamChunk`` deltas; the answer
+            # comes from ``response_text()``, which prefers the prose
+            # ``agy`` assembles in its ``result`` frame. So a turn that
+            # sent no deltas returns a complete answer to the caller and
+            # leaves the tab blank — which is how one shipped, and it read
+            # as a consultation that never ran
+            # (`specs5/known-issues.md` § *An empty consultation tab*).
+            # Seeded from the same translator the answer came out of, so
+            # the two cannot disagree about what was said.
+            if not progress["text"]:
+                await self._seed_tab(agent_id, translator)
         finally:
             heartbeat.cancel()
             # Drain what the observer scheduled before saying the tab is
@@ -367,6 +408,48 @@ class ConsultantBridge:
                 ),
                 request_id,
             )
+
+    async def _seed_tab(self, agent_id: str, translator: Any) -> None:
+        """Put the answer in the tab when no delta ever did.
+
+        One ``streamChunk`` in the shape ``AgyTranslator._agent_response``
+        already emits, so the browser needs no change: it replaces by
+        ``block_id``, and ``seq`` 1 is the first and only frame for a block
+        no delta ever wrote to.
+
+        Never raises. A tab is worth less than the answer it is describing,
+        and this runs on the path that has already earned ``completed``.
+        """
+        request_id = self._turn()
+        if self._emit is None or request_id is None:
+            return
+        read = getattr(translator, "response_text", None)
+        if not callable(read):
+            return
+        try:
+            text = read().strip()
+        except Exception:  # noqa: BLE001 - see the docstring
+            logger.exception("Could not read the consultation's prose for its tab")
+            return
+        if not text:
+            return
+        logger.info(
+            "Consultation %s streamed no text; seeding its tab from the result frame",
+            agent_id,
+        )
+        await self._push(
+            Event(
+                "streamChunk",
+                {
+                    "block_id": f"{agent_id}-answer",
+                    "seq": 1,
+                    "content": text,
+                    "done": True,
+                    "agent_id": agent_id,
+                },
+            ),
+            request_id,
+        )
 
     async def _push_reason(self, agent_id: str, exc: BaseException) -> None:
         """The failure's own words, into the tab that is about to go red."""
