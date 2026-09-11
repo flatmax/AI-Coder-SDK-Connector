@@ -74,8 +74,11 @@ PENDING = "pending"
 #: ``options.py`` is the expected way to close it.
 PENDING_OPTIONS: dict[str, str] = {
     "betas": "gates opt-in SDK features; today's only value is "
-    "context-1m-2025-08-07, the 1M-token context window. Worth wiring as "
-    "a config field once we decide whether the cost profile suits AIC-DC.",
+    "context-1m-2025-08-07, and on the models AIC-DC actually runs that "
+    "value buys nothing. Opus 5 carries native_1m in the CLI's own model "
+    "registry, so its window resolver returns 1M on that check before it "
+    "ever looks at betas. Leaving this unset is therefore not a decision "
+    "to stay at 200K — see KNOWN_BETAS for the knob that is.",
     "sandbox": "SandboxSettings would confine tool execution (filesystem "
     "and network) below the permission layer, so a bypassPermissions "
     "session would still be contained. Overlaps can_use_tool but is "
@@ -204,10 +207,22 @@ HOOK_EVENTS: dict[str, tuple[str, str]] = {
 #: clearest "there is a new feature" signal the wheel can give us, so it
 #: fails the test by name rather than sitting in a report nobody opened.
 KNOWN_BETAS: dict[str, str] = {
-    "context-1m-2025-08-07": "the 1M-token context window. Not requested: "
-    "it changes the cost profile of every turn, and the Context tab's "
-    "compaction thresholds are read from the live window, so enabling it "
-    "is a config decision with a UI consequence rather than a flag flip.",
+    "context-1m-2025-08-07": "the 1M-token context window, for models "
+    "that need asking. Not requested, and on Opus 5 that costs us "
+    "nothing to skip: the CLI's model registry gives claude-opus-5 "
+    "context.window 1e6 with native_1m set, and its window resolver "
+    "returns 1M on the native check ahead of the beta check, so a "
+    "session here runs a 1M window today. Verified 2026-09-11 by "
+    "``/autocompact`` on the bundled CLI, which answers ``auto`` — and "
+    "auto for a native-1M model is 1M, because the 200K model-default "
+    "branch is guarded by ``window < 1e6`` and never fires. The real "
+    "control is the CLI's autoCompactWindow setting (env override "
+    "CLAUDE_CODE_AUTO_COMPACT_WINDOW, slash command /autocompact, "
+    "clamped to 100K-1M and applied as min(model window, configured)). "
+    "That is a cap on where autocompact triggers rather than on the "
+    "window itself, which is the distinction the Context tab already "
+    "draws between autoCompactThreshold and maxTokens. Queued as "
+    "next.md § C12.",
 }
 
 #: Client methods that exist for hosts we are not. Checked so the client

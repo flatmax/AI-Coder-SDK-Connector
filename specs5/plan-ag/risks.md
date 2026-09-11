@@ -1296,12 +1296,17 @@ a further `step_update`. The stream reader knows both facts and today does not c
 warning naming the conversation is enough, because the case is a user's hook fighting the stop
 button and the useful thing is to say so rather than to fix it silently.
 
-**Mitigated 2026-09-11**, and the tripwire arrived from the other direction. The `Stop` handler ships
-with [AG-19](decisions.md#ag-19) on the same registration, so this app is a voice for stopping on
-**every** turn rather than only when defending — and `hook.report_stop` returns a literal `{}` rather
-than anything derived from the socket, so no host bug and no failure can reach the `"continue"` this
-risk is about. Whether that voice *wins* against a concurrent `"continue"` is still unverified, and
-is still worth a probe before it is relied on.
+**A `Stop` handler shipped 2026-09-11** with [AG-19](decisions.md#ag-19), on the same registration,
+and `hook.report_stop` returns a literal `{}` rather than anything derived from the socket — so no
+host bug and no failure can reach the `"continue"` this risk is about.
+
+*It was written here, that day, as this app being "a voice for stopping on every turn". **That is
+false and the correction is above**: measured 2026-09-12, a rival `continue` wins in either order,
+and when it runs first this app's handler is not run at all. The handler earns its place as the
+only reader of `terminationReason`, not as a vote. The sentence is replaced rather than deleted
+because it is the claim the next reader would otherwise have reasoned from — and because believing
+the shipped documentation for a day, on a mechanism this entry had itself flagged as unverified, is
+the mistake worth leaving visible.*
 
 What is now built is the detection this asked for, keyed on the field measured the same day:
 `AgyGateServer.note_stop` compares the `Stop` payload's `terminationReason` against its own record of

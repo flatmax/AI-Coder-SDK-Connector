@@ -7,9 +7,13 @@ that SHA, so every claim here is about a committed state and nothing is owed to 
 closed with D2's harness, and § A2 (d)'s "never on a runner" was corrected from the remote. Everything
 else was last checked at the SHA above, and closing those re-checked nothing else.
 
-**Then § D emptied on 2026-09-09**, with D1 and D4 verified against a live engine in a real browser. **So
-the only thing left in §§ A–D is C9, whose exit criterion is an event rather than a commit** — see the
+**Then § D emptied on 2026-09-09**, with D1 and D4 verified against a live engine in a real browser. That
+left C9 as the only open item in §§ A–D, whose exit criterion is an event rather than a commit — see the
 summary under § *Start here*, which had this wrong once already.
+
+**§ C reopened on 2026-09-11 with C12**, found by asking a question about a setting rather than by
+auditing anything: every session has been running a 1M context window, and two notes in `sdk_surface.py`
+described that as a decision we had declined. The notes are corrected; the config field is queued.
 
 **Two things landed in this period without ever appearing in this file**, and they are recorded where their
 reasoning lives rather than added here as closed items. `32d04ce7` stopped a backgrounded shell command
@@ -229,6 +233,17 @@ Two findings worth keeping. The header summary had been recorded as blocked on t
 path by its shape. And there were **three** mechanisms, not the two the item counted:
 `Reindexer._relative` turns a written path into an index key, which is server-side with no browser in it,
 and it stays. The line is *who the answer is for*, not how many functions do string surgery on a path.
+
+**§ C reopened again on 2026-09-11 with C12**, and it came from the fourth source — a user asking a
+question about the app, not an audit of it. The question was *should the context window be 200K instead of
+1M*, and answering it found that nobody had ever chosen: Opus 5 is natively 1M in the CLI's model
+registry, so every session has run a 1M window, while two notes in `sdk_surface.py` described 1M as an
+option we had declined on cost grounds. **The notes were not wrong about a fact, they were wrong about
+which mechanism owned it** — they reasoned about a beta header for a model that does not consult one.
+That is a variant of § C4's lesson rather than a repeat: not an item blocked by its own framing, but a
+*decision recorded as made* when the thing it named had no effect either way. The cheap guard is the one
+that found it — ask the running binary (`/autocompact` answers `auto`) instead of reading the flag we
+chose not to send.
 
 **§ C4 closed by finding its own answer already written down** (2026-08-28). It had been deferred as a
 display decision with three plausible options; the house rule for naming a file on screen was already in
@@ -613,10 +628,11 @@ maps to a real field, so a key cannot again be serialised out of nothing.
 
 ## C. Found while working — correctness and honesty
 
-**Every item in this section is closed** as of 2026-08-28 — built, fixed, or decided. The entries stay
-because each one holds the reasoning for a change, and because two of them are the record of an item being
-blocked by its own framing rather than by any work: § C3 on a per-tool table that did not need to exist,
-§ C4 on a three-way display choice the app had already made.
+**Every item in this section was closed** as of 2026-08-28 — built, fixed, or decided — **and § C12
+reopened it on 2026-09-11.** The closed entries stay because each one holds the reasoning for a change,
+and because two of them are the record of an item being blocked by its own framing rather than by any
+work: § C3 on a per-tool table that did not need to exist, § C4 on a three-way display choice the app had
+already made.
 
 **C1 — A lost session keeps being polled.** ✅ *Fixed 2026-08-28 — leaves this queue.* `usage-hud.js`
 now listens for `engineHealth`, skips the fetch while the engine is gone, and renders a state instead of
@@ -966,6 +982,45 @@ here. **Which of the two the reported error actually was is still unknown**, and
 next occurrence will settle. The second question — whether `health.last_error` survived on the state
 snapshot long enough for a browser reload to show it — decides whether this was "invisible after a
 restart" or "invisible immediately", and remains unexamined.
+
+**C12 — Every session has been running a 1M context window, and two of our own notes said otherwise.**
+Reported 2026-09-11 as a question — *would 200K be better than 1M?* — and the first thing worth
+answering was that the choice had never been made. `sdk_surface.py` carried it as declined twice:
+`PENDING_OPTIONS["betas"]` called the 1M window something "worth wiring as a config field once we decide
+whether the cost profile suits AIC-DC", and `KNOWN_BETAS["context-1m-2025-08-07"]` said "Not requested:
+it changes the cost profile of every turn". **Both sentences are about a beta header, and the beta header
+is not what turns 1M on for the model we run.** Corrected in place 2026-09-11; the queued half is below.
+
+**What the CLI actually does.** Its model registry has `claude-opus-5` with
+`context: {window: 1e6, native_1m: true, supports_1m_beta: true}`, and the window resolver returns `1e6`
+on the `native_1m` check *before* it tests for the beta header or the `[1m]` model suffix. So declining
+the beta changes nothing, and `engine.json`'s plain `"model": "claude-opus-5"` has been getting a 1M
+window since the day it was set. Verified against a live binary rather than read off the source:
+`/autocompact` on the bundled CLI answers `auto`, and `auto` resolves to 1M here because the branch that
+would cap at 200K (`dfe = 200000`, `source: "model-default"`) is guarded by `window < 1e6` and cannot
+fire for a native-1M model.
+
+**The knob is `autoCompactWindow`, and it is a different knob than the one we were discussing.** The CLI
+takes it as a settings key, as `CLAUDE_CODE_AUTO_COMPACT_WINDOW`, and as `/autocompact [auto|<tokens>]`;
+it is clamped to 100K–1M and applied as `min(model window, configured)`, so it can only shrink and is
+reversible in one edit. It caps *where autocompact triggers*, not the window — which is exactly the
+distinction [`context-usage.js`](../webapp/src/context-usage.js) already draws between
+`autoCompactThreshold` and `maxTokens`, and worth keeping straight in whatever UI carries it.
+
+**Done looks like an `auto_compact_window` field on `EngineConfig`**, null-by-default in the same
+already-established sense as `model` and `effort` — null means "pass nothing, let the CLI pick" — reaching
+the subprocess through the `env` dict `options.py` already builds, and surfaced on the Settings tab beside
+the model and effort panels. `engine.json` is not reloadable, so it belongs to `_pendingFields` and the
+restart confirmation like every other field there
+([`5-webapp/settings.md`](5-webapp/settings.md) § *Preference Cards*).
+
+**A second thing closes with it, and is the reason not to leave this as a settings.json note to the
+user.** `bandColor` in `context-usage.js` carries its own admission that the green/amber/red thresholds
+are wrong for a 1M window — "20 000 tokens is 2% and this function is still green" — and ends "Worth
+revisiting the day a 1 M window is the common case." **That day was already here and nothing in the tree
+knew it.** Capping the window at 200K makes the existing bands honest without touching them; leaving it at
+1M means the band rule is the item instead. Either is defensible, but the file currently does neither and
+says the opposite of what is running.
 
 ---
 

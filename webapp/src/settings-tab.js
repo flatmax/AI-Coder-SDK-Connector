@@ -835,9 +835,33 @@ export class SettingsTab extends RpcMixin(LitElement) {
       line-height: 1.2;
     }
 
+    /* flex: 0 0 auto, not flex: 1, and the difference was the whole of the
+     * "there is no way to edit the config files" defect. :host is a column
+     * flex container with height: 100% and overflow-y: auto, so the panels
+     * above this one — retired note, agy gate, permission rules, model,
+     * consultant, preference cards, card grid — already overflow it on
+     * their own: measured 989px of content in a 473px host. flex: 1
+     * resolves to flex-basis: 0%, which means this box asks for no height
+     * and takes only its share of free space; the free space was negative,
+     * and min-height: 0 removed the automatic minimum that would have let
+     * the 200px textarea inside hold it open. The result laid out at 2px —
+     * the two borders — and the overflow: hidden below clipped the editor
+     * entirely, so clicking a card lit its blue active ring and appeared to
+     * do nothing else.
+     *
+     * The host scrolls, so there is no height here to compete for in the
+     * first place: this takes its natural size and the user scrolls to it,
+     * which is also what makes _scrollTo('.editor-area', 'center') land
+     * somewhere rather than on a sliver.
+     *
+     * This is § D's argument again, and at its sharpest: the rule *arrived*
+     * in the shadow root exactly as written, all 124 settings-tab unit
+     * tests passed, and jsdom computes no layout — so nothing in the suite
+     * could see a box that was two pixels tall. Verified by measuring the
+     * real component in the running app: 2px before, 237px after.
+     * (No backticks in this block: it is all one template literal.) */
     .editor-area {
-      flex: 1;
-      min-height: 0;
+      flex: 0 0 auto;
       display: flex;
       flex-direction: column;
       border: 1px solid rgba(240, 246, 252, 0.1);
