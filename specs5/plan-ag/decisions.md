@@ -1579,6 +1579,11 @@ trade remains the user's to make, through the force restart the `stop_ignored` c
 
 ## AG-20 — The private config root returns as a mount namespace **(measured 2026-09-11, unbuilt)**
 
+> **Superseded as the primary mechanism by [AG-21](#ag-21) (2026-09-11, one day later).** Every
+> measurement below stands, and `bwrap` remains the right *hardening* layer. What changed is that a
+> private config root needs no namespace at all: `agy` honours `HOME`. Read AG-21 first — the
+> availability matrix below is a reason to keep `bwrap` optional, not a problem to solve.
+
 **Raised 2026-09-11 in a three-round architecture consultation, and recorded because it reverses
 the disposition of [AG-18](#ag-18) § *The private config root, re-raised and re-rejected*.** That
 section is not wrong; it is now known to be about the wrong variant.
@@ -1666,3 +1671,88 @@ needs a durable app-owned root, since `--conversation` resume state would live t
 **Not scheduled.** `agy`-as-master is rare in real traffic and the consultant is the load it actually
 carries, so this is a correctness improvement to a path that works, not a fix to a path that is
 failing.
+
+## AG-21 — The private config root is an environment variable, not a namespace **(measured 2026-09-11, unbuilt)**
+
+**This supersedes [AG-20](#ag-20) as the primary mechanism, one day after AG-20 was written, and the
+reason is worth more than the result: AG-20 solved a problem that a single environment variable already
+solved.** The question "how do we give `agy` a private `~/.gemini`" was answered with a mount
+namespace, and never with `HOME`. Nothing in this plan had asked whether the vendor honours `HOME` — so
+`bwrap`, AppArmor, unprivileged user namespaces and a whole availability matrix were reasoned about at
+length to obtain a property that `env HOME=…` delivers on every kernel. The pattern is not
+"bwrap was wrong"; it is that **the cheapest mechanism was never probed**, and three rounds of
+consultation went past it because both sides accepted the framing.
+
+### Measured, `agy` v1.2.0, 2026-09-11
+
+| Probe | Result |
+|---|---|
+| Does the config tree follow `HOME`? | **Yes, completely.** `HOME=/tmp/fakehome agy mcp add …` created `/tmp/fakehome/.gemini/config/mcp_config.json`; the real `~/.gemini/config` was byte-identical afterwards, verified by `diff` against a snapshot |
+| Does a hook in the private root fire? | **Yes, with full arguments.** A canary at `<private>/.gemini/config/hooks.json` received `{"toolCall":{"name":"list_dir","args":{…}},"conversationId":…,"modelName":"gemini-3.8-flash-high","stepIdx":2}` |
+| Is a `deny` from it honoured? | **Yes.** The model reported it could not run shell commands and answered in prose. No tool executed |
+| Does the brain/transcript tree relocate too? | **Yes** — `artifactDirectoryPath` came back as `<private>/.gemini/antigravity-cli/brain/<conversationId>`, so it is the whole tree and not just the config file |
+| Does auth survive an empty private `HOME`? | **Yes** — a real turn authenticated against the paid subscription from a root containing nothing but the canary hook. Credentials are in the login keyring over the session bus (`org.freedesktop.secrets`, `/org/freedesktop/secrets/collection/login`), addressed by `DBUS_SESSION_BUS_ADDRESS`, which is an environment variable and not a `HOME` path |
+| Does `XDG_CONFIG_HOME` win over `HOME`? | **No.** With both set, the write landed under `HOME`; the XDG path stayed empty. `HOME` is authoritative for this tree |
+| Does a repo-level `.gemini/config/` in CWD override it? | **No** for `mcp_config.json` — a planted `repo-level-canary` was not listed. Not yet proven for `hooks.json` specifically, and that is the one that matters |
+
+### What this buys, and what it does not
+
+`HOME` delivers every property the namespace was chosen for **as far as hook delivery and config
+privacy go**, and one the namespace does not: it works where `bwrap` cannot.
+
+- **Private per invocation**, so the user's own interactive `agy` is untouched — which removes the
+  conflict of interest that forced the fail-open line in the first place (see `install.py`, and the
+  reversal in [AG-20](#ag-20)).
+- **No argv on the vendor command line.** It is `env`, not a flag: nothing to typo, nothing for the
+  vendor to deprecate. That was the stated advantage of `bwrap` over `--gemini_dir`, and `HOME` has it.
+- **No package, no AppArmor profile, no user namespace, no root, no seccomp flag.** Measured: in a
+  default Docker container (v29.1.3, builtin seccomp, uid 0) `unshare --user --map-root-user` fails
+  with `EPERM`, and only `--security-opt seccomp=unconfined` lifts it — a remediation that weakens the
+  container to enable a sandbox, which is self-defeating. `HOME` needs none of it.
+
+**What it is not is containment, and the distinction is the whole of it.** A hook is a callback
+*inside the untrusted binary*; a mount namespace is a kernel boundary. With `HOME` alone, policy holds
+only while the vendor routes every tool through `PreToolUse` and honours the verdict — and any code
+that does execute can reach `/home/<user>/` by absolute path regardless of what `HOME` says. So:
+
+- **`HOME` + fail-closed hook is the always-available primary mechanism.** Nothing fails closed for
+  want of `bubblewrap`.
+- **`bwrap --ro-bind / /` is optional defence in depth**, a tier reported through the capability
+  descriptor, never a prerequisite. AG-20's measurements stand; its status changes from *the* mechanism
+  to *the hardening*.
+
+The fail-closed premise is already measured and is not new work: `agy` blocks the tool on timeout,
+non-zero exit, malformed JSON and missing command, and allows only on exit-0-with-empty-stdout. Four of
+five failure modes are safe, which is why the `|| printf '{"decision":"allow"}'` fallback can simply be
+deleted once the root is private rather than replaced with something cleverer.
+
+### Two roots, not one — and the reason is the hooks file
+
+The consultant is not the only caller: `agy` also runs as a **master** engine with history and resume,
+and the brain tree lives under `$HOME/.gemini/antigravity-cli/brain/<conversationId>`. A single shared
+private root was considered and refused, because the two modes want *opposite* contents in the same
+`hooks.json`: the master needs tool calls **allowed** and routed to the permission dialog, the
+consultant needs them **denied**. One file cannot hold both, and a concurrent consultation during a
+master turn would have them fighting over it.
+
+- **Master:** one **stable** private root under AIC-DC's own state dir, so resume keeps working across
+  restarts while still being isolated from the user's `~/.gemini`.
+- **Consultant:** an **ephemeral per-invocation** root, seeded with a static fail-closed hook and
+  removed in a `finally`. Concurrency becomes free, and a consultation cannot litter the master's
+  history or read it.
+
+A consultant hook that denies everything also needs **no socket and no daemon** — it can be an
+immutable script emitting a constant `deny`, which removes the socket lifecycle, the readiness race
+and the `sys.executable` resolution that caused the original incident.
+
+### Still unmeasured, and honestly so
+
+- **Headless auth.** The claim "it works in the default Docker container" is over-stated and was
+  corrected in review: an empty `HOME` was proven to authenticate **on a desktop with a session bus**.
+  A container typically has no D-Bus and no Secret Service, and how `agy` authenticates there is
+  unknown. This is the gating unknown for the containerised deployment, not `bubblewrap`.
+- **`hooks.json` at repo level.** Only `mcp_config.json` was probed for CWD precedence.
+- **Universal `PreToolUse` coverage.** Verified for `list_dir`. Not verified for `search_web`,
+  `read_url_content` or subagent invocation, and a tool that skips the hook is the failure that matters.
+- **Environment inheritance.** `agy` should be spawned with an explicit environment allowlist rather
+  than the parent's, so it inherits no `ANTHROPIC_API_KEY`, `AWS_*` or similar. Not yet done.

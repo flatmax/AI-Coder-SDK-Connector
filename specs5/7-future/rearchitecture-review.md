@@ -39,7 +39,7 @@ reviewer's own final list are marked, because the disagreements are the useful p
 
 | | Item | Verdict |
 |---|---|---|
-| **1** | **Containment placement** — confine `agy` in a mount namespace, drop the global hook | The one item with a realized failure and a validated replacement. Full measurement in [AG-20](../plan-ag/decisions.md#ag-20) |
+| **1** | **Containment placement** — give `agy` a private config root, keep the hook and make it fail-closed | The one item with a realized failure and a validated replacement. **Amended 2026-09-11:** the mechanism is `HOME`, not a mount namespace, and the hook is *relocated* rather than deleted — see [AG-21](../plan-ag/decisions.md#ag-21), which supersedes [AG-20](../plan-ag/decisions.md#ag-20) as the primary mechanism |
 | **2** | **Consultant plumbing** — consultations as child sessions on the master pipeline | *Departure.* The reviewer ranked this MEDIUM in round 2 and then omitted it from its round-3 list without saying why. Promoted here instead, because a defect landed in exactly this seam within the hour — [`known-issues.md`](../known-issues.md) § *An empty consultation tab* |
 | **3** | **Static engine contract** — `typing.Protocol` validated at registration, replacing reflection over a reference implementation | Cheap enough (hours) that the rank barely matters; do it whenever the file is open. Both reviewers called the present scheme a smell with near-zero blast radius, and that is right: three engines, a mismatch caught by the first local run |
 | **4** | **Surgical extraction from `claude_code/`** — `review.py` (402), `turn_hud.py` (366), the decoupled part of `commit.py` (514) | ~1.3k lines move as-is. *Not* the 6.3k first claimed — see the reversal below |
@@ -121,3 +121,30 @@ its own health by inspecting its own configuration will eventually report health
 Same as the rest of this layer: an entry graduates by being specified in a numbered layer with a
 behavioural contract and invariants. An entry refuted by measurement stays, marked as refuted, because
 the refutation is the finding.
+
+## A third reversal, one day later
+
+**Rank 1's mechanism was wrong, and both reviewers missed it the same way.** The follow-up consultation
+of 2026-09-11 — three further rounds on whether to delete the hook path — spent two of them reasoning
+about `bubblewrap` availability: whether it could be a wheel dependency, whether it could be vendored
+(no: the AppArmor profile is attached to the literal path `/usr/bin/bwrap`, so a copy is denied), and
+what should happen on hosts that cannot have it. The answer to all of it is that the question was never
+necessary. `agy` honours `HOME`, so a private config root costs one environment variable on every
+kernel, with no package and no privilege. Measured in [AG-21](../plan-ag/decisions.md#ag-21).
+
+Two things are worth keeping from how that went wrong, since the ranking will be re-read and this
+paragraph is the part that generalises:
+
+- **Both sides accepted the framing.** The maintainer asked "how do we contain `agy`" and the reviewer
+  answered it; nobody asked "what is the cheapest thing that gives a private config root". Three rounds
+  of otherwise careful argument went past `env HOME=…` because it was never on the table. The reviewer
+  cannot see the repository, so the framing it is handed is the framing it works in — which makes the
+  framing the maintainer's responsibility, not the reviewer's.
+- **The consultation was still worth it, and not for its recommendation.** It produced the causal
+  finding that the fail-open line was forced by *globalness* rather than by hooks — quoted back out of
+  `install.py` afterwards, unprompted and correct — and that is what makes "relocate the hook and make
+  it fail-closed" available at all. The recommendation it argued for (delete the hook, fail closed
+  without `bwrap`) is now moot. The diagnosis it supplied on the way is what survived.
+
+This is the fourth entry in the pattern below, in a different key: not a component that broke while
+reporting itself healthy, but a design that was argued at length while its premise went unprobed.
