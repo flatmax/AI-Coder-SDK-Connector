@@ -787,3 +787,78 @@ class TestTheRefusalOutlivesTheTurnItStopped:
         assert server._refusal is not None
         server.resume()
         assert server._refusal is None
+
+
+class TestARevivedLoopIsNamedInTheLog:
+    """AG-R-16's harm, made legible rather than silent.
+
+    Measured 2026-09-12 by `scripts/probe_agy_terminate_vs_continue.py`:
+    with a third-party `Stop` hook answering `continue`, AG-19's
+    `PostInvocation` terminate and that `continue` **ping-pong** — eight
+    invocations in sixteen seconds, every one ended by this app and revived
+    by the rival, bounded only by `--print-timeout`, which `AgySession`
+    sets to 12h.
+
+    So what this app shipped for the stop makes that scenario *cost more*
+    than it did before: without the terminate the turn merely hangs, and
+    with it the loop cycles. That is not an argument against the terminate —
+    an unopposed one ends a loop in a single invocation, which is the whole
+    of AG-19 — but it is a condition the log has to name, because from the
+    outside it is a turn the user stopped that will not stop.
+
+    Nothing is *acted* on here. Ending the process is an explicit user
+    escalation (AG-19) and bounding the turn is a decision above this
+    class; what this owes is to stop the condition being invisible.
+    """
+
+    def test_one_termination_is_the_ordinary_stop_and_says_nothing(self, wired, caplog):
+        _recorder, _gate, server, _cfg = wired
+        server.refuse_all("stopped")
+        with caplog.at_level("WARNING"):
+            assert server.decide_invocation(invocation()) == {
+                "terminationBehavior": "terminate"
+            }
+        assert caplog.text == ""
+
+    def test_the_second_one_says_the_stop_is_being_overridden(self, wired, caplog):
+        _recorder, _gate, server, _cfg = wired
+        server.refuse_all("stopped")
+        server.decide_invocation(invocation(num=0))
+        with caplog.at_level("WARNING"):
+            server.decide_invocation(invocation(num=1))
+        assert "revived" in caplog.text
+        assert "AG-R-16" in caplog.text
+        assert OURS in caplog.text
+
+    def test_it_does_not_repeat_itself_for_every_cycle(self, wired, caplog):
+        """Eight cycles is one fact, not eight — and the log is the one
+        place a runaway turn stays legible."""
+        _recorder, _gate, server, _cfg = wired
+        server.refuse_all("stopped")
+        with caplog.at_level("WARNING"):
+            for number in range(8):
+                server.decide_invocation(invocation(num=number))
+        assert caplog.text.count("revived") == 1
+
+    def test_the_loop_is_still_ended_every_time(self, wired):
+        """The warning is a report; the mechanism does not give up.
+
+        Answering anything but `terminate` after the first cycle would hand
+        the revived loop exactly what it wants.
+        """
+        _recorder, _gate, server, _cfg = wired
+        server.refuse_all("stopped")
+        for number in range(5):
+            assert server.decide_invocation(invocation(num=number)) == {
+                "terminationBehavior": "terminate"
+            }
+
+    def test_a_new_turn_starts_the_count_again(self, wired, caplog):
+        _recorder, _gate, server, _cfg = wired
+        server.refuse_all("stopped")
+        server.decide_invocation(invocation(num=0))
+        server.resume()
+        server.refuse_all("stopped again")
+        with caplog.at_level("WARNING"):
+            server.decide_invocation(invocation(num=0))
+        assert caplog.text == ""

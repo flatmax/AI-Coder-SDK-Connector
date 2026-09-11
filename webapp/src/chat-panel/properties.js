@@ -60,6 +60,15 @@ export const PROPERTIES = {
   _tabStripOverflowOpen: { type: Boolean, state: true },
 
   /**
+   * The RPC method of the system-card escalation currently in flight, or
+   * null. Only `stop_ignored` offers one — a force restart when ⏹ did not
+   * land — and it is held here rather than on the card so the button can
+   * disable itself while `restart_session` rebuilds the harness, which
+   * takes a few seconds and must not be asked for twice.
+   */
+  _systemActionPending: { type: String, state: true },
+
+  /**
    * Messages as `{role, content, system_event?}` dicts.
    * Replaced wholesale on session load; appended during
    * normal conversation. Always a new array on change so

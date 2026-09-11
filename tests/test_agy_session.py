@@ -658,3 +658,140 @@ class TestTheStopIsAMechanism:
         assert terminated is False
         footer = [e for e in events if e.name == "streamComplete"][-1]
         assert footer.payload["cancelled"] is False
+
+
+class TestAStopThatDoesNotLandIsReported:
+    """AG-R-16 raised to high, and this is what the app owes for it.
+
+    ⏹ is layered and both layers can be outlasted. The gate refuses tool
+    calls, which a prose-only turn never makes. The `PostInvocation`
+    terminate ends the loop, which a `Stop` hook this app does not own can
+    undo — measured 2026-09-12 as a ping-pong, eight invocations in sixteen
+    seconds, bounded only by `--print-timeout`, which is 12h here.
+
+    From where the user sits both are one condition: **they pressed stop
+    and the turn is still going.** So one report, once, naming the cause it
+    can distinguish and ending nothing — AG-19 demoted killing the process
+    to an explicit escalation, and a ceiling that fired on its own would
+    eventually fire on a legitimate turn waiting in a permission dialog.
+    """
+
+    def _at(self, session, now):
+        """Point the session's clock at a value the test controls."""
+        session._clock = lambda: now[0]
+
+    def _drain(self, wired, *, advance, cancel=True):
+        session, server, _cfg, _events = wired
+        now = [1000.0]
+        self._at(session, now)
+
+        async def go():
+            await session.start()
+            gen = session.stream_turn("x", translator=AgyTranslator("r1"))
+            out = [await gen.__anext__()]
+            if cancel:
+                await session.cancel()
+            now[0] += advance
+            async for event in gen:
+                out.append(event)
+            await session.close()
+            return out
+
+        return asyncio.run(go()), server
+
+    def _reports(self, events):
+        return [
+            e
+            for e in events
+            if e.name == "systemEvent" and e.payload.get("subtype") == "stop_ignored"
+        ]
+
+    def test_a_stop_that_lands_quickly_says_nothing(self, wired):
+        events, _server = self._drain(wired, advance=1.0)
+        assert self._reports(events) == []
+
+    def test_an_uncancelled_turn_says_nothing_however_long_it_runs(self, wired):
+        events, _server = self._drain(wired, advance=600.0, cancel=False)
+        assert self._reports(events) == []
+
+    def test_a_stop_still_running_past_the_threshold_is_reported(self, wired):
+        events, _server = self._drain(wired, advance=30.0)
+        reports = self._reports(events)
+        assert len(reports) == 1
+        assert reports[0].payload["data"]["seconds"] == 30.0
+
+    def test_it_reports_once_however_many_frames_follow(self, wired):
+        """A turn being overridden emits continuously, and one card per
+        frame would bury the message it is trying to deliver."""
+        events, _server = self._drain(wired, advance=30.0)
+        assert len(self._reports(events)) == 1
+
+    def test_it_ends_nothing(self, wired):
+        """The whole point of reporting rather than acting.
+
+        The turn runs to its own end and the session is still usable — the
+        escalation is the user's to take, from the control the report
+        offers them.
+        """
+        session, _server, _cfg, _events = wired
+        events, _server2 = self._drain(wired, advance=30.0)
+        assert [e.name for e in events][-1] == "streamComplete"
+        assert session.started is False  # closed by the drain, not by the report
+
+    def test_an_overridden_loop_is_named_as_one(self, wired):
+        """`revived` is the difference between two very different stories.
+
+        A loop put back after the gate ended it is somebody's hook
+        overriding the user. A turn that simply cannot be starved is prose,
+        asking permission for nothing — AG-19's residual gap, and not
+        anyone's fault.
+        """
+        session, server, _cfg, _events = wired
+        now = [1000.0]
+        session._clock = lambda: now[0]
+
+        async def go():
+            await session.start()
+            gen = session.stream_turn("x", translator=AgyTranslator("r1"))
+            out = [await gen.__anext__()]
+            await session.cancel()
+            # The gate ends the loop twice: once for the stop, once because
+            # something put the loop back.
+            server.decide_invocation({"conversationId": CONV, "invocationNum": 0})
+            server.decide_invocation({"conversationId": CONV, "invocationNum": 1})
+            now[0] += 30
+            async for event in gen:
+                out.append(event)
+            await session.close()
+            return out
+
+        reports = self._reports(asyncio.run(go()))
+        assert len(reports) == 1
+        assert reports[0].payload["data"]["revived"] is True
+
+    def test_a_stop_that_was_merely_slow_is_not_blamed_on_a_hook(self, wired):
+        events, _server = self._drain(wired, advance=30.0)
+        assert self._reports(events)[0].payload["data"]["revived"] is False
+
+    def test_the_next_turn_starts_clean(self, wired):
+        session, _server, _cfg, _events = wired
+        now = [1000.0]
+        session._clock = lambda: now[0]
+
+        async def go():
+            await session.start()
+            gen = session.stream_turn("x", translator=AgyTranslator("r1"))
+            await gen.__anext__()
+            await session.cancel()
+            now[0] += 30
+            async for _event in gen:
+                pass
+            out = []
+            async for event in session.stream_turn(
+                "y", translator=AgyTranslator("r2")
+            ):
+                out.append(event)
+            await session.close()
+            return out
+
+        assert self._reports(asyncio.run(go())) == []

@@ -828,6 +828,33 @@ export const STYLES = css`
     opacity: 1;
   }
 
+  /* The escalation a system card offers — today only the force restart on
+   * a stop that did not land. Deliberately not hover-revealed like the
+   * badges above: this appears when the user has already pressed stop and
+   * been ignored, and a control they have to discover would be the third
+   * thing in a row that did not do what they asked. */
+  .system-action {
+    margin-top: 0.5rem;
+  }
+  .system-action-button {
+    font: inherit;
+    font-size: 0.85em;
+    padding: 0.3rem 0.75rem;
+    border-radius: 4px;
+    border: 1px solid var(--warning-color, #b58900);
+    background: transparent;
+    color: var(--warning-color, #b58900);
+    cursor: pointer;
+  }
+  .system-action-button:hover:not(:disabled) {
+    background: var(--warning-color, #b58900);
+    color: var(--bg-color, #fff);
+  }
+  .system-action-button:disabled {
+    opacity: 0.6;
+    cursor: default;
+  }
+
   /* Message action toolbars — hover-only copy and paste
    * buttons, at top-right and bottom-right of each card.
    * Both ends because long messages might be partially

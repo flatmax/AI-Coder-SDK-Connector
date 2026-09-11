@@ -1161,8 +1161,14 @@ had.
 
 ## AG-R-16 — A `Stop` hook this app does not own can revive a turn it stopped
 
-**Severity: moderate. Likelihood: latent — the mechanism is documented and shipped; nothing on this
-machine uses it today.**
+**Severity: raised to high on 2026-09-12. Likelihood: latent — the mechanism is documented and
+shipped; nothing on this machine uses it today.**
+
+**Raised because the harm was measured and is larger than "spend and prose".** ⏹ can be defeated
+outright by a `Stop` hook this app does not own, for as long as `--print-timeout` allows — and
+`AgySession` sets that to **12h**, with nothing else in this app bounding a turn's wall clock. Worse,
+[AG-19](decisions.md#ag-19)'s terminate makes the scenario *cost more* rather than less: see
+§ *The two mechanisms fight, and the loop is what spins* below.
 
 `agy`'s shipped `hooks.md` (read 2026-09-10; see
 [`sdk-surface.md` § The hook contract is shipped](sdk-surface.md#the-hook-contract-is-shipped-not-inferred--read-2026-09-10))
@@ -1213,14 +1219,62 @@ turn starts, never mid-turn" (`src/aic_dc/agy/gate_server.py`) — the right sha
 `TestTheRefusalOutlivesTheTurnItStopped` rather than left as a property nobody asserted. This is why
 the risk stays **moderate**: a revived loop costs spend and prose, not the working tree.
 
-**Two things this probe did not settle**, recorded so neither is mistaken for closed:
+### The two mechanisms fight, and the loop is what spins
 
-- **Whether `PostInvocation`'s `terminate` beats a concurrent `Stop` `continue`.** AG-19's mechanism
-  is a second lever on a revived loop and the two could plausibly ping-pong. Untested.
-- **Why `status` says `SUCCESS` for a turn that never finished.** A held-open turn returns
-  `status: "SUCCESS"` with partial output once `--print-timeout` expires, which is what made the
-  first two runs of the probe disagree with each other. A host reading `status` alone cannot tell a
-  completed turn from an abandoned one.
+The question the merge probe left open — *whether `PostInvocation`'s `terminate` beats a concurrent
+`Stop` `continue`* — was measured the same day by
+`scripts/probe_agy_terminate_vs_continue.py`. **It does not.** Four runs, one prompt, both controls
+holding:
+
+| Run | Held open | Invocations | |
+|---|---|---|---|
+| `terminate` alone | no, 2.2s | **1** | the whole of AG-19, working |
+| `continue` alone | **yes**, 18.9s | 0 | the turn hangs |
+| both, ours first | **yes**, 16.2s | **8** | |
+| both, rival first | **yes**, 19.1s | **8** | |
+
+The contested runs are a **ping-pong**, and the logs show it exactly: `invocationNum` 0→7, every one
+ended by us and revived by the rival, all eight `Stop` payloads reading `TERMINAL_CUSTOM_HOOK`. So
+`continue` wins — and the interaction is worse than either mechanism alone. Without AG-19's
+terminate the turn simply **hangs** (one `Stop`, then nothing). With it, the turn **cycles**: eight
+model invocations in sixteen seconds, spending on every one, bounded only by `--print-timeout`.
+
+**This is not an argument against the terminate.** Unopposed it ends a loop in a single invocation,
+which is AG-19 met. It is an argument that a stop the user pressed can be overridden by a
+configuration they may not know they have, and that the app has no ceiling underneath it.
+
+**Mitigated only by being made legible, for now.** `AgyGateServer.decide_invocation` counts its
+terminations per conversation and warns on the second — *"the loop was revived after AIC-DC ended
+it, so the user's stop is being overridden"* — once per turn rather than once per cycle. It does not
+act: ending the process is an explicit user escalation ([AG-19](decisions.md#ag-19)), and bounding a
+turn's wall clock is a decision above that class. It keeps answering `terminate` every cycle, because
+answering anything else hands the revived loop what it wants.
+
+**Answered the same day, and the answer is not a ceiling.** A turn on this transport still has no
+wall-clock limit, deliberately: `--print-timeout 12h` exists so a permission dialog can outlast a
+human reading a diff, and a cap that fired on its own would eventually fire on a legitimate turn
+waiting in one. What shipped instead is the shape AG-19 had already named — *"offer a separate
+force-reset for a genuinely runaway generation"*:
+
+- `AgySession` records when ⏹ was pressed and, if the turn is still producing frames
+  `STOP_OVERDUE_SECONDS` later, emits **one** `systemEvent` of subtype `stop_ignored` carrying the
+  elapsed time and whether the gate's loop was *revived*. Ten seconds, because both things that get a
+  turn there are far faster when they work — an armed stop ends the loop in one invocation at 2.2s,
+  and a revived loop cycles at about two invocations a second.
+- The browser renders it as a durable card, and **only the revived case offers the button**. A turn
+  held open by prose finishes on its own and costs words; restarting the engine to save a few seconds
+  of text would end a session the user is holding, which is the trade AG-19 refuses to make for them.
+- Nothing is ended automatically. The report is per turn rather than per frame — a turn being
+  overridden emits continuously, and one card per frame would bury the message it is delivering.
+
+The limit is stated rather than discovered: this is checked **per frame**, so a turn emitting nothing
+at all cannot be reported on. Both conditions it exists for emit continuously, so what it misses is a
+turn that is idle — a different problem, whose name is `--print-timeout`.
+
+**One thing still not settled.** Why `status` says `SUCCESS` for a turn that never finished: a
+held-open turn returns `status: "SUCCESS"` with partial output once `--print-timeout` expires, which
+is what made the first two runs of the merge probe disagree with each other. A host reading `status`
+alone cannot tell a completed turn from an abandoned one.
 
 **Three instrument defects came first, and they are the reason the measurement is trustworthy.** The
 rival hook's answer was built into a shell command where a backslash inside single quotes is literal,

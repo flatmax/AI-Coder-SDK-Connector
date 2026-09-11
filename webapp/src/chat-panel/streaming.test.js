@@ -1765,6 +1765,66 @@ describe('ChatPanel compaction toast', () => {
     ]);
   });
 
+  it('says a stop that did not land has not landed, and why', async () => {
+    // AG-R-16 raised to high: ⏹ can be outlasted, either by a `Stop` hook
+    // this app does not own reviving the loop, or by prose that asks
+    // permission for nothing. From here they are one condition.
+    const p = mountPanel();
+    await settle(p);
+    pushEvent('system-event', {
+      requestId: 'r1',
+      data: { subtype: 'stop_ignored', data: { seconds: 31.4, revived: true } },
+    });
+    await settle(p);
+    const last = p.messages[p.messages.length - 1];
+    expect(last.system_event).toBe(true);
+    expect(last.content).toContain('stopped this turn 31s ago');
+    // The half a reader acts on: something is spending their money now.
+    expect(last.content).toContain('calling the model repeatedly');
+  });
+
+  it('offers the force restart only when something is overriding the stop', async () => {
+    // A prose turn finishing on its own needs no escalation — restarting
+    // the engine to save a few seconds of text would end a session the
+    // user is holding, which is the trade AG-19 refuses to make for them.
+    const p = mountPanel();
+    await settle(p);
+    pushEvent('system-event', {
+      requestId: 'r1',
+      data: { subtype: 'stop_ignored', data: { seconds: 12, revived: false } },
+    });
+    await settle(p);
+    const quiet = p.messages[p.messages.length - 1];
+    expect(quiet.system_action).toBeNull();
+    expect(quiet.content).toContain('finish on its own');
+
+    pushEvent('system-event', {
+      requestId: 'r2',
+      data: { subtype: 'stop_ignored', data: { seconds: 12, revived: true } },
+    });
+    await settle(p);
+    const loud = p.messages[p.messages.length - 1];
+    expect(loud.system_action.method).toBe('ClaudeCodeService.restart_session');
+    expect(loud.system_action.label).toBe('Force restart the engine');
+  });
+
+  it('replaces its own card rather than stacking one per frame', async () => {
+    // The backend reports once per turn, but a retry on a second turn is a
+    // second fact. Within one turn the last telling wins.
+    const p = mountPanel();
+    await settle(p);
+    for (const seconds of [11, 25]) {
+      pushEvent('system-event', {
+        requestId: 'r1',
+        data: { subtype: 'stop_ignored', data: { seconds, revived: true } },
+      });
+    }
+    await settle(p);
+    const cards = p.messages.filter((m) => m.system_subtype === 'stop_ignored');
+    expect(cards).toHaveLength(1);
+    expect(cards[0].content).toContain('25s ago');
+  });
+
   it('says a timed-out turn may still have written files', async () => {
     const p = mountPanel();
     await settle(p);

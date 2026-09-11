@@ -5463,3 +5463,145 @@ have caught the first defect immediately. It is the same shape as the control in
 an instrument that cannot show its own input arriving is measuring the input, not the system.
 
 **4,959 Python tests and 4,489 webapp tests green.**
+
+---
+
+## ⏹ against a hostile hook: the answer, and it is not the one we shipped for (2026-09-12, later)
+
+`probe_agy_stop_merge.py` closed one question that morning and opened a sharper one:
+[AG-19](decisions.md#ag-19)'s stop is a **`PostInvocation`** handler, a different event from the
+`Stop` a rival answers, so the two might plausibly ping-pong. That was left recorded as untested.
+
+It stopped being academic on a second reading of `session.py`: `--print-timeout` is **12h** and
+nothing else in this app bounds a turn's wall clock. So the untested interaction was the whole
+question of whether a user with a third-party `Stop` hook can have ⏹ ignored for twelve hours.
+
+### Measured
+
+`scripts/probe_agy_terminate_vs_continue.py`, four runs, both controls holding — `terminate` alone
+ends the loop in **1** invocation at 2.2s, `continue` alone holds the turn open at 18.9s:
+
+| Contested run | Held open | Invocations |
+|---|---|---|
+| ours first, rival second | yes, 16.2s | **8** |
+| rival first, ours second | yes, 19.1s | **8** |
+
+`invocationNum` 0→7, each ended by us, each revived by the rival, all eight `Stop` payloads reading
+`TERMINAL_CUSTOM_HOOK`. **`continue` wins**, and the two mechanisms together are worse than either
+alone: unopposed `continue` makes a turn *hang*; `continue` against our `terminate` makes it *cycle*,
+at roughly two model invocations a second, spending on every one.
+
+**What we shipped for the stop makes this scenario cost more.** That is worth stating plainly rather
+than filed under a risk, and it is not an argument against AG-19 — unopposed, the terminate is the
+single-invocation stop the phase was built for. It is an argument that the app has no floor under a
+turn.
+
+### What was done about it, and what was deliberately not
+
+`AgyGateServer.decide_invocation` now counts its terminations per conversation and warns on the
+second: *"the loop was revived after AIC-DC ended it, so the user's stop is being overridden."* Once
+per turn, not once per cycle — eight cycles is one fact — and it keeps answering `terminate` every
+time, because answering anything else hands the revived loop exactly what it wants.
+
+**It does not act, and that is the deliberate half.** The two remedies are ending the process, which
+AG-19 demotes to an explicit user escalation because it ends a session the user is holding, and
+bounding a turn's wall clock, which is a design decision with a real trade-off: the 12h exists so a
+permission dialog can outlast a human reading a diff. Neither belongs to a gate server. What this
+class owed was to stop the condition being invisible, and that is what it now does.
+
+[AG-R-16](risks.md#ag-r-16) is raised to **high**, with the ceiling recorded as the open design
+question. AG-19 had already named the shape of the answer — *"offer a separate force-reset for a
+genuinely runaway generation"* — for the unrelated reason that prose inside one invocation cannot be
+interrupted. This is a second, independent argument for the same control.
+
+**4,964 Python tests green.**
+
+---
+
+## The stop that did not land, made visible and actionable (2026-09-12, latest)
+
+[AG-R-16](risks.md#ag-r-16) went to **high** earlier the same day: ⏹ on the `agy` transport can be
+outlasted, and with `--print-timeout 12h` and no other ceiling, outlasted for a very long time. The
+question left open was whether to bound a turn. **The answer is no, and the reason is the one
+[AG-19](decisions.md#ag-19) already gave for not killing the process automatically** — a cap that
+fires on its own eventually fires on a legitimate turn sitting in a permission dialog, and the 12h
+exists so a dialog can outlast a human reading a diff.
+
+So the user is told, and the escalation is theirs.
+
+### One condition, two causes, one report
+
+From where the user sits there is no difference between the two ways ⏹ fails: they pressed stop and
+the turn is still going. So `AgySession` reports *that*, once per turn, and names the cause only
+where it can tell them apart:
+
+| | What is happening | Offered |
+|---|---|---|
+| `revived: true` | A `Stop` hook this app does not own is putting the loop back each time the gate ends it — **spending on every cycle** | **Force restart the engine** |
+| `revived: false` | The turn is writing prose, which asks permission for nothing and cannot be starved (AG-19's residual gap) | nothing; it finishes on its own |
+
+The second row is the one worth defending. It would have been easy to offer the button on both and
+call it consistent — but restarting ends a session the user is holding, to save a few seconds of text
+from a turn that holds no locks, runs no commands and touches no files. Offering it there would push
+a bad trade at someone who is already frustrated.
+
+`STOP_OVERDUE_SECONDS` is ten, and the number is measured rather than picked: an armed stop ends the
+loop in **one** invocation at 2.2s, and a revived loop cycles at roughly two invocations a second. A
+stop that has not landed in ten seconds is not a slow stop.
+
+### What it deliberately is not
+
+- **Not a timeout.** Nothing is ended. The turn runs to its own end and the session stays usable.
+- **Not per frame.** A turn being overridden emits continuously; one card per frame would bury the
+  message it is trying to deliver. One report per turn, and the browser's `collapse` rule replaces
+  the card rather than stacking it if a second telling ever arrives.
+- **Not able to see an idle turn.** The check runs per frame, so a turn emitting *nothing* cannot be
+  reported on. Both conditions it exists for emit continuously, so what it misses is a turn that is
+  idle — a different problem, whose name is `--print-timeout`. Stated here rather than left to be
+  found.
+
+### The browser side, and the one thing it reuses
+
+No new RPC. `restart_session` already existed on `AntigravityService` — `AgyService` inherits it, the
+Settings panel already calls it, and it **resumes the same conversation** rather than starting blank,
+so the context survives and what is lost is the turn the user had already asked to be rid of.
+
+What is new is a system card that can carry an action at all: `systemNotice` may return one,
+`onSystemEvent` puts it on the row, and `renderSystemAction` draws a button that disables itself
+while the call is in flight — `restart_session` takes seconds to rebuild the harness, and a
+live-looking button invites a second press that would tear down what the first is rebuilding. The
+failure path toasts, because this is offered to someone whose stop has already been ignored once and
+a button that silently does nothing would be the second thing that failed them without saying so.
+
+### Seen in a browser, which the tests could not do
+
+`scripts/stop_ignored_card_probe.py`, on the repo's own live rig — real server,
+real Chrome, the event pushed onto the same window channel `app-shell/index.js`
+re-dispatches every server push onto, so everything below the server is the real path.
+Eight checks, all passing, screenshots in `.aic-dc/live-probe/`:
+
+- The revived card renders and reads as intended, with the amber **Force restart the engine**
+  button below it at 160×31px — and `elementFromPoint` at the button's own centre lands *on the
+  button*, which is the check that separates "in the DOM" from "clickable". jsdom cannot make
+  that distinction: a control behind an overlay or under `pointer-events: none` passes a
+  synthetic `.click()` and fails a real one.
+- The prose card renders with **no button**, which is the negative control. Without it a green
+  run could not tell the deliberate asymmetry from a build that offers the button always.
+- The click restarts the engine for real — the button reads *"Restarting…"* and is disabled on
+  the render that follows the click, and a toast says *"The engine was restarted."*
+
+**Two instrument defects first, and the first is the useful one.** The probe reported *"no system
+card rendered at all"* — because `Backend` serves the **bundled** webapp by default, and the
+bundle predates every line of this. The card was fine; the server was serving last week's
+JavaScript, and the failure looked exactly like the feature being broken. Anything asserting on
+webapp *source* needs `dev=True`, and the probe now says so where the next reader will find it.
+The second was a 200ms sleep that read the button already re-enabled: the restart had finished,
+the disabled state had existed, and the probe was reporting its own clock. `await
+panel.updateComplete` makes it deterministic.
+
+**What the run does not cover, so the pass is not read as more than it is:** the server end.
+Nothing here makes a turn overrun its stop — that needs a hostile `Stop` hook in the operator's
+own `~/.gemini/config/hooks.json`, which is not a thing a probe should install. The emit is
+covered by `tests/test_agy_session.py`.
+
+**4,972 Python tests and 4,501 webapp tests green; 8 live checks passed.**

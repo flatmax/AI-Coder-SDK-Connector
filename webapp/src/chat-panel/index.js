@@ -199,6 +199,7 @@ export class ChatPanel extends RpcMixin(LitElement) {
     // properties.js) rather than per-tab because it's a
     // UI-level dropdown — every tab sees the same menu.
     this._tabStripOverflowOpen = false;
+    this._systemActionPending = null;
 
     // ---------------------------------------------------------
     // Cross-tab / component-scoped state

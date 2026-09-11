@@ -651,6 +651,44 @@ export function systemNotice(subtype, data) {
       collapse: true,
     };
   }
+  if (subtype === 'stop_ignored') {
+    // The user pressed ⏹ and the turn kept going. Two causes, one
+    // experience, and the card says which because the two call for
+    // different things from the reader:
+    //
+    //   `revived` — a `Stop` hook this app does not own answered
+    //   `continue`, putting back a loop the gate had ended. Measured as a
+    //   ping-pong at roughly two model invocations a second, so it is
+    //   spending money while it says this (`risks.md` AG-R-16).
+    //
+    //   otherwise — the turn is producing prose, which asks permission for
+    //   nothing and so cannot be starved. It runs to its own end and costs
+    //   only the words (AG-19's residual gap).
+    //
+    // The action is offered rather than taken. Restarting ends the session
+    // the user is holding, which is why AG-19 makes it theirs to choose.
+    const seconds = Number.isFinite(payload.seconds)
+      ? `${Math.round(payload.seconds)}s`
+      : 'a while';
+    const why = payload.revived
+      ? 'Something outside AIC⚡DC is restarting it each time the stop takes '
+        + 'effect — most likely a `Stop` hook in your own `hooks.json`. It is '
+        + 'calling the model repeatedly while this message is on screen.'
+      : 'The turn is writing a reply rather than using tools, and a reply '
+        + 'cannot be interrupted part-way. It will finish on its own.';
+    return {
+      text: `You stopped this turn ${seconds} ago and it has not ended. ${why}`,
+      toast: '⏹ The turn has not stopped',
+      severity: 'warning',
+      collapse: true,
+      // Restarting resumes the same conversation, so the context survives;
+      // what is lost is the turn in flight, which is the one the user has
+      // already asked to be rid of.
+      action: payload.revived
+        ? { label: 'Force restart the engine', method: 'ClaudeCodeService.restart_session' }
+        : null,
+    };
+  }
   if (subtype === 'engine_notice' && message) {
     // The harness speaking rather than the model. `steps.py` routes it here
     // instead of into a text block precisely so it is not rendered as the
@@ -738,6 +776,9 @@ export function onSystemEvent(panel, event) {
     // result payloads already use for something else.
     system_subtype: subtype,
     system_request: turn,
+    // An escalation the card offers and does not take. Only `stop_ignored`
+    // sets one today; `renderMessage` draws a button for whatever is here.
+    system_action: notice.action || null,
   };
   const supersedes =
     notice.collapse

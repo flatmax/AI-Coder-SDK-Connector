@@ -55,6 +55,7 @@ import asyncio
 import json
 import logging
 import shutil
+import time
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -74,7 +75,26 @@ INIT_TIMEOUT_SECONDS = 120.0
 #: Passed to ``--print-timeout``. It bounds the whole turn, so it must
 #: outlast any permission dialog — the default is 5m, which a user reading
 #: a diff can exceed without trying.
+#:
+#: **It is also the only ceiling a turn has**, which is a much less
+#: comfortable sentence. See :data:`STOP_OVERDUE_SECONDS`.
 PRINT_TIMEOUT = "12h"
+
+#: How long after ⏹ a turn may go on before the user is told it has not
+#: stopped, and offered the escalation.
+#:
+#: **Not a timeout and not a cancellation.** Nothing is ended here; the
+#: turn is reported, once, and what to do about it stays the user's — which
+#: is [AG-19](../../../specs5/plan-ag/decisions.md#ag-19)'s rule that
+#: killing the process is an explicit escalation rather than something this
+#: app does behind a user who has not asked for it.
+#:
+#: Ten seconds because both things that get a turn here are much faster
+#: than that when they work: an armed stop ends the loop in **one**
+#: invocation, measured at 2.2s, and a revived loop cycles at roughly two
+#: invocations a second ([AG-R-16](../../../specs5/plan-ag/risks.md#ag-r-16)).
+#: A stop that has not landed in ten seconds is not a slow stop.
+STOP_OVERDUE_SECONDS = 10.0
 
 
 class AgyNotInstalledError(RuntimeError):
@@ -110,6 +130,7 @@ class AgySession:
         model: str | None = None,
         executable: str = "agy",
         resume: str | None = None,
+        clock: Any = None,
     ) -> None:
         self._repo_root = Path(repo_root)
         self._gate = gate
@@ -120,6 +141,15 @@ class AgySession:
         self._conversation_id: str | None = None
         self._turn_active = False
         self._cancelled = False
+        self._clock = clock or time.monotonic
+        #: When ⏹ was pressed on the turn in flight, or ``None``. The clock
+        #: for :data:`STOP_OVERDUE_SECONDS`, and cleared with the turn.
+        self._cancelled_at: float | None = None
+        #: Whether this turn has already reported that its stop did not
+        #: land. Once per turn: a turn being overridden produces frames
+        #: continuously, and one card per frame would bury the message it
+        #: is trying to deliver.
+        self._reported_overdue = False
 
     @property
     def conversation_id(self) -> str | None:
@@ -373,6 +403,8 @@ class AgySession:
             )
         self._turn_active = True
         self._cancelled = False
+        self._cancelled_at = None
+        self._reported_overdue = False
         self._gate.resume()
         try:
             try:
@@ -413,6 +445,62 @@ class AgySession:
                     break
         finally:
             self._turn_active = False
+
+    def _overdue_stop(self) -> Event | None:
+        """One report, when a stop has not landed. AG-R-16, AG-19.
+
+        ⏹ is layered and both layers can be outlasted. The gate refuses
+        tool calls, which a prose-only turn never makes; the
+        ``PostInvocation`` terminate ends the loop, which a ``Stop`` hook
+        this app does not own can undo — measured 2026-09-12 as a
+        ping-pong, eight invocations in sixteen seconds, bounded only by
+        ``--print-timeout``. Both look identical from where the user sits:
+        **they pressed stop and the turn is still going.**
+
+        So this reports the condition rather than either cause, and reports
+        it *once*. What it does not do is end anything. AG-19 demoted
+        killing the process to an explicit escalation because it ends a
+        session the user is holding, and a ceiling that fired
+        automatically would eventually fire on a legitimate turn sitting in
+        a permission dialog. The user is told, and the choice stays theirs.
+
+        Checked per frame rather than on a timer, which bounds it honestly:
+        a turn emitting nothing at all is a turn this cannot report on. Both
+        conditions it exists for emit continuously — a revived loop cycles
+        and a prose turn streams — so the case it misses is a turn that is
+        not doing anything, which is a different problem with a different
+        name (``--print-timeout``).
+        """
+        if not self._cancelled or self._reported_overdue:
+            return None
+        if self._cancelled_at is None:
+            return None
+        elapsed = self._clock() - self._cancelled_at
+        if elapsed < STOP_OVERDUE_SECONDS:
+            return None
+        self._reported_overdue = True
+        # The gate knows *why*, and only it does: a loop it has terminated
+        # more than once is one something is putting back.
+        revived = self._gate.was_revived(self._conversation_id or "")
+        logger.warning(
+            "The turn stopped %.0fs ago has not ended (revived=%s)",
+            elapsed,
+            revived,
+        )
+        return Event(
+            "systemEvent",
+            {
+                "subtype": "stop_ignored",
+                "data": {
+                    "seconds": round(elapsed, 1),
+                    # Two different stories for the user, and the honest
+                    # one depends on this: a revived loop is somebody's
+                    # hook overriding them, and the other is a turn that
+                    # asks permission for nothing and cannot be starved.
+                    "revived": revived,
+                },
+            },
+        )
 
     def _gate_subagents(self, frame: dict[str, Any]) -> None:
         """Claim a subagent's conversation, so its tool calls reach the gate.
@@ -496,6 +584,9 @@ class AgySession:
             async for frame in frames:
                 for event in translator.translate(frame):
                     yield event
+                overdue = self._overdue_stop()
+                if overdue is not None:
+                    yield overdue
         except PromptNotSentError as exc:
             # Reported as an event rather than raised, and then closed out
             # below: the browser is waiting on this stream and an exception
@@ -561,6 +652,7 @@ class AgySession:
         if not self._turn_active:
             return
         self._cancelled = True
+        self._cancelled_at = self._clock()
         self._gate.refuse_all(
             "The user stopped this turn in AIC-DC. Do not continue, and do "
             "not try another way of making this change."

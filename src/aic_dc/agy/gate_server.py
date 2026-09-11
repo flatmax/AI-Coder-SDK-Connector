@@ -205,12 +205,14 @@ class AgyGateServer:
         #: with its turn-wide sibling.
         self._refused_conversations: dict[str, str] = {}
         #: Conversations whose loop *this* server ended, by answering
-        #: `terminate` to a `PostInvocation` (AG-19). Recorded rather than
-        #: inferred, and it answers two different questions: the session
-        #: reads it to badge a stopped turn honestly, and `note_stop` reads
-        #: it to tell our own termination from a stranger's hook ending our
-        #: loop in the same merged file (AG-R-16). Cleared by `resume`.
-        self._terminated: set[str] = set()
+        #: `terminate` to a `PostInvocation` (AG-19), and **how many times**.
+        #: Recorded rather than inferred, and it answers three questions:
+        #: the session reads it to badge a stopped turn honestly, `note_stop`
+        #: reads it to tell our own termination from a stranger's hook ending
+        #: our loop in the same merged file, and a count above one is a loop
+        #: that came back after we ended it — see `decide_invocation`.
+        #: Cleared by `resume`.
+        self._terminations: dict[str, int] = {}
         #: The systemd scope `agy` will be launched into, or None where the
         #: platform has none. Named at construction rather than at `start`
         #: so `AgySession` can read it while assembling argv, and held here
@@ -323,7 +325,7 @@ class AgyGateServer:
         """
         self._refusal = None
         self._refused_conversations.clear()
-        self._terminated.clear()
+        self._terminations.clear()
 
     async def start(self) -> None:
         """Listen. Safe to call once; a second call is a no-op."""
@@ -547,7 +549,17 @@ class AgyGateServer:
         completed answer that happens to say nothing. It is the *stop*
         having worked, and the footer has to say so.
         """
-        return str(conversation_id) in self._terminated
+        return str(conversation_id) in self._terminations
+
+    def was_revived(self, conversation_id: str) -> bool:
+        """Whether a loop this server ended came back. AG-R-16.
+
+        More than one termination for one conversation in one turn: the
+        stop was answered, the loop ended, and something put it back. Read
+        by :class:`~aic_dc.agy.session.AgySession` so that a turn which has
+        outlasted the user's stop can say *why* rather than only *that*.
+        """
+        return self._terminations.get(str(conversation_id), 0) > 1
 
     def decide_invocation(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Whether this conversation's loop ends here. AG-19.
@@ -575,12 +587,33 @@ class AgyGateServer:
         )
         if not stopped:
             return {}
+        named = conversation_id or "an unnamed conversation"
         if conversation_id:
-            self._terminated.add(conversation_id)
-        logger.info(
-            "Ending the loop for %s: the user stopped it",
-            conversation_id or "an unnamed conversation",
-        )
+            count = self._terminations.get(conversation_id, 0) + 1
+            self._terminations[conversation_id] = count
+            # **A loop we already ended, asking again.** Measured
+            # 2026-09-12: with a third-party `Stop` hook answering
+            # `continue`, this terminates and that revives, eight times in
+            # sixteen seconds, bounded only by `--print-timeout` — which
+            # `AgySession` sets to 12h. Warned on the second termination
+            # only, because after that it is the same fact repeating and the
+            # log is the one place a runaway turn is legible.
+            #
+            # Not acted on here, deliberately. The remedies are ending the
+            # process (AG-19 demotes that to an explicit user escalation,
+            # since it ends a session the user is holding) and bounding the
+            # turn — both decisions above this class. What this owes is to
+            # stop the condition being silent.
+            if count == 2:
+                logger.warning(
+                    "The loop for %s was revived after AIC-DC ended it, so "
+                    "the user's stop is being overridden — most likely by a "
+                    "`Stop` hook this app does not own answering `continue` "
+                    "(see AG-R-16). The turn will keep re-entering until "
+                    "`--print-timeout` expires.",
+                    named,
+                )
+        logger.info("Ending the loop for %s: the user stopped it", named)
         return {"terminationBehavior": "terminate"}
 
     def note_stop(self, payload: dict[str, Any]) -> dict[str, Any]:
