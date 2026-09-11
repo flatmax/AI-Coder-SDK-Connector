@@ -918,6 +918,26 @@ describe('applyReplayBlocks', () => {
     ]);
   });
 
+  it('drops a tool block that carries no card at all', () => {
+    // The phantom the engine used to replay: partial streaming announces a
+    // tool call before its arguments arrive, and that announcement opened a
+    // block the real card — keyed by `tool_use_id` — never landed in. Fixed
+    // on the engine side, and refused here too, because there is nothing to
+    // draw: no name, no input, no result, so it renders as a nameless card
+    // stuck on pending in front of the real one.
+    const turn = makeTurnBlocks();
+    applyReplayBlocks(turn, [
+      { block_id: 'r1:b0', kind: 'tool', seq: 0, content: '', tool: null },
+      {
+        block_id: 'toolu_1',
+        kind: 'tool',
+        tool: { tool_use_id: 'toolu_1', name: 'Bash' },
+      },
+    ]);
+    expect(turn.blocks.map((b) => b.block_id)).toEqual(['toolu_1']);
+    expect(turn.index.has('r1:b0')).toBe(false);
+  });
+
   it('falls back to the block id when a card carries no tool_use_id', () => {
     const turn = makeTurnBlocks();
     applyReplayBlocks(turn, [

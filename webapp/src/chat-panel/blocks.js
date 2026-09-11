@@ -472,7 +472,13 @@ export function applyReplayBlocks(turn, blocks) {
       ? raw.kind
       : 'text';
     if (kind === 'tool') {
-      const card = raw.tool && typeof raw.tool === 'object' ? raw.tool : {};
+      const card = raw.tool && typeof raw.tool === 'object' ? raw.tool : null;
+      // A tool block with no card is nothing a reader can be shown: no name,
+      // no input to summarise, no invoked-at, and — having no result either —
+      // a status that renders as permanently pending. Dropped for the same
+      // reason `applyToolResult` drops a headless result: an empty card reads
+      // as a rendering bug, and it is not one the user can dismiss.
+      if (!card) continue;
       const result = card.result && typeof card.result === 'object'
         ? card.result
         : null;

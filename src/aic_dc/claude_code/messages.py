@@ -1034,8 +1034,24 @@ class TurnTranslator:
             kind = ((event.get("content_block") or {}).get("type")) or "text"
             if index is None:
                 return []
+            if _stream_kind(kind) == "tool":
+                # A tool call gets no block here. Its block identity is the
+                # SDK's `tool_use_id`, assigned by `_tool_use` when the
+                # completed assistant message arrives with the card, and a
+                # `{request_id}:b{n}` opened now could never become that
+                # block — it would sit in `_blocks` for the rest of the turn
+                # holding `tool: None`.
+                #
+                # Which is invisible live (a block with no card emits no
+                # chunk, so nothing is ever pushed for it) and visible on
+                # reconnect, where `rendered_blocks()` replays the whole map:
+                # the browser drew one headless, nameless, permanently
+                # pending card in front of every real tool card on the turn.
+                # Opening it bought the arrival-order slot for a card that
+                # never claimed it.
+                return []
             # Opening the block here (rather than on first delta) is what
-            # makes a tool-use or empty block appear in arrival order.
+            # makes an empty text block appear in arrival order.
             self._partial_block(scope, index, _stream_kind(kind))
             return []
 

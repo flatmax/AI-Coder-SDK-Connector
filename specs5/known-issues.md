@@ -124,3 +124,44 @@ third passes there and exists to stop the seed being appended to a tab that alre
 What is *not* fixed is the structural cause: the observer still carries both jobs, so a future guard
 added for rendering reasons can still reach the answer. That is rank 2 of the review, and this entry is
 the argument for it.
+
+---
+
+**A nameless, permanently-pending tool card in front of every real one, after a refresh.** Reported
+2026-09-11 from a live session, with screenshots either side of a browser reload: *"before and after a
+browser refresh. Extra blue LEDs sneaking in on empty cards."* Every Bash card in the reloaded
+transcript had gained a card above it carrying a pulsing blue status dot, a disclosure caret, and
+nothing else — no tool name, no invocation time, no input summary.
+
+**The dot was honest; the card should not have existed.** Blue-pulsing is `status-pending`, which
+[`toolStatus`](../webapp/src/chat-panel/blocks.js) returns for any tool block with no result — and
+these had no result because they had no *call*. With partial streaming on, the CLI announces each
+content block before sending any of it, and `TurnTranslator._stream_event`'s `content_block_start`
+branch opened a `{request_id}:b{n}` block for the announcement whatever its type. For a `tool_use`
+announcement that block was unreachable: a tool card's block identity is the SDK's `tool_use_id`, so
+`_tool_use` writes `self._blocks[tool_use_id]` when the completed assistant message arrives and the
+announcement block keeps `tool: None` for the rest of the turn. Two blocks per tool call, in arrival
+order — the empty one first.
+
+**Live it is inert, which is why it survived.** A block with no card emits no chunk, so nothing is ever
+pushed for it and no connected browser can learn it exists. `rendered_blocks()` replays the whole map,
+so it is exactly and only a client that reconnects mid-turn that is told about it — and
+`applyReplayBlocks` faithfully drew what it was sent. Every replay test fed `AssistantMessage` objects
+directly; not one replayed the streaming framing that precedes them, so the map under test never held
+the extra blocks.
+
+**Fixed 2026-09-11 at the source, and refused at the sink.**
+
+- `content_block_start` opens no block for `tool_use` / `server_tool_use`
+  ([`messages.py`](../src/aic_dc/claude_code/messages.py)). The slot it was buying arrival order for
+  was one the card could never claim. Two tests in `tests/test_claude_code_messages.py` §
+  `TestReplay`: one asserting a streamed tool call replays as one block, one asserting the text around
+  it keeps its own slot, since skipping an index must not renumber what follows.
+- `applyReplayBlocks` drops a replayed tool block that carries no card at all. Nothing can be drawn
+  from one — the same reasoning `applyToolResult` already applies to a headless result, and an empty
+  card is worse there because the reader cannot dismiss it.
+
+Note what the engine's own `history.py` does with the mirror-image case: a `tool_result` whose call it
+never saw is dropped, *"rendered on its own: a card with no header reads as a rendering bug."* The rule
+was already written down. It was applied to results read off disk and not to blocks replayed from
+memory.
