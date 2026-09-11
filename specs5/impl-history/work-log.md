@@ -574,6 +574,50 @@ The classification tests work because they refuse to be read past, and that is t
 
 ### Landed since
 
+- **A config editor two pixels tall, and a 1M context window nobody had chosen** — 2026-09-11. One
+  session, two findings, and both arrived the same way: a user asking a question about the running app
+  rather than an audit of the tree.
+
+  **The editor.** Reported as *"in settings when I click on engine config and app config buttons, there
+  is no way to edit the json files"*. `.editor-area` was `flex: 1; min-height: 0` inside a host that is a
+  scrolling column flex container — `flex: 1` is `flex-basis: 0%`, the free space above it was already
+  negative at 989px of content in a 473px host, and `min-height: 0` removed the floor the textarea's own
+  `min-height: 200px` would have set. It rendered at 2px: both borders, `overflow: hidden`, nothing
+  between them. **Nothing about the behaviour was broken**, which is why it survived — the file was
+  fetched, the textarea held it, the card took its active ring, Ctrl+S would have written it. `flex: 0 0
+  auto` measures 237px in the same place.
+
+  **All 124 settings-tab tests passed throughout and could not have done otherwise**, so the regression
+  test is a layout-harness scene rather than a unit test: `settings-editor` mounts the tab in a host
+  short enough that the column overflows it and opens a card by clicking it, and `layout_probe.py` checks
+  [8]–[10] assert the overflow is present *before* asserting the editor clears its toolbar plus the
+  textarea's declared floor. 61 checks in that suite now. **They were shown to fail** — the old rule put
+  back reports editor 2px, 0px of a 200px textarea visible, and the control at a 1500px host 595px
+  against the cramped 2px, which is `flex: 1` demonstrating in one number that it means "whatever is
+  left". Check [9] is that control: the same card in a roomy host must measure the *same* editor.
+
+  **The window.** The question was whether 200K would be better than 1M, and the answer was that the
+  choice had never been made: `claude-opus-5` carries `native_1m` in the CLI's own model registry and the
+  window resolver returns 1e6 on that check before it looks at the `context-1m-2025-08-07` beta, so every
+  session has run 1M. Two notes in `sdk_surface.py` described 1M as a cost decision we had declined —
+  **not wrong about a fact, wrong about which mechanism owned it**, since they reasoned about a beta
+  header for a model that does not consult one. Verified against the binary rather than the source:
+  `/autocompact` answered `auto`. Corrected in place, and `known-issues.md` plus `next.md` § C12 carry
+  the rest.
+
+  **The knob is `autoCompactWindow`** — settings key, `CLAUDE_CODE_AUTO_COMPACT_WINDOW`, or
+  `/autocompact <tokens>`; clamped 100K–1M and applied as `min(model window, configured)`. It was set to
+  200000 in the user's own `~/.claude/settings.json`, which the binary confirms as *"200k tokens (from
+  settings)"*. **AIC-DC declined to own it**, which is the part worth keeping: an `EngineConfig` field
+  would have reached the subprocess through the `env` dict, and env outranks settings in the CLI's
+  precedence — so a field sitting at its default in a file the user rarely opens would silently override
+  the value they can see. `engine_config.py` says the engine's own configuration is not ours to manage
+  and `options.py`'s `NEVER_SET` already turns two arguments away on that ground; this is the third.
+
+  **A stale comment closed with it.** `bandColor` in `context-usage.js` had ended "Worth revisiting the
+  day a 1 M window is the common case" — a day that had already been and gone unnoticed. Capping at 200K
+  makes the existing bands honest without touching them, so both comments there now describe what runs.
+
 - **The health banner that cried wolf about a token with fourteen minutes of life on it** — 2026-09-10.
   Closes the entry [`../known-issues.md`](../known-issues.md) carried for one day, reported from a live
   session: the banner said *"The Claude subscription access token is expired or expiring and could not be

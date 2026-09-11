@@ -120,6 +120,17 @@ HUD_FILES_MANY = 40
 # `.hud` is `width: 300px`, fixed by the spec since phase 3.
 HUD_WIDTH = 300
 
+# The Settings tab, in a box shorter than the column of panels it holds.
+# The failure this reproduces was measured in the running app at 989px of
+# content in a 473px host, and the collapse needed the overflow: an editor
+# given `flex: 1` where there is free space left over takes it and looks
+# fine. This is that host, near enough.
+SETTINGS_HOST = (760, 470)
+
+# A host tall enough that the same column has room to spare. The control:
+# the editor's height must not depend on which of these it is in.
+SETTINGS_HOST_TALL = 1500
+
 
 # ---------------------------------------------------------------------------
 # Plumbing
@@ -735,6 +746,151 @@ def check_hud_ceiling(page: Page, out: Path, report: Report) -> None:
     )
 
 
+def check_settings_editor(page: Page, out: Path, report: Report) -> dict:
+    """A config card must open an editor with height in it.
+
+    The failure this exists for was reported from a live session — "in
+    settings when I click on engine config and app config buttons, there is
+    no way to edit the json files" — and it was two pixels of border with
+    the editor clipped away between them. `.editor-area` was `flex: 1;
+    min-height: 0` inside a host that is a scrolling column flex container,
+    so it asked for a share of free space that was already negative, and
+    `min-height: 0` removed the floor its own 200px textarea would have set.
+
+    **This is the class of defect the harness was built for, arriving from a
+    direction § D2 did not list.** Nothing about the behaviour was broken —
+    the file was fetched, the textarea held it, Ctrl+S would have saved —
+    and all 124 settings-tab unit tests passed throughout, because jsdom
+    computes no layout and "the rule is in the shadow root" is the most any
+    of them can assert.
+
+    The first check is the condition rather than the symptom: if the column
+    above the editor has not overflowed the host, the broken rule would
+    have passed too, and everything below it would be measuring nothing.
+    """
+    print("\n[8] the Settings tab's config editor, in a host that already overflows")
+    scene = build(
+        page, "settings-editor",
+        card="engine", width=SETTINGS_HOST[0], height=SETTINGS_HOST[1],
+    )
+    shot = page.shot(out / "settings-editor.png")
+
+    editor = scene["editor"]
+    toolbar = scene["toolbar"]
+    textarea = scene["textarea"]
+    floor = px(scene["textareaDeclaredMinHeight"]) or 0
+    print(f"      host {scene['hostVisibleHeight']}px showing "
+          f"{scene['hostContentHeight']}px of content "
+          f"({scene['hostContentBeforeOpen']}px of it before the card was opened); "
+          f"editor {editor['h']}px = toolbar {toolbar['h']}px + textarea "
+          f"{textarea['h']}px, flex: {scene['editorFlex']}")
+
+    report.add(
+        "the column overflows its host, which is what the failure needed",
+        scene["hostScrolls"] is True,
+        f"{scene['hostContentHeight']}px of content in a "
+        f"{scene['hostVisibleHeight']}px host",
+        shot,
+    )
+    # The symptom, stated as the number it was: 2px, both borders.
+    report.add(
+        "an opened card is taller than its own toolbar",
+        editor["h"] >= toolbar["h"] + floor - 4,
+        f"editor {editor['h']}px against toolbar {toolbar['h']}px + the "
+        f"textarea's declared floor of {floor:.0f}px",
+    )
+    report.add(
+        "and the textarea it holds is not clipped away",
+        scene["editorClips"] is False
+        and scene["textareaVisibleHeight"] >= textarea["h"] - 1,
+        f"{scene['textareaVisibleHeight']}px of a {textarea['h']}px textarea "
+        f"inside an overflow: hidden box, clipped={scene['editorClips']}",
+    )
+    # The half that never broke, so a failing run can tell an editor that is
+    # missing from one that is merely empty.
+    report.add(
+        "with the file in it",
+        scene["contentChars"] > 0 and scene["cardActive"] is True,
+        f"{scene['contentChars']} characters, card active={scene['cardActive']}",
+    )
+    return scene
+
+
+def check_settings_editor_control(page: Page, out: Path, report: Report,
+                                  cramped: dict) -> None:
+    """The control, and check 8 is worth less without it.
+
+    Check 8 asks whether the editor has height. An editor that took every
+    pixel left over would pass it — and that is the rule that broke, read
+    from the other end: `flex: 1` is "however much is left", which is a
+    screenful when there is one and two borders when there is not. So the
+    thing to demonstrate is that the height does not depend on the room:
+    the same card, opened in a host three times as tall, must measure the
+    same editor. Same card and same width, because the only variable this
+    is allowed to change is the space.
+
+    Then the other card, because the report named both buttons. Its editor
+    is *not* the same height — `app` is the reloadable one and carries a
+    toolbar button `engine` does not, which measured 4px — so what has to
+    match across cards is the editor less its toolbar. Asserting the boxes
+    were equal would have been a check that fails for a reason nobody wants
+    told about, which is how this one was written first.
+    """
+    print(f"\n[9] control: the same editor in a {SETTINGS_HOST_TALL}px host")
+    roomy = build(
+        page, "settings-editor",
+        card="engine", width=SETTINGS_HOST[0], height=SETTINGS_HOST_TALL,
+    )
+    shot = page.shot(out / "settings-editor-roomy.png")
+
+    editor = roomy["editor"]
+    print(f"      host {roomy['hostVisibleHeight']}px showing "
+          f"{roomy['hostContentHeight']}px of content, scrolls="
+          f"{roomy['hostScrolls']}; editor {editor['h']}px against "
+          f"{cramped['editor']['h']}px in the cramped host")
+
+    report.add(
+        "the host has room to spare, which the cramped one did not",
+        roomy["hostScrolls"] is False,
+        f"{roomy['hostContentHeight']}px of content in a "
+        f"{roomy['hostVisibleHeight']}px host",
+        shot,
+    )
+    report.add(
+        "and the editor is the same height in both",
+        abs(editor["h"] - cramped["editor"]["h"]) <= 2,
+        f"{editor['h']}px roomy against {cramped['editor']['h']}px cramped — "
+        f"content-driven, not leftover space",
+    )
+
+    print("\n[10] the other card the report named")
+    other = build(
+        page, "settings-editor",
+        card="app", width=SETTINGS_HOST[0], height=SETTINGS_HOST[1],
+    )
+    other_shot = page.shot(out / "settings-editor-app.png")
+    below_toolbar = other["editor"]["h"] - other["toolbar"]["h"]
+    cramped_below = cramped["editor"]["h"] - cramped["toolbar"]["h"]
+    print(f"      app editor {other['editor']['h']}px = toolbar "
+          f"{other['toolbar']['h']}px + {below_toolbar:.1f}px, against "
+          f"{cramped['toolbar']['h']}px + {cramped_below:.1f}px for engine")
+
+    report.add(
+        "the app card opens the same editor",
+        abs(below_toolbar - cramped_below) <= 2,
+        f"{below_toolbar:.1f}px below a {other['toolbar']['h']}px toolbar, "
+        f"against {cramped_below:.1f}px below {cramped['toolbar']['h']}px — "
+        f"the difference is the ↻ Reload button, which only app has",
+        other_shot,
+    )
+    report.add(
+        "with its own file in it",
+        other["contentChars"] > 0 and other["contentChars"] != cramped["contentChars"],
+        f"{other['contentChars']} characters against engine's "
+        f"{cramped['contentChars']}",
+    )
+
+
 # ---------------------------------------------------------------------------
 
 def main() -> int:
@@ -846,6 +1002,11 @@ def main() -> int:
         open_hud = check_usage_hud(page, out, report)
         check_hud_collapse(page, out, report, open_hud)
         check_hud_ceiling(page, out, report)
+        # The settings editor last, because it is the only scene that
+        # publishes an RPC proxy — `clear()` takes it away again, and a
+        # scene that ran after it should not have to rely on that.
+        cramped = check_settings_editor(page, out, report)
+        check_settings_editor_control(page, out, report, cramped)
 
         print(f"\n{len(report.rows)} checks, {report.failures} failed")
         if report.failures:

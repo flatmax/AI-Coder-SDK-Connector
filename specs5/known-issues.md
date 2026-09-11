@@ -37,6 +37,13 @@ present, populated and two pixels tall. **Every settings-tab unit test passed th
 have done otherwise — jsdom computes no layout, so "the rule is in the shadow root" is the most any of
 them can assert. That is [`next.md`](next.md) § D's argument for the layout harness arriving from a
 direction D2 did not list, and the harness
-([`layout-harness.js`](../webapp/src/layout-harness.js)) has no settings scene — **worth one if this
-class recurs**, because the tab is still a column of panels that grows by one every time the Settings
-spec does, and the next thing given `flex: 1` down there will collapse the same way.
+([`layout-harness.js`](../webapp/src/layout-harness.js)) had no settings scene. **It has one now** —
+built the same day rather than held for a recurrence, because the tab is a column of panels that grows by
+one every time the Settings spec does, and the next thing given `flex: 1` down there would have collapsed
+the same way. `settings-editor` mounts the tab in a host short enough that the column overflows it, opens
+a card by clicking it, and [`layout_probe.py`](../scripts/layout_probe.py) checks [8]–[10] assert the
+overflow is present *before* asserting the editor clears its toolbar plus the textarea's declared 200px
+floor. **The checks were shown to fail**: with `flex: 1; min-height: 0` put back, four of the eight report
+the defect exactly as it shipped — editor 2px, 0px of a 200px textarea visible, and the roomy control
+595px against the cramped 2px. The reasoning is in
+[`5-webapp/settings.md`](5-webapp/settings.md) § *Step 3 Is Measured Now*.

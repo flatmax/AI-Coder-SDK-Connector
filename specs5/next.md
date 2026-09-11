@@ -11,9 +11,11 @@ else was last checked at the SHA above, and closing those re-checked nothing els
 left C9 as the only open item in §§ A–D, whose exit criterion is an event rather than a commit — see the
 summary under § *Start here*, which had this wrong once already.
 
-**§ C reopened on 2026-09-11 with C12**, found by asking a question about a setting rather than by
-auditing anything: every session has been running a 1M context window, and two notes in `sdk_surface.py`
-described that as a decision we had declined. The notes are corrected; the config field is queued.
+**§ C reopened and closed again on 2026-09-11 with C12**, found by asking a question about a setting
+rather than by auditing anything: every session has been running a 1M context window, and two notes in
+`sdk_surface.py` described that as a decision we had declined. The notes are corrected, the window is
+capped at 200K through the CLI's own settings key, and the config field the item first queued was
+declined rather than built — so C9 is once more the only open item in §§ A–D.
 
 **Two things landed in this period without ever appearing in this file**, and they are recorded where their
 reasoning lives rather than added here as closed items. `32d04ce7` stopped a backgrounded shell command
@@ -629,7 +631,7 @@ maps to a real field, so a key cannot again be serialised out of nothing.
 ## C. Found while working — correctness and honesty
 
 **Every item in this section was closed** as of 2026-08-28 — built, fixed, or decided — **and § C12
-reopened it on 2026-09-11.** The closed entries stay because each one holds the reasoning for a change,
+reopened and closed it again inside one day on 2026-09-11.** The closed entries stay because each one holds the reasoning for a change,
 and because two of them are the record of an item being blocked by its own framing rather than by any
 work: § C3 on a per-tool table that did not need to exist, § C4 on a three-way display choice the app had
 already made.
@@ -984,7 +986,8 @@ snapshot long enough for a browser reload to show it — decides whether this wa
 restart" or "invisible immediately", and remains unexamined.
 
 **C12 — Every session has been running a 1M context window, and two of our own notes said otherwise.**
-Reported 2026-09-11 as a question — *would 200K be better than 1M?* — and the first thing worth
+✅ *Closed 2026-09-11 — the finding is recorded, the config field is declined; leaves this queue and empties
+this section again.* Reported 2026-09-11 as a question — *would 200K be better than 1M?* — and the first thing worth
 answering was that the choice had never been made. `sdk_surface.py` carried it as declined twice:
 `PENDING_OPTIONS["betas"]` called the 1M window something "worth wiring as a config field once we decide
 whether the cost profile suits AIC-DC", and `KNOWN_BETAS["context-1m-2025-08-07"]` said "Not requested:
@@ -1007,20 +1010,36 @@ reversible in one edit. It caps *where autocompact triggers*, not the window —
 distinction [`context-usage.js`](../webapp/src/context-usage.js) already draws between
 `autoCompactThreshold` and `maxTokens`, and worth keeping straight in whatever UI carries it.
 
-**Done looks like an `auto_compact_window` field on `EngineConfig`**, null-by-default in the same
-already-established sense as `model` and `effort` — null means "pass nothing, let the CLI pick" — reaching
-the subprocess through the `env` dict `options.py` already builds, and surfaced on the Settings tab beside
-the model and effort panels. `engine.json` is not reloadable, so it belongs to `_pendingFields` and the
-restart confirmation like every other field there
-([`5-webapp/settings.md`](5-webapp/settings.md) § *Preference Cards*).
+**The queued half — an `auto_compact_window` field on `EngineConfig` — is declined**, decided 2026-09-11
+the same day it was raised, and the reasoning is worth more than the field would have been.
+[`engine_config.py`](../src/aic_dc/claude_code/engine_config.py) opens with "the engine's own
+configuration is not ours to manage ([`1-foundation/configuration.md`](1-foundation/configuration.md)), so
+this file carries the handful of knobs AIC-DC needs to hand the SDK and nothing else", and
+[`options.py`](../src/aic_dc/claude_code/options.py)'s `NEVER_SET` already turns two SDK arguments away
+with that same sentence. This is a third. **The precedence is what makes it worse than merely redundant:**
+the route proposed above was the `env` dict, `CLAUDE_CODE_AUTO_COMPACT_WINDOW` sits *above* settings in the
+CLI's own order, and a field left at its default in a file the user rarely opens would then silently
+outrank the value they can see in `~/.claude/settings.json`. The three fields this one wanted to sit
+beside are not the precedent it looked like either: `model`, `effort` and `permission_mode` each have a
+live control request behind them and change a running session, and this one has none — it is read when
+the subprocess starts, exactly like the rest of `engine.json`, which is the case `_pendingFields` exists
+to apologise for.
 
-**A second thing closes with it, and is the reason not to leave this as a settings.json note to the
-user.** `bandColor` in `context-usage.js` carries its own admission that the green/amber/red thresholds
-are wrong for a 1M window — "20 000 tokens is 2% and this function is still green" — and ends "Worth
-revisiting the day a 1 M window is the common case." **That day was already here and nothing in the tree
-knew it.** Capping the window at 200K makes the existing bands honest without touching them; leaving it at
-1M means the band rule is the item instead. Either is defensible, but the file currently does neither and
-says the opposite of what is running.
+**What happened instead** is the one-line edit the CLI already supports: `"autoCompactWindow": 200000` in
+`~/.claude/settings.json`, made by the user on 2026-09-11 and verified the way the rest of this item was —
+the bundled binary now answers *"Auto-compact window: 200k tokens (from settings)"*. **A running session
+keeps the window it started with**, because the value is read into the session's options when the
+subprocess starts; `/autocompact <tokens>` is the CLI's own way to move a session that is already up, and
+it writes the same settings key on its way past.
+
+**A second thing closed with it, and it closed by correction rather than by code.** `bandColor` in
+`context-usage.js` carried its own admission that the green/amber/red thresholds are wrong for a 1M window
+— "20 000 tokens is 2% and this function is still green" — and ended "Worth revisiting the day a 1 M
+window is the common case." **That day had already been here for months and nothing in the tree knew it.**
+Capping at 200K makes the existing bands honest without touching them, so the bands stay and both comments
+now say what is running: the file's header capture describes a 200K payload that is true again, and
+`bandColor` records that the day arrived and was answered by a setting rather than by a band change. The
+band rule remains the item the day the window goes back up.
 
 ---
 
@@ -1072,7 +1091,8 @@ regression harness is the only thing that would catch a re-break, and it **must 
 return images inline** — raising the buffer ceiling made one inline screenshot survivable, and a ceiling
 is not a budget. [`plan/README.md`](plan/README.md) open item 6. What landed is
 `scripts/layout_probe.py` over `webapp/src/layout-harness.js`, 19 checks across all three cases — 53
-after B1's residue joined it later the same day; the recipe and the eleven traps it cost are in
+after B1's residue joined it later the same day, 61 after a settings scene did on 2026-09-11, which is
+the first one added by a defect report rather than by this section; the recipe and the eleven traps it cost are in
 [`0-overview/implementation-guide.md`](0-overview/implementation-guide.md)
 § *Measuring Layout in a Real Browser*, and the account is in the work-log's § *Landed since*.
 

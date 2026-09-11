@@ -18,6 +18,19 @@
 //                 Autocompact buffer 33000, Free space 145913,
 //                 + two `isDeferred` rows
 //
+// **That 200K is true again, and there was a stretch where it was not.**
+// `claude-opus-5` carries `native_1m` in the CLI's own model registry and
+// the window resolver answers 1e6 on that check before it looks at the
+// `context-1m-2025-08-07` beta or the `[1m]` suffix — so a session on the
+// configured model resolves a 1M window, and the capture above and that
+// label cannot both have been describing one. Which side was stale was
+// never settled and is not worth settling now: as of 2026-09-11 the window
+// is capped at 200K by `autoCompactWindow` in the user's own
+// `~/.claude/settings.json`, which the CLI applies as
+// `min(model window, configured)`, and the payload reads as it does above.
+// The reasoning, including why AIC-DC declined to own that setting itself,
+// is specs5/next.md § C12.
+//
 // Two facts fall out of that, and both contradict what these
 // components were built to assume:
 //
@@ -192,8 +205,16 @@ export function categoryColor(value) {
  * tokens is 2% and this function is still green. It is kept as a
  * proportion anyway, because these bands also colour a figure the
  * engine has no equivalent for — see `warningPercent` — and one band
- * rule that all three views share beats two that disagree. Worth
- * revisiting the day a 1 M window is the common case.
+ * rule that all three views share beats two that disagree.
+ *
+ * That day arrived and was already behind us — the configured model has
+ * been resolving a 1M window since it was set, and nothing here knew
+ * (specs5/next.md § C12, 2026-09-11). It was answered by capping the
+ * window at 200K in the CLI's own settings rather than by changing these
+ * bands, which is the cheaper of the two and leaves this function honest
+ * instead of leaving it wrong and documented. **The bands are still the
+ * item the day a session runs the full 1M**, and the paragraph above is
+ * what to do about it then: band by distance, the way the engine does.
  */
 export function bandColor(pct) {
   if (pct > 90) return '#f85149';

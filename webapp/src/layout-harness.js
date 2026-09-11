@@ -46,9 +46,12 @@ import { render } from 'lit';
 
 import './permission-dialog/index.js';
 import './usage-hud.js';
+import './settings-tab.js';
 import { renderBlock } from './chat-panel/block-render.js';
 import { STYLES } from './chat-panel/styles.js';
 import { setRepoRoot } from './repo-path.js';
+import { resetCapabilities } from './engine-capabilities.js';
+import { SharedRpc } from './rpc.js';
 
 // ---------------------------------------------------------------------------
 // Measurement
@@ -352,6 +355,12 @@ function clear() {
     const el = mounted.pop();
     try { el.remove(); } catch (_) { /* already gone */ }
   }
+  // The RPC proxy is module state, not scene state. Only the settings
+  // scene publishes one, and a leftover proxy would let a later scene's
+  // component fetch something — so the next build starts disconnected
+  // whatever the last one did.
+  SharedRpc.reset();
+  resetCapabilities();
 }
 
 /**
@@ -672,10 +681,211 @@ async function usageHud(opts = {}) {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Scene: the Settings tab with a config card open
+// ---------------------------------------------------------------------------
+
+/**
+ * The engine's answers to everything this tab reads on mount.
+ *
+ * Shaped from the tab's own unit tests (`settings-tab.test.js`) and
+ * wrapped the way jrpc-oo's multi-remote replies arrive — one key per
+ * remote, which `rpcExtract` unwraps. Every method `onRpcReady` calls is
+ * here, including the ones this scene does not measure: a missing method
+ * throws through `rpcCall`, and a panel that failed to load is a panel
+ * that is not on the page, which would quietly shorten the very column
+ * whose length is the point.
+ */
+function settingsRpc() {
+  const files = {
+    engine: JSON.stringify({
+      model: 'claude-opus-5',
+      commit_model: 'claude-haiku-4-5-20251001',
+      permission_mode: 'default',
+      effort: 'high',
+      thinking_display: 'summarized',
+      max_budget_usd: null,
+      cli_path: null,
+      max_buffer_size: 33554432,
+    }, null, 2),
+    app: JSON.stringify({
+      doc_index: { enabled: true, max_files: 2000 },
+      agents: { enabled: true },
+    }, null, 2),
+  };
+  const methods = {
+    'ClaudeCodeService.get_engine_capabilities': () => ({}),
+    'Settings.get_config_info': () => ({ config_dir: `${REPO_ROOT}/.aic-dc` }),
+    'Settings.get_config_content': (type) => ({
+      type,
+      content: files[type] ?? '{}',
+    }),
+    'ClaudeCodeService.get_model': () => ({
+      model: 'claude-opus-5',
+      resolved: 'au.anthropic.claude-opus-5',
+      models: [
+        { value: 'default', resolvedModel: 'au.anthropic.claude-opus-5',
+          displayName: 'Default', description: 'Use the default model' },
+        { value: 'haiku', resolvedModel: 'au.anthropic.claude-haiku-4-5',
+          displayName: 'Haiku', description: 'Fastest for quick answers' },
+      ],
+    }),
+    'ClaudeCodeService.list_engines': () => ({
+      active: 'claude',
+      available: ['claude', 'antigravity'],
+      mountable: ['claude', 'antigravity'],
+    }),
+    'ClaudeCodeService.get_session_storage': () => ({
+      bytes: 4096, over_warning: false,
+    }),
+    'Settings.get_consultant_model': () => ({
+      model: 'gemini-3.8-flash-high',
+      inherit_value: 'auto',
+      models: [
+        { value: 'auto', label: 'Inherit' },
+        { value: 'gemini-3.8-flash-high', label: 'Gemini 3.8 Flash' },
+      ],
+    }),
+    'Settings.get_agy_gate': () => ({ state: 'current' }),
+    'Settings.get_permission_rules': () => ([
+      { id: 'rule-1', label: 'Bash(npm run test:*)' },
+      { id: 'rule-2', label: 'Read(//home/you/repo/**)' },
+    ]),
+    'Collab.get_collab_role': () => ({ is_localhost: true }),
+  };
+  const proxy = {};
+  for (const [name, impl] of Object.entries(methods)) {
+    proxy[name] = async (...args) => ({ layout: await impl(...args) });
+  }
+  return proxy;
+}
+
+/** Which card to click, by the label the user reads off it. */
+const CONFIG_CARD_LABEL = { engine: 'Engine Config', app: 'App Config' };
+
+/**
+ * The Settings tab with one config card open, measured.
+ *
+ * The failure this exists for was reported from a live session as "there
+ * is no way to edit the json files": `.editor-area` was `flex: 1;
+ * min-height: 0` inside a host that is a scrolling column flex container,
+ * so the editor asked for a share of free space there was none of, and the
+ * `min-height: 0` took away the floor its own 200px textarea would
+ * otherwise have set. It laid out at 2px — the two borders — and
+ * `overflow: hidden` clipped the rest. Nothing about the behaviour was
+ * broken, which is why it survived: the file was fetched, the textarea
+ * held it, Ctrl+S would have saved. 124 settings-tab unit tests passed
+ * throughout and could not have done otherwise, because jsdom computes no
+ * layout.
+ *
+ * So the scene has to reproduce the *condition*, not just the component.
+ * The collapse only happens once the panels above have overflowed the
+ * host — the measured case was 989px of content in a 473px box — and the
+ * probe therefore asserts the host scrolls before it asserts anything
+ * about the editor. An editor measured on a page with room to spare
+ * would have passed under the broken rule too.
+ *
+ * The height is an option for exactly that reason: the short build is the
+ * regression, and a tall one is its control.
+ */
+async function settingsEditor(opts = {}) {
+  const key = opts.card || 'engine';
+  const label = CONFIG_CARD_LABEL[key];
+  if (!label) throw new Error(`no such config card: ${key}`);
+  const height = typeof opts.height === 'number' ? opts.height : 470;
+  const width = typeof opts.width === 'number' ? opts.width : 760;
+
+  // Published before the element is created: the mixin flips
+  // `rpcConnected` and runs `onRpcReady` off an already-ready proxy, which
+  // is the order the tab's own tests use and the order the app produces.
+  SharedRpc.set(settingsRpc());
+
+  // The tab is `height: 100%` and expects a sized parent — in the app that
+  // is the tab body. A holder with no height would let the host grow to
+  // its content, which is the one thing that cannot happen on screen.
+  const holder = document.createElement('div');
+  holder.style.cssText = `position: fixed; top: 0; left: 0; width: ${width}px; `
+    + `height: ${height}px; display: flex; flex-direction: column;`;
+  document.body.appendChild(holder);
+  mounted.push(holder);
+
+  const tab = document.createElement('aic-settings-tab');
+  holder.appendChild(tab);
+  await tab.updateComplete;
+
+  await waitFor(() => deepAll(tab, '.card').length >= 2, 'the config card grid');
+  // Every panel the column is made of, because the column's height is the
+  // condition under test and a scene that measured before the model panel
+  // arrived would be measuring a shorter page than the app has.
+  await waitFor(() => deep(tab, '.model-panel'), 'the panels above the grid');
+  await settle(2);
+
+  const collapsedHostContent = round(tab.scrollHeight);
+
+  // Clicked, not called: `_openCard` is reachable from here, but the click
+  // is the gesture and it is also what proves the card's own handler is
+  // what put the editor on the page.
+  const card = deepAll(tab, '.card').find(
+    (el) => el.querySelector('.card-label')?.textContent.trim() === label,
+  );
+  if (!card) throw new Error(`no config card labelled ${label}`);
+  card.click();
+
+  await waitFor(() => deep(tab, '.editor-textarea'), 'the open editor');
+  await tab.updateComplete;
+  await settle(3);
+
+  const area = deep(tab, '.editor-area');
+  const toolbar = deep(tab, '.editor-toolbar');
+  const textarea = deep(tab, '.editor-textarea');
+  const areaStyle = getComputedStyle(area);
+  const textStyle = getComputedStyle(textarea);
+  const areaBox = box(area);
+  const textBox = box(textarea);
+
+  // How much of the textarea is inside its container's box. `.editor-area`
+  // is `overflow: hidden`, so a textarea that extends past it is a textarea
+  // the user cannot reach the bottom of — and in the failure it was the
+  // whole of it.
+  const visibleText = areaBox && textBox
+    ? round(Math.max(0, Math.min(areaBox.y + areaBox.h, textBox.y + textBox.h)
+      - Math.max(areaBox.y, textBox.y)))
+    : 0;
+
+  return {
+    window: { w: window.innerWidth, h: window.innerHeight },
+    card: label,
+    holder: box(holder),
+    host: box(tab),
+    // The host is the scroller — `:host` declares `overflow-y: auto` — so
+    // these two numbers are the condition the failure needed, and the
+    // first is taken before the editor is opened so it is the column's own
+    // length rather than the column plus what we are measuring.
+    hostContentBeforeOpen: collapsedHostContent,
+    hostContentHeight: round(tab.scrollHeight),
+    hostVisibleHeight: round(tab.clientHeight),
+    hostScrolls: tab.scrollHeight > tab.clientHeight + 1,
+    editor: areaBox,
+    // Printed rather than asserted on: the fix is one declaration, and a
+    // reader of a failing run wants to see which one is in force.
+    editorFlex: `${areaStyle.flexGrow} ${areaStyle.flexShrink} ${areaStyle.flexBasis}`,
+    editorClips: area.scrollHeight > area.clientHeight + 1,
+    toolbar: box(toolbar),
+    textarea: textBox,
+    textareaDeclaredMinHeight: textStyle.minHeight,
+    textareaVisibleHeight: visibleText,
+    // The half of the failure that always worked, kept so a run can tell
+    // "the editor is missing" from "the editor is empty".
+    contentChars: textarea.value.length,
+    cardActive: card.classList.contains('active'),
+  };
+}
+
 const SCENES = {
   'dialog-write': dialogWrite,
   'tool-card': toolCard,
   'usage-hud': usageHud,
+  'settings-editor': settingsEditor,
 };
 
 window.__layout = {
