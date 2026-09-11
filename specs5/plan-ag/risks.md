@@ -1319,8 +1319,9 @@ than acted on, because it is a fact about the user's own configuration.
 
 ## AG-R-17 — An engine may invent its own spelling of a shared field, and nothing says so
 
-**Severity: moderate. Likelihood: realised — three fields, on both Antigravity transports, from the
-day each was written until 2026-09-11.**
+**Severity: moderate. Likelihood: realised — five fields, on both Antigravity transports, from the
+day each was written. Three closed 2026-09-11, a fourth (`toolResult.content`) on 2026-09-12, the
+fifth (`stop_reason`) the same day.**
 
 [AG-R-4](#ag-r-4) says the browser must not learn engine names, and the tripwire built for it —
 `TestVocabulary` in `tests/test_antigravity_steps.py` — asserts that every **event name** an
@@ -1346,13 +1347,77 @@ checked by quoted literal — the same weaker-and-honest match `TestVocabulary` 
 be added to `THEIRS_ALONE` **with the reason they may differ**, so the next one has to argue for
 itself rather than appear.
 
-**Two entries are on that list today**, and the second is an open question rather than a settled
-difference:
+**Two entries went on that list, and the second was an open question rather than a settled
+difference:**
 
 - `request_id` — ours, not the browser's. It reads the request id from the RPC callback argument.
 - `stop_reason` — the Claude pump spells this **`terminal_reason`**, which `computeTurnOutcome`
   reads and turns into a red LED for anything neither empty nor `completed`. So renaming it would
   change what colour a failed `agy` turn draws, and `agy`'s own status words (`ERROR`, `CANCELED`)
-  are not that vocabulary. **It is a mapping to be designed, not a spelling to be fixed** — and
-  until it is, the `AgyTranslator.stream_complete` docstring's claim that *"the browser reads an
-  unrecognised reason as something worth a red badge"* describes a consumer this key does not reach.
+  are not that vocabulary. **It is a mapping to be designed, not a spelling to be fixed.**
+
+### The fifth divergence was the expensive one — mapped 2026-09-12
+
+The second entry is now closed, and closing it showed the entry had **understated what was lost**.
+The question was recorded as one of presentation — *what colour does a failed `agy` turn draw* — and
+the answer turned out to be that it drew the colour of a turn that worked.
+
+**Neither Antigravity footer carries `is_error`.** The Claude pump sends it and the browser checks it
+first; these two pumps do not, and never did. So `terminal_reason` is not *a* route to a red LED on
+these transports, it is the **only** one — and it was arriving under a name with no reader. Every
+failure either transport could report rendered identically to a success:
+
+| The engine said | The panel drew |
+|---|---|
+| `agy`: `status: "ERROR"` — the turn failed | green LED, no badge |
+| `agy`: `status: "CANCELED"` — stopped, or a headless permission denial | green LED, no badge, prose settled as a completed answer |
+| SDK: `MAX_TOTAL_TOKENS_EXCEEDED` and the rest of the budget family | green LED, no badge |
+| SDK: `QUOTA_EXHAUSTED` — out of quota | green LED, no badge |
+
+The three fields before it cost stats. This one cost the verdict, which is why the severity of the
+*family* is right even though each instance looked minor on its own.
+
+**The mapping, in `antigravity.steps.terminal_reason_for`** — shared by both pumps, three rules:
+
+1. **`""`, `SUCCESS` and `UNSPECIFIED` become the empty string.** All three are one engine's way of
+   saying nothing happened worth naming, and the browser draws no badge for an empty reason.
+2. **`ERROR` -> `engine_error`, `CANCELED`/`CANCELLED` -> `aborted_streaming`.** The only two places
+   the vocabularies genuinely name the same thing.
+3. **Everything else passes through lower-cased.** The badge table already renders an unmapped
+   reason legibly — header, red, underscores to spaces — so the words are kept and only the case is
+   normalised, because `SHOUTY_CASE` is a signature the browser could learn an engine by
+   ([AG-R-4](#ag-r-4)).
+
+Two decisions inside that are worth naming, because both were tempting the other way:
+
+- **`SUCCESS` is not promoted to `completed`.** It is the obvious symmetry and it is wrong.
+  `completed` draws a green check, and `agy` reports `SUCCESS` for a turn held open until
+  `--print-timeout` expired — [AG-R-16](#ag-r-16), and the open question below. The tick would land
+  on precisely the turn that did not finish, which is what `block-render.js` means by *"a badge that
+  claims a clean finish is worse than no badge at all"*.
+- **The `MAX_*_EXCEEDED` family is not collapsed into `max_turns`.** `MAX_MODEL_CALLS_EXCEEDED` is
+  close enough to be tempting, and folding it in would throw away *which cap fired* — the one thing
+  [AG-6](decisions.md#ag-6) wants from `BudgetConfig`, which it chose over a dollar cap precisely
+  because a token cap names itself.
+
+**`CANCELED` maps to one word for two different events, on purpose.** It is what `agy` reports for a
+turn the user stopped *and* for a headless permission denial — measured in phase 0, exit 0, no error
+key anywhere in the stream ([`sdk-surface.md`](sdk-surface.md) § *There is no permission channel*).
+`aborted_streaming` is true of both: stopped short rather than failed. It is in
+`CANCELLED_TERMINAL_REASONS`, so the `agy` pump now derives `cancelled` from the reason the same
+one-line way the Claude pump does, against the same shared set. Before this, a turn `agy` cancelled
+on its own — as opposed to one ⏹ cancelled, which the session latches — reported `cancelled: false`
+and rendered as a completed answer that happened to say nothing.
+
+**The tripwire gained a second half.** The existing one asks whether a key is spelled the Claude
+pump's way; it cannot ask whether a *value* is one the browser has a label for, and a mapping onto a
+word the browser has since renamed would look like it worked.
+`TestTheTerminalReasonLandsInAVocabularyTheBrowserHas` reads `block-render.js` and asserts every word
+`TERMINAL_REASONS` maps to appears in the badge table. **It failed on its first run** — matching only
+quoted literals, it reported `engine_error` missing from a table that has a label for it, because the
+reason *sets* quote their members and `REASON_LABELS` writes them as bare object keys. The fix was to
+accept both spellings; the lesson is that a source-literal tripwire is only as good as its idea of
+how the other side writes things down, which is the same weakness `TestVocabulary` records for
+`streamChunk`.
+
+`THEIRS_ALONE` is back to one entry — `request_id`, a genuine difference — on both tripwires.

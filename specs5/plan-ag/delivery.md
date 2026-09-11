@@ -5383,6 +5383,11 @@ reach: it says the browser reads an unrecognised reason as something worth a red
 of `terminal_reason` and true of nothing this field is connected to. Left in place, named here, so
 that whoever designs the mapping finds the claim rather than trusting it.
 
+> **Designed and shipped the next day** — see § *The verdict that never reached the browser*, below.
+> The deferral was right and the framing was not: this reads as a question about *colour*, and the
+> colour a failed `agy` turn actually drew was green. Neither Antigravity footer carries `is_error`,
+> so this key was the only route either had to a red LED.
+
 **4,950 Python tests and 4,485 webapp tests green.** The webapp suite is not decoration here: these
 were changes to what the server sends the browser, and the fixtures on that side already used the
 Claude spelling — which is the other half of why the divergence was invisible.
@@ -5605,3 +5610,85 @@ own `~/.gemini/config/hooks.json`, which is not a thing a probe should install. 
 covered by `tests/test_agy_session.py`.
 
 **4,972 Python tests and 4,501 webapp tests green; 8 live checks passed.**
+
+---
+
+## The verdict that never reached the browser (2026-09-12)
+
+[AG-R-17](risks.md#ag-r-17)'s last open entry, closed. It had been on the allowlist since the risk was
+raised, with a note saying it was *"a mapping to be designed, not a spelling to be fixed"* — which was
+the right call and the wrong reason. The entry framed it as a question of presentation: renaming
+`stop_reason` to `terminal_reason` would change **what colour a failed `agy` turn draws**, so the
+mapping had to be designed before the rename.
+
+Designing it turned up what the framing had hidden. **What colour did a failed `agy` turn draw?
+Green.**
+
+### Why this one was different from the four before it
+
+`computeTurnOutcome` checks `is_error` before it reads `terminal_reason`, and **neither Antigravity
+footer carries `is_error` at all** — not the `agy` pump's, not the SDK pump's, and neither ever did.
+On the Claude transport `terminal_reason` is a second opinion. On these two it is the only one, and
+it was going out under a name with no reader:
+
+| The engine said | The panel drew |
+|---|---|
+| `agy`: `status: "ERROR"` | green LED, no badge |
+| `agy`: `status: "CANCELED"` — a stop, or a headless permission denial | green LED, no badge, prose settled as a completed answer |
+| SDK: `MAX_*_EXCEEDED` — whichever budget cap fired | green LED, no badge |
+| SDK: `QUOTA_EXHAUSTED` | green LED, no badge |
+
+The first three divergences cost a stat line and an empty settled message. This one cost the turn's
+verdict, on every failure either transport can report.
+
+### The mapping
+
+`antigravity.steps.terminal_reason_for`, shared by both pumps — the agy pump already imports
+`TurnStats` from that module, so this follows the grain rather than adding a vocabulary module for
+one function. Three rules: the no-reason words (`""`, `SUCCESS`, `UNSPECIFIED`) become the empty
+string; `ERROR` and `CANCELED`/`CANCELLED` become `engine_error` and `aborted_streaming`; everything
+else passes through lower-cased.
+
+Two things it deliberately does **not** do, both of which were the tempting move:
+
+- **`SUCCESS` is not `completed`.** The symmetry is obvious and it is a lie — `completed` draws a
+  green check, and `agy` says `SUCCESS` about a turn held open until `--print-timeout` expired
+  ([AG-R-16](risks.md#ag-r-16)). An absent badge is the honest picture and the browser's own stated
+  preference: *"a badge that claims a clean finish is worse than no badge at all."*
+- **`MAX_MODEL_CALLS_EXCEEDED` is not `max_turns`.** Folding the budget family into the browser's
+  loop-cap word would throw away which cap fired, which is exactly what [AG-6](decisions.md#ag-6)
+  wanted from `BudgetConfig` over a dollar cap. `max input tokens exceeded` on the badge beats
+  `turn limit reached`.
+
+`CANCELED` covers both a user's ⏹ and a headless permission denial — phase 0 measured the denial
+path reporting `CANCELED` with exit 0 and no error key anywhere. `aborted_streaming` is true of both,
+and it is in `CANCELLED_TERMINAL_REASONS`, so the `agy` pump now derives `cancelled` from the reason
+the same one-line way `messages.py` does. That closes a second gap on the way past: a turn `agy`
+cancelled on its own, rather than one the session latched from ⏹, used to report `cancelled: false`
+and render as a completed answer that said nothing.
+
+### The new tripwire failed on its first run, correctly
+
+The field tripwires ask whether a *key* is spelled the Claude pump's way. They cannot ask whether a
+*value* is one the browser has a label for — and a mapping onto a word the browser had since renamed
+would look exactly like a mapping that worked. `TestTheTerminalReasonLandsInAVocabularyTheBrowserHas`
+reads `block-render.js` and asserts every word `TERMINAL_REASONS` maps to appears in the badge table.
+
+Its first run reported `engine_error` missing from a table that has a label for it. The match was on
+quoted literals, and `block-render.js` writes reason *sets* with quoted members but `REASON_LABELS`
+with bare object keys, so one of the two mapped words was invisible to it. Accepting both spellings
+fixed it. The lesson is the one `TestVocabulary` already records for `streamChunk`: a source-literal
+tripwire is only as good as its idea of how the other side writes things down, and the failure mode
+is a false *absence*, which reads exactly like a real finding.
+
+The consumer end is pinned too — a `streaming.test.js` block builds the footer shape these pumps
+actually emit, `is_error` and all absent, and asserts an `engine_error` reddens the LED, a budget cap
+names its own cap, a cancel stays green, and an empty reason draws no badge.
+
+`THEIRS_ALONE` is back to a single entry on both tripwires: `request_id`, which is a genuine
+difference.
+
+**4,979 Python tests and 4,506 webapp tests green.** No live probe: this is a translation between two
+vocabularies that are both already measured, and the reading that mattered — `agy` reporting
+`CANCELED` for a permission denial with exit 0 — was taken in phase 0 and is recorded in
+[`sdk-surface.md`](sdk-surface.md).

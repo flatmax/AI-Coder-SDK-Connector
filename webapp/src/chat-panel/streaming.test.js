@@ -4,6 +4,7 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import { terminalBadge } from './block-render.js';
 import { resumeActiveStreams } from './events.js';
 import {
   computeTurnOutcome,
@@ -1262,6 +1263,74 @@ describe('computeTurnOutcome — pure helper', () => {
     );
     expect(outcome.status).toBe('error');
     expect(outcome.failureReason).toBe('broke late');
+  });
+});
+
+// An Antigravity turn footer carries no `is_error` at all — neither the `agy`
+// transport's nor the SDK's — so `terminal_reason` is the only route it has to
+// a red LED. Both pumps spelled the key `stop_reason` until 2026-09-12, which
+// meant the reads below all fell through to the `clean` default: a turn `agy`
+// reported as `ERROR` drew the same green LED as one that worked. These cases
+// are written from the footer shape those pumps actually emit, so the
+// vocabulary the Python side maps into is pinned from the consumer's end too.
+describe('computeTurnOutcome — an Antigravity turn footer has no is_error', () => {
+  const footer = (extra) => ({
+    request_id: 'r1',
+    cancelled: false,
+    tool_calls: 2,
+    permission_prompts: 0,
+    files_modified: ['a.py'],
+    usage: {},
+    response: '',
+    ...extra,
+  });
+
+  it('an engine error reddens the LED with no is_error to help it', () => {
+    const outcome = computeTurnOutcome(
+      footer({ terminal_reason: 'engine_error' }),
+      ['a.py'],
+    );
+    expect(outcome.status).toBe('error');
+    expect(outcome.failureReason).toBe('engine error');
+  });
+
+  it('a budget cap names which cap fired', () => {
+    // Not folded into `max_turns`: which limit stopped the turn is the
+    // whole reason AG-6 prefers token caps to a dollar cap.
+    const outcome = computeTurnOutcome(
+      footer({ terminal_reason: 'max_total_tokens_exceeded' }),
+      [],
+    );
+    expect(outcome.status).toBe('error');
+    expect(outcome.failureReason).toBe('max total tokens exceeded');
+  });
+
+  it('a cancel stays green, because the pump sends the flag with the word', () => {
+    const outcome = computeTurnOutcome(
+      footer({ terminal_reason: 'aborted_streaming', cancelled: true }),
+      ['a.py'],
+    );
+    expect(outcome.status).toBe('clean');
+    expect(outcome.appliedCount).toBe(1);
+  });
+
+  it('a clean turn names no reason and draws no badge', () => {
+    // `SUCCESS` maps to '' rather than to `completed`: the tick is a claim,
+    // and `agy` says SUCCESS about a turn held open until its print timeout
+    // expired. `terminalBadge('')` is null, which is the honest picture.
+    const outcome = computeTurnOutcome(footer({ terminal_reason: '' }), []);
+    expect(outcome.status).toBe('clean');
+    expect(terminalBadge('')).toBeNull();
+  });
+
+  it('an unmapped reason still badges, in the house style', () => {
+    // Lower-cased on the Python side so the fallback label reads like the
+    // rest of the table rather than shouting the engine's enum.
+    expect(terminalBadge('quota_exhausted')).toEqual({
+      label: 'quota exhausted',
+      severity: 'error',
+      placement: 'header',
+    });
   });
 });
 

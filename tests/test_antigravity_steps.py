@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import ast
 import types as pytypes
+from pathlib import Path
 
 import pytest
 
@@ -622,11 +623,18 @@ class TestUsage:
 
 
 class TestCompletion:
-    def test_stream_complete_carries_the_stop_reason(self):
+    def test_stream_complete_carries_the_terminal_reason(self):
+        """Under the browser's key, and in the browser's case.
+
+        The budget family is passed through rather than mapped — which
+        cap fired is the information AG-6 wanted from ``BudgetConfig`` —
+        so the only change to the word itself is the case, which keeps a
+        SHOUTY engine signature off a shared badge (AG-R-4).
+        """
         t = StepTranslator("r1")
         t.note_stop_reason(pytypes.SimpleNamespace(name="MAX_TOTAL_TOKENS_EXCEEDED"))
         events = t.stream_complete()
-        assert events[-1].payload["stop_reason"] == "MAX_TOTAL_TOKENS_EXCEEDED"
+        assert events[-1].payload["terminal_reason"] == "max_total_tokens_exceeded"
 
     def test_turn_usage_has_no_cost_key(self):
         t = StepTranslator("r1")
@@ -644,6 +652,116 @@ class TestCompletion:
         t.translate(text_step("hello", delta="hello"))
         t.translate(tool_step("list_directory", {"directory_path": "."}))
         assert t.response_text() == "hello"
+
+
+class TestTheTerminalReasonLandsInAVocabularyTheBrowserHas:
+    """AG-R-17's last entry, and the one that cost a verdict.
+
+    The three fields before it cost stats — a missing tool count, an
+    empty settled message. This one decided whether a failed turn looked
+    failed: neither Antigravity payload carries ``is_error``, so
+    ``terminal_reason`` is the *only* route to a red LED on these
+    transports, and both pumps were sending it under a name nothing read.
+    A turn ``agy`` reported as ``ERROR``, or one the SDK stopped at a
+    budget cap, drew the same clean green LED as a turn that worked.
+
+    A mapping is only as good as the vocabulary it maps into, so the
+    words are checked against the browser's own table rather than against
+    a copy of it here. Quoted-literal matching, the same weaker-and-honest
+    technique the two field tripwires use: it cannot prove the browser
+    *routes* the word, only that the word is one the browser has heard of,
+    which is the half that silently rots.
+    """
+
+    BADGE_TABLE = (
+        Path(__file__).resolve().parents[1]
+        / "webapp"
+        / "src"
+        / "chat-panel"
+        / "block-render.js"
+    )
+
+    def test_every_mapped_word_is_one_the_badge_table_knows(self):
+        """Otherwise the mapping quietly degrades to the fallback.
+
+        A word that is *not* in the table still renders — header, red,
+        underscores turned to spaces — which is exactly why this needs a
+        test. Mapping ``ERROR`` onto a Claude word that had been renamed
+        would look like it worked.
+        """
+        source = self.BADGE_TABLE.read_text(encoding="utf-8")
+        # Three spellings, because the table uses two: the reason *sets*
+        # quote their members and `REASON_LABELS` writes them as bare
+        # object keys. Matching only quoted literals is what the first run
+        # of this test did, and it reported `engine_error` missing from a
+        # table that has a label for it.
+        missing = [
+            word
+            for word in ag_steps.TERMINAL_REASONS.values()
+            if f"'{word}'" not in source
+            and f'"{word}"' not in source
+            and f"{word}:" not in source
+        ]
+        assert not missing, (
+            f"{missing} are mapped to by `terminal_reason_for` and the "
+            f"browser's badge table has no label for them, so they would "
+            f"badge as unmapped — see AG-R-17."
+        )
+
+    def test_a_cancel_keeps_the_led_green_on_both_sides(self):
+        """The word and the flag have to agree, or ⏹ draws red.
+
+        `computeTurnOutcome` reddens the LED for any reason that is
+        neither empty nor `completed`, and clears it only for `cancelled`.
+        The Claude pump keeps the two in step by deriving one from the
+        other against this set; mapping a cancel onto a word outside it
+        would put a fault badge on every stop.
+        """
+        from aic_dc.claude_code.messages import CANCELLED_TERMINAL_REASONS
+
+        assert ag_steps.TERMINAL_REASONS["CANCELED"] in CANCELLED_TERMINAL_REASONS
+        assert ag_steps.TERMINAL_REASONS["CANCELLED"] in CANCELLED_TERMINAL_REASONS
+
+    def test_neither_transports_word_for_nothing_reaches_the_browser(self):
+        """`UNSPECIFIED` and `SUCCESS` are absences, not reasons."""
+        for word in ("", "SUCCESS", "UNSPECIFIED"):
+            assert ag_steps.terminal_reason_for(word) == ""
+
+    def test_success_is_not_promoted_to_a_clean_finish(self):
+        """`completed` draws a green ✓, and `SUCCESS` does not earn one.
+
+        `agy` reports `SUCCESS` for a turn held open until
+        `--print-timeout` expired (AG-R-16), so the tick would land on
+        precisely the turn that did not finish. No badge is the honest
+        picture, and it is the browser's own stated preference.
+        """
+        assert ag_steps.terminal_reason_for("SUCCESS") != "completed"
+
+    def test_the_budget_family_still_names_which_cap_fired(self):
+        """AG-6 chose token caps over a dollar cap because they say so.
+
+        `MAX_MODEL_CALLS_EXCEEDED` is close enough to `max_turns` to be
+        tempting, and folding it in would throw away the only thing the
+        budget reasons are for.
+        """
+        for cap in (
+            "MAX_MODEL_CALLS_EXCEEDED",
+            "MAX_TOOL_CALLS_EXCEEDED",
+            "MAX_INPUT_TOKENS_EXCEEDED",
+            "MAX_OUTPUT_TOKENS_EXCEEDED",
+            "MAX_TOTAL_TOKENS_EXCEEDED",
+        ):
+            assert cap not in ag_steps.TERMINAL_REASONS
+            assert ag_steps.terminal_reason_for(cap) == cap.lower()
+
+    def test_an_unknown_word_is_normalised_and_kept(self):
+        """Neither dropped nor shouted.
+
+        Dropping it would hide a reason this build has never seen, which
+        is the one most likely to matter. Keeping the case would let the
+        browser learn an engine by its shouting — AG-R-4.
+        """
+        assert ag_steps.terminal_reason_for("SOME_NEW_WORD") == "some_new_word"
 
 
 class TestTheFooterSpellsFieldsTheClaudePumpsWay:
@@ -679,15 +797,6 @@ class TestTheFooterSpellsFieldsTheClaudePumpsWay:
         # Ours, not the browser's: it reads the request id from the RPC
         # callback argument rather than from the payload.
         "request_id",
-        # **An open question rather than a settled difference.** The Claude
-        # pump spells this `terminal_reason`, which `computeTurnOutcome`
-        # reads and turns into a red LED for anything that is neither
-        # empty nor `completed`. Renaming would therefore change what
-        # colour a failed `agy` turn draws, and `agy`'s status words
-        # (`ERROR`, `CANCELED`) are not the Claude pump's vocabulary — so
-        # it is a mapping to be designed rather than a spelling to be
-        # fixed. Recorded here so it is not mistaken for an oversight.
-        "stop_reason",
     }
 
     def _claude_source(self):
@@ -783,11 +892,6 @@ class TestEveryPayloadFieldIsSpelledTheClaudePumpsWay:
             # Ours, not the browser's: it reads the request id from the RPC
             # callback argument rather than from the payload.
             "request_id",
-            # An open question, not a settled difference — the Claude pump
-            # says `terminal_reason`, which `computeTurnOutcome` turns into
-            # a red LED for anything neither empty nor `completed`. See
-            # AG-R-17.
-            "stop_reason",
         },
         "toolResult": {
             # Read by `blocks.js` for card routing, and additive rather

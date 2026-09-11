@@ -463,7 +463,7 @@ class TestTheTurnsFiguresComeFromTheConversation:
         conversation = FakeConversation([FakeStep()], stop_reason="MAX_TURNS_EXCEEDED")
         events = await _drain(started_session(conversation))
         done = next(e for e in events if e.name == "streamComplete")
-        assert done.payload["stop_reason"] == "MAX_TURNS_EXCEEDED"
+        assert done.payload["terminal_reason"] == "max_turns_exceeded"
 
     async def test_a_normal_turn_names_no_terminal_reason(self):
         """`UNSPECIFIED` is the SDK's word for "nothing to report".
@@ -477,7 +477,7 @@ class TestTheTurnsFiguresComeFromTheConversation:
         conversation = FakeConversation([FakeStep()], stop_reason="UNSPECIFIED")
         events = await _drain(started_session(conversation))
         done = next(e for e in events if e.name == "streamComplete")
-        assert done.payload["stop_reason"] == ""
+        assert done.payload["terminal_reason"] == ""
 
     async def test_a_real_stop_reason_still_gets_through(self):
         """The filter must not swallow the ones that matter.
@@ -490,7 +490,7 @@ class TestTheTurnsFiguresComeFromTheConversation:
         )
         events = await _drain(started_session(conversation))
         done = next(e for e in events if e.name == "streamComplete")
-        assert done.payload["stop_reason"] == "QUOTA_EXHAUSTED"
+        assert done.payload["terminal_reason"] == "quota_exhausted"
 
     async def test_a_usage_read_that_raises_does_not_fail_the_turn(self):
         """The output is already rendered; a missing figure is not a fault."""

@@ -385,21 +385,42 @@ class TestTheTurnCloses:
         assert t.response_text() == "calc.py defines add()."
         assert t.turn_usage()["total_tokens"] == 72560
 
-    def test_a_success_reports_no_stop_reason(self):
+    def test_a_success_reports_no_terminal_reason(self):
         """An unrecognised reason draws a red badge, so a clean turn sends none.
 
         Phase 3's lesson on the SDK side: forwarding `UNSPECIFIED` would
         have put a red badge reading `UNSPECIFIED` on every clean turn.
+        `SUCCESS` is not promoted to `completed` for the mirror of that
+        reason — a green tick is a claim, and `agy` says `SUCCESS` about
+        a turn held open until `--print-timeout` expired.
         """
         t = AgyTranslator("r1")
         t.translate(RESULT)
         complete = t.stream_complete()[-1].payload
-        assert complete["stop_reason"] == ""
+        assert complete["terminal_reason"] == ""
 
-    def test_anything_other_than_success_is_forwarded_verbatim(self):
+    def test_a_cancel_lands_in_the_browsers_own_word(self):
+        """And brings `cancelled` with it, the way the Claude pump does.
+
+        `agy` reports `CANCELED` both for a turn the user stopped and for
+        a headless permission denial. Neither is a fault, so both keep the
+        LED green — which is what `cancelled` is read for.
+        """
         t = AgyTranslator("r1")
         t.translate({"event": "result", "result": {"status": "CANCELED"}})
-        assert t.stream_complete()[-1].payload["stop_reason"] == "CANCELED"
+        payload = t.stream_complete()[-1].payload
+        assert payload["terminal_reason"] == "aborted_streaming"
+        assert payload["cancelled"] is True
+
+    def test_an_unmapped_status_passes_through_lower_cased(self):
+        """A word this build has never seen still has to badge legibly.
+
+        The browser labels an unmapped reason by turning underscores into
+        spaces, so the case is all that stands between it and shouting.
+        """
+        t = AgyTranslator("r1")
+        t.translate({"event": "result", "result": {"status": "PAYWALL"}})
+        assert t.stream_complete()[-1].payload["terminal_reason"] == "paywall"
 
     def test_a_turn_with_no_result_still_reports_its_prose(self):
         """A cancel, or a process that died, has deltas and no result."""
@@ -419,7 +440,7 @@ class TestTheTurnCloses:
         assert payload["tool_calls"] == 1
         assert set(payload) == {
             "request_id",
-            "stop_reason",
+            "terminal_reason",
             "cancelled",
             "tool_calls",
             "permission_prompts",
@@ -963,8 +984,10 @@ class TestARefusedTurnIsNotBilledForTheLastOne:
         ][-1].payload
         assert payload["usage"] == {}
         # The status still reaches the browser: the turn failed, and
-        # dropping the tokens must not also drop the reason.
-        assert payload["stop_reason"] == "ERROR"
+        # dropping the tokens must not also drop the reason. `engine_error`
+        # is the Claude pump's word for it, which is what `terminalBadge`
+        # has a label for and what `computeTurnOutcome` reddens the LED on.
+        assert payload["terminal_reason"] == "engine_error"
 
 
 class TestAToolResultIsPreviewedTheWayTheCardReadsIt:

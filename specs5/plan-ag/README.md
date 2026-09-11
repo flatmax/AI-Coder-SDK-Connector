@@ -591,6 +591,14 @@ that a reader who remembers the list can see which way it moved. Three went with
 the usage fix went with [§ Two numbers the footer was reading wrong](delivery.md#two-numbers-the-footer-was-reading-wrong-and-one-it-was-not-reading-at-all-2026-09-11),
 which also closed three field-name divergences nothing had noticed ([AG-R-17](risks.md#ag-r-17)).
 
+**On 2026-09-12 that risk's remaining two were closed**, and both were worse than the three that
+raised it: `toolResult` sent the tool's output under a key the card does not read, so **every `agy`
+tool card rendered the literal string "No output."**; and both pumps sent the turn's verdict as
+`stop_reason` where the browser reads `terminal_reason`. Neither Antigravity footer carries
+`is_error`, so that second one was the only route either transport had to a red LED — **every
+failure they could report drew a green one**. See
+[§ The verdict that never reached the browser](delivery.md#the-verdict-that-never-reached-the-browser-2026-09-12).
+
 | What | Specified in | Size |
 |---|---|---|
 | ~~`PostInvocation` → `terminate` while ⏹ is latched~~ ✅ | [AG-19](decisions.md#ag-19) | A handler on the socket `AgyGateServer` already runs; `hook.py` gains an event argument, `install.py` a second registration |

@@ -192,6 +192,95 @@ _TERMINAL = frozenset({STATUS_DONE, STATUS_ERROR, STATUS_CANCELED})
 _LIVE = frozenset({STATUS_ACTIVE, WAITING_FOR_USER, STEP_UNKNOWN})
 
 
+# ----------------------------------------------------------------------
+# Why the turn ended, in the vocabulary the browser already reads
+# ----------------------------------------------------------------------
+
+#: Antigravity's ways of saying "the turn ended and there is nothing to
+#: report".
+#:
+#: Three spellings of one absence, because the two transports disagree.
+#: The SDK's ``StopReason`` defaults to ``UNSPECIFIED`` — its own words are
+#: *"normal completion or unspecified stop reason"* (``types.py:898``) —
+#: ``agy``'s result frame says ``SUCCESS``, and a frame that named no
+#: status at all is the same fact arriving with no word for it.
+NO_TERMINAL_REASON = frozenset({"", "SUCCESS", "UNSPECIFIED"})
+
+#: Antigravity status word → the Claude pump's, for the two that name the
+#: same thing. Everything absent from here is passed through rather than
+#: forced into a word that does not fit; see :func:`terminal_reason_for`.
+TERMINAL_REASONS = {
+    "ERROR": "engine_error",
+    # Both spellings: `agy` prints `CANCELED` (measured, `sdk-surface.md`
+    # § *There is no permission channel*) and the protobuf enums compiled
+    # into the same binary say `CANCELLED`. Accepting both costs one line
+    # and removes a silent pass-through if the CLI ever switches.
+    "CANCELED": "aborted_streaming",
+    "CANCELLED": "aborted_streaming",
+}
+
+
+def terminal_reason_for(word: Any) -> str:
+    """An Antigravity status word as a browser ``terminal_reason``.
+
+    **Both Antigravity pumps spelled this field ``stop_reason`` and
+    nothing read it.** The browser's two consumers — ``computeTurnOutcome``
+    for the LED row and ``terminalBadge`` for the card badge — read
+    ``terminal_reason``, and neither Antigravity payload carries
+    ``is_error`` either. So a turn that ``agy`` reported as ``ERROR``
+    reached the panel as a turn with no verdict at all: green LED, no
+    badge, indistinguishable from a clean answer. That is
+    [AG-R-17](../../../specs5/plan-ag/risks.md#ag-r-17)'s last open entry,
+    and it is the same silence as the three fields before it — a guarded
+    read of a key nobody sends renders as an absence rather than as an
+    error.
+
+    Three rules, in order:
+
+    - **A word in :data:`NO_TERMINAL_REASON` becomes the empty string.**
+      The browser draws no badge for it, which is the honest picture: the
+      engine named no reason. Forwarding ``UNSPECIFIED`` verbatim would
+      stamp a red badge reading *UNSPECIFIED* on every clean turn, which
+      is the bug phase 3's live probe found on 2026-09-02 — and ``SUCCESS``
+      is not promoted to the Claude pump's ``completed`` for the mirror of
+      that reason. ``completed`` draws a green ✓, and ``agy`` reports
+      ``SUCCESS`` for a turn held open until ``--print-timeout`` expired
+      (AG-R-16). A tick on an abandoned turn is exactly what
+      ``block-render.js`` means by *"a badge that claims a clean finish is
+      worse than no badge at all"*.
+    - **A word in :data:`TERMINAL_REASONS` becomes the Claude pump's.**
+      Only where the two vocabularies name the same thing.
+    - **Anything else passes through lower-cased.** The badge table sends
+      an unmapped reason to the card header with ``severity: 'error'`` and
+      labels it by replacing underscores with spaces, so a pass-through
+      is already legible — but ``MAX_TOTAL_TOKENS_EXCEEDED`` would render
+      as shouting, and SHOUTY_CASE is a signature the browser could learn
+      an engine by. AG-R-4 says it must not, so the case is normalised and
+      the words are left alone.
+
+    **The budget family is deliberately not mapped.** ``MAX_MODEL_CALLS_-
+    EXCEEDED`` is close enough to ``max_turns`` to be tempting, and folding
+    it in would throw away which cap fired — the one thing AG-6 wants from
+    ``BudgetConfig``, which it chose precisely because a token cap names
+    itself where a dollar cap does not. ``max input tokens exceeded`` on
+    the badge is worth more than ``turn limit reached``.
+
+    **``CANCELED`` covers two different events and maps to one word on
+    purpose.** It is what ``agy`` reports for a turn the user stopped, and
+    also what it reports for a headless permission denial — measured in
+    phase 0, with exit 0 and no error key anywhere in the stream.
+    ``aborted_streaming`` is true of both: the turn was stopped short
+    rather than failing. It is in
+    :data:`~aic_dc.claude_code.messages.CANCELLED_TERMINAL_REASONS`, so
+    both also keep the LED green, which matches what the panel already
+    says about denials — *"a denied call is the permission system working"*.
+    """
+    name = str(word or "").strip().upper()
+    if name in NO_TERMINAL_REASON:
+        return ""
+    return TERMINAL_REASONS.get(name) or name.lower()
+
+
 @dataclass
 class _Block:
     """A rendered block and its emission state. Mirrors the Claude pump."""
@@ -294,7 +383,7 @@ class StepTranslator:
         self._tools: dict[str, _ToolCall] = {}
         self._block_counter = 0
         self._usage: dict[str, int] = {}
-        self._stop_reason = ""
+        self._terminal_reason = ""
         self.stats = TurnStats()
 
     # ------------------------------------------------------------------
@@ -696,21 +785,14 @@ class StepTranslator:
                 # counters, so adding them would multiply the turn.
                 self._usage[name] = value
 
-    #: The stop reason that means nothing happened worth naming.
-    #:
-    #: The SDK's own words for it: *"Default value; normal completion or
-    #: unspecified stop reason"* (``types.py:866``). Every clean turn ends
-    #: on it, which makes it the opposite of a terminal reason — it is the
-    #: absence of one.
-    _NO_STOP_REASON = "UNSPECIFIED"
-
     def note_stop_reason(self, reason: Any) -> None:
         """Record why the turn ended, for :meth:`stream_complete`.
 
         Set by the session from the connection rather than read off a
         step, because ``StopReason`` lives on the trajectory state update.
-        ``MAX_*_EXCEEDED`` naming which budget cap fired is the whole
-        reason AG-6 offers ``BudgetConfig`` in place of a dollar cap.
+        Kept under the SDK's name because that is what the SDK calls it;
+        what goes on the wire is the browser's ``terminal_reason``, which
+        :func:`terminal_reason_for` translates.
 
         **``UNSPECIFIED`` is reported as no reason at all**, and that is a
         translation rather than a filter. The browser's badge table sends
@@ -725,10 +807,12 @@ class StepTranslator:
 
         Found by the live probe on 2026-09-02, after fixing the bug that
         was hiding it: the reason had been empty for the wrong reason,
-        and reading it correctly is what surfaced this one.
+        and reading it correctly is what surfaced this one. It then sat
+        under a key the browser does not read for another ten days, which
+        is the half :func:`terminal_reason_for` closes: the value was
+        right and the badge it was computed for never saw it.
         """
-        name = _name(reason)
-        self._stop_reason = "" if name == self._NO_STOP_REASON else name
+        self._terminal_reason = terminal_reason_for(_name(reason))
 
     def turn_usage(self) -> dict[str, int]:
         """The turn's token counters, as the SDK reported them."""
@@ -758,7 +842,14 @@ class StepTranslator:
             block.done = True
         result = {
             "request_id": self.request_id,
-            "stop_reason": self._stop_reason,
+            # `terminal_reason`, not `stop_reason` — the last of AG-R-17's
+            # divergences, and the one that cost a verdict rather than a
+            # stat. `computeTurnOutcome` and `terminalBadge` both read this
+            # name, and this payload carries no `is_error`, so under the
+            # old spelling a turn that hit a budget cap drew a green LED
+            # and no badge. `terminal_reason_for` says what the mapping is
+            # and why it is not a rename.
+            "terminal_reason": self._terminal_reason,
             # `tool_calls`, not `num_tool_calls` — see
             # `aic_dc.agy.steps.AgyTranslator.stream_complete`. Nothing read
             # the old spelling, on either Antigravity transport, so the turn

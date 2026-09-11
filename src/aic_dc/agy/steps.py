@@ -56,8 +56,9 @@ from pathlib import Path
 from typing import Any
 
 from aic_dc.agy import tools as agy_tools
-from aic_dc.antigravity.steps import TurnStats
+from aic_dc.antigravity.steps import TurnStats, terminal_reason_for
 from aic_dc.claude_code.messages import (
+    CANCELLED_TERMINAL_REASONS,
     Event,
     files_written_by,
     truncate_tool_result,
@@ -718,11 +719,19 @@ class AgyTranslator:
     def stream_complete(self) -> list[Event]:
         """The turn's closing events, in the shape the browser already reads.
 
-        ``SUCCESS`` becomes an empty stop reason, because the browser reads
-        an unrecognised reason as something worth a red badge — the lesson
-        phase 3 learned when ``UNSPECIFIED`` would have put one on every
-        clean turn. Anything else is forwarded verbatim, since that is the
-        only account of why a turn stopped early.
+        ``agy``'s status word becomes a ``terminal_reason`` — the browser's
+        name for it, under the browser's vocabulary. The translation and
+        its three rules are :func:`~aic_dc.antigravity.steps.terminal_reason_for`.
+
+        *This docstring used to claim that "the browser reads an
+        unrecognised reason as something worth a red badge", and it was
+        describing a consumer this key did not reach.* The value was
+        computed for a badge table that reads ``terminal_reason`` and put
+        on the wire as ``stop_reason``, so the sentence was true about the
+        browser and false about this payload for as long as both existed.
+        AG-R-17 recorded it as an open question rather than a bug, which is
+        the part worth remembering: the reasoning was sound and aimed at
+        the wrong key.
 
         ``cancelled`` is the browser's own word, from the vocabulary the
         Claude transport already fills in (``messages.py``): the HUD reads
@@ -731,15 +740,29 @@ class AgyTranslator:
         stop renders here without the chat panel learning that a third
         transport exists — AG-R-4.
         """
-        stop_reason = "" if self._status in ("SUCCESS", "") else self._status
+        terminal_reason = terminal_reason_for(self._status)
         return [
             Event("turnUsage", {"turn_model_usage": self.turn_usage()}),
             Event(
                 "streamComplete",
                 {
                     "request_id": self.request_id,
-                    "stop_reason": stop_reason,
-                    "cancelled": self._cancelled,
+                    # `terminal_reason`, not `stop_reason`. See
+                    # `antigravity.steps.terminal_reason_for` for the
+                    # mapping and why it is not a rename; the short of it
+                    # is that nothing read the old key, and this payload
+                    # has no `is_error` either, so a turn `agy` reported as
+                    # `ERROR` reached the panel with no verdict at all.
+                    "terminal_reason": terminal_reason,
+                    # Told *or* derived, the same one-line rule the Claude
+                    # pump uses (`messages.py`), against the same shared
+                    # set. The latch covers ⏹; the reason covers a turn
+                    # `agy` cancelled on its own — a headless permission
+                    # denial reports `CANCELED` with exit 0, so without
+                    # this half such a turn renders as a completed answer
+                    # that happens to say nothing.
+                    "cancelled": self._cancelled
+                    or terminal_reason in CANCELLED_TERMINAL_REASONS,
                     # `tool_calls`, not `num_tool_calls`. Both Antigravity
                     # translators spelled it the second way and **nothing
                     # anywhere read it**: the chat panel's `renderTurnFooter`
