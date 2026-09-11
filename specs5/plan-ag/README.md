@@ -609,12 +609,13 @@ into the warm process, and a `stop_acknowledged` card says the screen is final, 
 nobody announces is indistinguishable from a hang. See
 [§ The stop that read like a hang](delivery.md#the-stop-that-read-like-a-hang-2026-09-12).
 
-**Three rows joined the list on 2026-09-11**, from
+**Four rows joined the list on 2026-09-11.** Three came from
 [§ The consultation that cost a step and a half](delivery.md#the-consultation-that-cost-a-step-and-a-half-and-one-it-moved-into-this-directory-2026-09-11).
 The list therefore got longer on a day when four items left it, and that is the honest shape: the two
 transport items are the *asymmetry* work rather than more of the gate work, and the third is a defect
-the consultation surfaced only because its advice was checked against the tree. All three are
-specified and none is written.
+the consultation surfaced only because its advice was checked against the tree. The fourth arrived
+differently — from **building** migration step 1 rather than from discussing it, which found the same
+fault one layer out on the master turn. All four are specified and none is written.
 
 | What | Specified in | Size |
 |---|---|---|
@@ -626,6 +627,7 @@ specified and none is written.
 | Read `transcriptPath` from the hook payload | same § *Four details the probe did not have* | `subagents.py` derives it by hand today; the payload carries it, and carries the per-product directory name that differs. **Measured 2026-09-11** rather than only documented: it is on all three events' payloads |
 | A private config root via `HOME` — stable for the master, ephemeral per consultation | [AG-21](decisions.md#ag-21) | One environment variable on the spawn, plus a seeded `hooks.json` per root and a `finally` that removes the ephemeral one. Lets the `\|\| printf '{"decision":"allow"}'` fail-open line be **deleted** rather than replaced |
 | Derive the brain-tree path from the active config root instead of `Path.home()` | [AG-R-18](risks.md#ag-r-18) | **A prerequisite of the row above, not a follow-up.** `locate_generated_image` already takes `brain_dir` as its first parameter, so only its callers and the `subagents.py` transcript scan change — but until they do, AG-21 silently breaks image collection and every subagent transcript |
+| An outbound queue per client, so a stalled browser cannot pace a master turn | [AG-R-19](risks.md#ag-r-19) | The consultation half of migration step 1 shipped on 2026-09-11; this is the half that did not, and it is **not** the same fix — the master path has an in-order delivery contract, so it wants a queue and a drop bound rather than the bridge's bounded wait. Engine bookkeeping moves ahead of the enqueue while the queue is being built, since it never needed a browser |
 | An authenticated HTTP MCP listener, and a per-spawn `mcp_config.json` in the private root | [AG-22](decisions.md#ag-22) | A second listener on `127.0.0.1:0`, a `token → {repo_root, session_id}` map, and the config written at spawn. This is what makes `claude` reachable as a **consultant** and closes the half of [AG-1](decisions.md#ag-1) that has never existed. Needs [R-14](../plan/risks.md#r-14--two-refreshes-race-for-one-single-use-refresh-token)'s lock first |
 
 One thing deliberately **not** on this list, so that a future reader does not re-open it:

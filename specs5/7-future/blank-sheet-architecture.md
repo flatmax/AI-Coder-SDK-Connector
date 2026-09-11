@@ -220,7 +220,7 @@ change.
 
 | step | size | what the costing turned on |
 |---|---|---|
-| 1 — every sink an observer | 2–3 d | The shipped bridge fix is two-thirds of the test set already |
+| 1 — every sink an observer | 2–3 d | The shipped bridge fix is two-thirds of the test set already. **Consultation half done 2026-09-11**; the master-turn half is [AG-R-19](../plan-ag/risks.md#ag-r-19) |
 | 2 — a Claude consultant through `query()` | 3–5 d | Includes [R-14](../plan/risks.md#r-14--two-refreshes-race-for-one-single-use-refresh-token)'s lock, which it must not ship without |
 | 3 — inline rendering as the default surface | 3–5 d | Webapp work, and the read-only tab it replaces already exists |
 | 4 — reach the consultant from `agy` | 4–6 d | **Down.** A spawned stdio server and a third credential holder were both deleted by measurement — see below |
@@ -237,6 +237,21 @@ roughly 40% of the estimate**. A costing exercise that only ever adds is not mea
    A zero-sink invocation returns its full text. The shipped fix
    ([`test_antigravity_bridge.py`](../../tests/test_antigravity_bridge.py) § `TestTheTabAndTheAnswerAgree`)
    is the first two-thirds of this test set already.
+
+   **Built on the consultation path, 2026-09-11** —
+   [`../plan-ag/delivery.md` § The sink stops deciding what the answer is](../plan-ag/delivery.md#the-sink-stops-deciding-what-the-answer-is-2026-09-11).
+   `_tab` no longer yields `None` with no browser attached, so `AgyConsultant._run`'s per-frame choice
+   between `observer(frame)` and `translator.translate(frame)` is gone; every emit is scheduled and every
+   wait is bounded. The three named tests exist, plus two more, and four of the five fail against the
+   shipped source.
+
+   **Not built on the master turn**, where the same fault is one layer out: `_dispatch` awaits every
+   connected browser through an `asyncio.gather` and sequences engine bookkeeping behind the broadcast.
+   Measured and graduated to [AG-R-19](../plan-ag/risks.md#ag-r-19), because it is a hazard in shipped
+   code and nothing may depend on this layer. **The bridge's fix is the wrong fix there** — the master
+   path has the in-order contract this step names as a must-not-break, so it wants an outbound queue per
+   client rather than a bounded wait. That is the remaining half of this step, and the estimate above
+   covered it.
 2. **A Claude consultant through `query()`.** Headless resolver, `max_turns` above 2, and
    `token_refresh.ensure_fresh()` serialised first — a consultation adds a credential consumer, so the
    lock is a prerequisite rather than a follow-up. *Must not break:* the master engine, and no mutation

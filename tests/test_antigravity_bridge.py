@@ -23,10 +23,11 @@ cannot act on a stack trace.
 from __future__ import annotations
 
 import asyncio
+import time
 
 import pytest
 
-from aic_dc.antigravity.bridge import SERVER_NAME, ConsultantBridge
+from aic_dc.antigravity.bridge import SERVER_NAME, ConsultantBridge, Event
 from aic_dc.antigravity.consultant import ConsultationError, ImageResult
 from aic_dc.antigravity.credentials import MissingCredentialsError
 
@@ -40,8 +41,10 @@ class FakeConsultant:
         self._raises = raises
         self.available = available
         self.calls: list[tuple] = []
-        #: The observer each call was handed. ``None`` when nothing is
-        #: listening, which is the ordinary case with no browser attached.
+        #: The observer each call was handed. Never ``None`` from the
+        #: bridge, including with no browser attached — see
+        #: :class:`TestNoSinkIsLoadBearing`. The parameter keeps its
+        #: ``None`` default because a direct caller may still omit it.
         self.observers: list = []
 
     async def second_opinion(self, question, context="", observer=None):
@@ -336,11 +339,27 @@ class TestTheConsultationGetsATab:
         assert consultant.observers[-1] is not None
 
     @pytest.mark.asyncio
-    async def test_no_observer_when_nothing_is_listening(self):
-        """No browser, no cost: the consultation runs exactly as before."""
+    async def test_an_observer_is_given_even_with_nothing_listening(self):
+        """The replacement for ``test_no_observer_when_nothing_is_listening``.
+
+        That test asserted the coupling this file now argues against: the
+        bridge used to yield ``None`` with no browser attached, and
+        ``AgyConsultant._run`` read that as *translate the frames
+        yourself*. Whether a tab existed therefore decided which code
+        assembled the reply, and the two assemblers could disagree — which
+        is the shipped defect, not a hypothetical.
+
+        An observer with nothing to emit to still translates, so there is
+        one assembler in both cases. What a missing browser switches off is
+        the tab machinery, which :class:`TestNoSinkIsLoadBearing` checks
+        stays off.
+        """
         consultant = FakeConsultant(answer="ok")
         await ConsultantBridge(consultant).second_opinion("Well?")
-        assert consultant.observers[-1] is None
+        assert consultant.observers[-1] is not None, (
+            "with no observer the consultant needs a second way to build the "
+            "answer, and two ways to build one answer is how they disagree"
+        )
 
     @pytest.mark.asyncio
     async def test_stop_reaches_the_consultation(self):
@@ -676,3 +695,163 @@ class TestTheTabAndTheAnswerAgree:
             f"the assembled prose was appended to a tab that already had "
             f"text: {contents}"
         )
+
+
+class TestNoSinkIsLoadBearing:
+    """The invariant, stated as three ways a consumer can fail.
+
+    ``specs5/7-future/blank-sheet-architecture.md``: *no sink may be
+    load-bearing; every sink is an observer, and the result never depends
+    on one.* An Invocation's result must be independent of the presence,
+    count, latency, failure or absence of any attached EventSink.
+
+    Each test below is one of those words, and each was reachable before:
+    **failure** because four emits were awaited inline with only the send
+    guarded, **latency** because the end-of-tab drain was unbounded, and
+    **absence** because it changed which code assembled the answer. The
+    consultant here builds its reply *out of the frames it feeds*, which is
+    ``AgyConsultant._run``'s shape and the reason absence mattered — a fake
+    that returns a canned string would pass all three without testing
+    anything.
+    """
+
+    class Accumulating:
+        """A translator that is also the accumulator, as the real one is."""
+
+        def __init__(self):
+            self._text: list[str] = []
+
+        def translate(self, step):
+            self._text.append(step.content)
+            return [
+                Event(
+                    "streamChunk",
+                    {"block_id": "b", "seq": len(self._text), "content": step.content},
+                )
+            ]
+
+        def turn_usage(self):
+            return {}
+
+        def response_text(self):
+            return "".join(self._text)
+
+    class Assembling(FakeConsultant):
+        """Answers with what the observer accumulated, or fails to answer.
+
+        The fallback for a missing observer is deliberately *not* a second
+        accumulator: this consultant cannot answer at all without one, so a
+        bridge that goes back to yielding ``None`` fails these tests loudly
+        instead of quietly returning a shorter reply.
+        """
+
+        FRAMES = ("Three ", "problems ", "with this.")
+
+        def make_translator(self, request_id, agent_id=""):
+            return TestNoSinkIsLoadBearing.Accumulating()
+
+        async def second_opinion(self, question, context="", observer=None):
+            self.observers.append(observer)
+            translator = getattr(observer, "translator", None)
+            assert translator is not None, "no observer, no accumulator"
+            for text in self.FRAMES:
+                observer(_step(text))
+            return translator.response_text()
+
+    ANSWER = "Three problems with this."
+
+    @pytest.mark.asyncio
+    async def test_the_answer_survives_a_sink_that_raises_on_every_frame(self):
+        """Failure. A broken consumer costs frames, never the reply.
+
+        **This one passes against the bridge as it shipped**, and is here as
+        a guard rather than as a fix: every emit was already wrapped, and a
+        raise was the one sink failure the old code did handle. It is the
+        *silent* failures either side of it — a sink that stalls instead of
+        raising, and a sink that is simply absent — that the next two tests
+        cover and that shipped broken.
+        """
+        attempts = []
+
+        async def emit(event, rid):
+            attempts.append(event.name)
+            raise RuntimeError("this websocket is closed")
+
+        bridge = ConsultantBridge(
+            self.Assembling(), emit=emit, request_id=lambda: "req-1"
+        )
+        result = await bridge.second_opinion("Well?")
+
+        assert self.ANSWER in body(result)
+        assert attempts, "nothing was even attempted, so the raise proved nothing"
+
+    @pytest.mark.asyncio
+    async def test_the_answer_does_not_wait_for_a_sink_that_stops_reading(
+        self, monkeypatch
+    ):
+        """Latency. The drain is an ordering courtesy with a deadline.
+
+        A paused browser tab or a TCP window that has stopped opening holds
+        every task scheduled against it. ``_tab`` closes inside the tool
+        call, so an unbounded drain there hands a stalled consumer a hold on
+        the answer — the model waits on a rendering detail it cannot see.
+        """
+        monkeypatch.setattr("aic_dc.antigravity.bridge.DRAIN_SECONDS", 0.05)
+        started = asyncio.Event()
+
+        async def emit(event, rid):
+            started.set()
+            await asyncio.sleep(30)  # never returns within this test
+
+        bridge = ConsultantBridge(
+            self.Assembling(), emit=emit, request_id=lambda: "req-1"
+        )
+        began = time.monotonic()
+        result = await asyncio.wait_for(bridge.second_opinion("Well?"), timeout=5)
+        elapsed = time.monotonic() - began
+
+        assert self.ANSWER in body(result)
+        assert started.is_set(), "the sink was never called, so it never stalled"
+        assert elapsed < 3, (
+            f"the consultation took {elapsed:.1f}s waiting on a sink that "
+            "sleeps for 30 — the answer is being held by a rendering wait"
+        )
+        # The stalled sends are still pending, on purpose: a push cancelled
+        # mid-await is a half-written frame on a shared socket. Cleared here
+        # so this test does not leave them for the next one.
+        for task in list(bridge._tasks):
+            task.cancel()
+
+    @pytest.mark.asyncio
+    async def test_the_full_answer_comes_back_with_no_sink_at_all(self):
+        """Absence. The case that shipped the defect, and the cheapest one.
+
+        No emit, no request id, no browser: the ordinary state of a
+        headless server. The reply must be the whole reply, not the part
+        that happened to be rendered.
+        """
+        consultant = self.Assembling()
+        result = await ConsultantBridge(consultant).second_opinion("Well?")
+
+        assert body(result).endswith(self.ANSWER), (
+            f"a browserless consultation returned {body(result)!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_absence_still_costs_nothing(self):
+        """The other half of absence: no tab machinery for a headless run.
+
+        The observer is always built; the announce, the heartbeat and the
+        seed are not. Asserted through the consultant's own timing rather
+        than by reading the method — a consultation that started a heartbeat
+        it never cancelled would be a task left running here.
+        """
+        before = len(asyncio.all_tasks())
+        bridge = ConsultantBridge(self.Assembling())
+        await bridge.second_opinion("Well?")
+
+        assert bridge._tasks == set(), (
+            "a browserless consultation scheduled emits, which means it "
+            "found something to push to that it should not have"
+        )
+        assert len(asyncio.all_tasks()) <= before, "a heartbeat outlived its tab"

@@ -374,6 +374,28 @@ class TestASecondOpinion:
         asyncio.run(build().second_opinion("well?"))
         assert registry.lookup(CONV, config_dir=config_dir) is None
 
+    def test_the_answer_is_the_same_whether_or_not_a_tab_is_watching(self, gated):
+        """The two readings of one pass, asserted as equal.
+
+        ``_run`` used to choose between ``observer(frame)`` and
+        ``translator.translate(frame)`` per frame, so a browser's presence
+        picked which code assembled the reply — and one of the two was the
+        code nobody watched. Now the sink is resolved once and the loop has
+        no branch, which is only worth claiming if the *answer* is
+        identical either way. Compared through the real binary rather than
+        by reading the loop, because the loop is the thing under suspicion.
+        """
+        build, _repo, _cfg = gated
+        watched = build(answer="I would not merge this.")
+        recorder = Recorder(watched.make_translator("r1", "consultation-1"))
+        with_tab = asyncio.run(watched.second_opinion("well?", "", recorder))
+
+        alone = build(answer="I would not merge this.")
+        without = asyncio.run(alone.second_opinion("well?"))
+
+        assert with_tab == without == "I would not merge this."
+        assert recorder.frames, "the observer was never fed, so this proves nothing"
+
 
 class TestItDoesNotEndTheTurnThatAskedIt:
     """``streamComplete`` carries a request id, and the open turn is Claude's."""

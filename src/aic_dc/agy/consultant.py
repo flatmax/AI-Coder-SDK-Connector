@@ -553,21 +553,30 @@ class AgyConsultant:
         The whole subprocess surface this module touches, in one method,
         so the boundary is checkable by reading it rather than the file.
 
-        The translator is the *bridge's* when there is a browser
-        attached, so the frames are translated exactly once and the tab
-        and the answer are two readings of one pass. Without a browser
-        there is nobody to push to and one is made here, because the
-        answer still has to be assembled from the same frames.
+        The translator is the *bridge's*, so the frames are translated
+        exactly once and the tab and the answer are two readings of one
+        pass.
+
+        **The sink is resolved once, here, and never consulted again.**
+        This loop used to ask ``if observer is not None`` per frame and
+        translate for itself when the answer was no — which made the
+        presence of a browser decide which code assembled the reply, and
+        two assemblers of one answer are two things that can disagree.
+        They did: ``specs5/known-issues.md`` § *An empty consultation tab*.
+        The bridge now always supplies an observer, and the fallback below
+        is construction rather than a branch, so a direct caller passing
+        ``None`` gets the same single pass with nothing attached to it.
         """
         if not self.available:
             raise ConsultationError(self._unavailable_reason())
 
         self._cancelled = False
         translator = (
-            observer.translator
-            if observer is not None and getattr(observer, "translator", None) is not None
-            else self.make_translator("")
+            getattr(observer, "translator", None) or self.make_translator("")
         )
+        #: One call per frame, whoever is or is not watching. An observer
+        #: translates *and* pushes; a bare translator only translates.
+        feed = observer if observer is not None else translator.translate
         frames: list[dict[str, Any]] = []
 
         gate = AgyGateServer(
@@ -587,12 +596,10 @@ class AgyConsultant:
                 stream = session.stream_frames(prompt)
                 async for frame in stream:
                     frames.append(frame)
-                    if observer is not None:
-                        # Translates through the same translator and
-                        # pushes each event into the tab.
-                        observer(frame)
-                    else:
-                        translator.translate(frame)
+                    # The only pass over the stream. `response_text()`
+                    # reads back what this accumulated, so skipping it for
+                    # any reason shortens the answer and not just the tab.
+                    feed(frame)
         except TimeoutError as exc:
             raise ConsultationError(
                 f"Antigravity did not answer within {timeout:.0f}s. The "

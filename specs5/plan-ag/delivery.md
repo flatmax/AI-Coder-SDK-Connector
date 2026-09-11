@@ -5836,3 +5836,67 @@ gives. Framing that way cost the maintainer question 1 and saved the fortnight i
 reviewer cannot see the repository, so the framing it is handed is the framing it works in — and every
 claim it made that was checkable and checked came back either sharpened or refuted, never merely
 confirmed.
+
+## The sink stops deciding what the answer is (2026-09-11)
+
+Migration step 1 from
+[`../7-future/blank-sheet-architecture.md`](../7-future/blank-sheet-architecture.md#migration-order),
+built on the consultation path. The invariant it establishes is one sentence — *no sink may be
+load-bearing; every sink is an observer, and the result never depends on one* — and the work was almost
+entirely deletion, which is what the costing predicted when it called step 1 an invariant to enforce
+rather than a structure to build.
+
+**What was load-bearing, in the order it was found.** `ConsultantBridge._tab` yielded `None` when there
+was no browser attached, and `AgyConsultant._run` read that as *translate the frames yourself*:
+
+```python
+if observer is not None:
+    observer(frame)        # translate and push
+else:
+    translator.translate(frame)   # translate only
+```
+
+Two assemblers of one answer, chosen per frame by whether a tab existed. That is the empty consultation
+tab's own mechanism — `specs5/known-issues.md` § *An empty consultation tab* — with the branch left in
+place after the symptom was repaired. It is gone: `_tab` always yields an observer, the observer
+translates above its emit gate, and the sink is resolved once before the loop so the loop calls one
+thing. The `None` case survives as *construction* — a bare `translator.translate` on the `agy` side, a
+named `_ignore` on the SDK side — rather than as a condition, because a fork inside a frame loop is
+where a rendering question gets to decide what the caller receives.
+
+**Three ways a consumer can fail, and only one of them was handled.** The register's own recurrence
+again: what shipped guarded the loud failure and neither of the quiet ones.
+
+| failure | before | after |
+|---|---|---|
+| A sink that **raises** | Already absorbed, at every emit | Unchanged. The new test for it passes against the shipped bridge and says so in its docstring |
+| A sink that **stalls** | Four emits were awaited inline and the end-of-tab drain was an unbounded `gather` over an instance-wide task set — so a paused tab held the tool result, and two concurrent consultations drained each other's frames | Every emit is scheduled through `_schedule`; every wait goes through `_drain`, bounded at `DRAIN_SECONDS` and scoped to one consultation |
+| A sink that is **absent** | Changed which code assembled the reply | Changes only who sees it |
+
+**Nothing is cancelled on expiry, and that is a decision rather than an omission.** A send interrupted
+mid-`await` is a half-written frame on a socket the next consultation will use, which is worse for the
+app than a late frame is for one tab. So `_drain` gives up waiting without touching the task, the task
+stays anchored in `_tasks`, and expiry is logged — a tab that settled early is otherwise
+indistinguishable from a model that stopped talking. The same reasoning moved the heartbeat to
+`_schedule`: it is cancelled in `_tab`'s `finally`, and while it awaited its own send, that cancel could
+cut a frame in half.
+
+**Two lines that were one line, now separated by a `try`.** Inside the observer, `translator.translate`
+is the accumulator and everything after it is rendering. Translation is allowed to fail a consultation;
+dispatch is not, and now cannot. The gate's log was also split — no emit at all is a headless server and
+logs at `debug`, an emit with no live turn is the shape that shipped the defect and logs at `warning`,
+because one warning per consultation on a server with no browser trains a reader to ignore the line.
+
+**Verified by reverting rather than by reading.** The five new tests were run against the shipped source
+with the new tests kept: four fail, one passes. The four are the absence and latency cases; the one that
+passes is the raising sink, and it is labelled a guard rather than a fix. `test_agy_consultant.py` gets
+the artefact-level twin — the same question asked with and without a tab attached, through the real
+binary, must return the same prose. Full suite: 4,995 passing.
+
+**What this did not fix, and it is now a risk rather than a plan.** The same fault exists one layer out
+on the master turn, where `_dispatch` awaits every connected browser through an `asyncio.gather` and
+sequences engine bookkeeping behind the broadcast. Measured, including the 120s bound that keeps it from
+being a deadlock, as [AG-R-19](risks.md#ag-r-19) — and deliberately not fixed here, because the master
+path has an ordering contract the consultation path does not, so the bridge's answer to a stalled
+consumer is the wrong answer there. It needs an outbound queue per client, which is its own change with
+its own tests, on the riskiest path in the app.

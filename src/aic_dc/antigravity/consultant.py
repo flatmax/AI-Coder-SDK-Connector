@@ -168,6 +168,18 @@ DEFAULT_TIMEOUT_SECONDS = 120.0
 STDERR_TAIL_LINES = 6
 
 
+def _ignore(_step: Any) -> None:
+    """The absent sink, as an object rather than as a condition.
+
+    A no-op observer for the case where nobody is watching, so
+    :meth:`Consultant._drive`'s loop calls one thing unconditionally.
+    Naming the absence is the point: ``if observer is not None`` inside a
+    frame loop is where a rendering condition gets to decide what the
+    caller receives, which is the fault behind
+    ``specs5/known-issues.md`` § *An empty consultation tab*.
+    """
+
+
 class ConsultationError(RuntimeError):
     """A consultation could not be completed.
 
@@ -389,6 +401,13 @@ class Consultant:
         """
         conversation = agent.conversation
         self._conversation = conversation
+        #: Resolved once, before the loop, so the frame loop has no
+        #: branch on who is watching. On this transport the answer comes
+        #: from ``conversation.last_response`` rather than from the
+        #: observer, so nothing here is load-bearing — but the shape is
+        #: kept identical to ``AgyConsultant._run``, where it was, because
+        #: the fork is easier not to reintroduce when neither loop has one.
+        feed = observer if observer is not None else _ignore
         # Kept past the `finally` below on purpose. `_chat`'s except
         # handlers run *after* it, so reading stderr off `_conversation`
         # would always find None and the diagnosis would silently be
@@ -400,8 +419,7 @@ class Consultant:
             await conversation.send(prompt)
             async for step in conversation.receive_steps():
                 steps.append(step)
-                if observer is not None:
-                    observer(step)
+                feed(step)
         finally:
             self._conversation = None
 

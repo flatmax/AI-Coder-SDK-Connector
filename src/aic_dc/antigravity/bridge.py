@@ -87,6 +87,23 @@ SERVER_NAME = "aic-dc-antigravity"
 #: something a reader can act on and "still working" is not.
 HEARTBEAT_SECONDS = 20.0
 
+#: How long the terminal event waits for the text it is terminating.
+#:
+#: The observer schedules each push as a task so the step loop is never
+#: blocked, which leaves an ordering problem at the end: ``terminal: True``
+#: overtaking the last ``streamChunk`` renders a settled tab that is missing
+#: its final words. Draining before announcing fixes the order.
+#:
+#: **Bounded, because the drain is the one place a sink can reach the
+#: answer.** ``_tab`` closes before ``second_opinion`` returns, so an
+#: unbounded ``gather`` here hands a slow consumer — a paused browser tab, a
+#: TCP window that has stopped opening — a hold on the tool result, and the
+#: calling model waits on a rendering detail. Five seconds is long enough
+#: that a local websocket never reaches it and short enough that nothing
+#: waits on one that has stopped reading. Expiry is logged and the tab
+#: settles anyway: a stale tab is a smaller fault than a stalled turn.
+DRAIN_SECONDS = 5.0
+
 
 def _text(body: str) -> dict[str, Any]:
     """One text block, the shape every handler returns."""
@@ -187,6 +204,12 @@ class ConsultantBridge:
         No new event name and no webapp change: ``subagent-tabs.js`` joins
         on identifiers alone, and ``subagent_type``/``description`` are
         labels. ``terminal`` is what stops the tab streaming forever.
+
+        Waited for, because both announcements are ordering constraints —
+        the opening row has to exist before blocks claim it, and the
+        terminal one has to arrive after the text it terminates — but
+        waited for *briefly*. A tab strip that is not reading is not a
+        reason to hold a consultation.
         """
         request_id = self._turn()
         if self._emit is None or request_id is None:
@@ -202,13 +225,20 @@ class ConsultantBridge:
             "terminal": False,
             **fields,
         }
-        try:
-            await self._emit(Event("subagentEvent", payload), request_id)
-        except Exception:  # noqa: BLE001 - a dead client is not a failed call
-            logger.exception("Could not announce the consultation")
+        # `_push` already absorbs a dead client; scheduling it puts the
+        # timeout on the *wait* rather than on the send.
+        await self._drain(
+            agent_id,
+            {self._schedule(Event("subagentEvent", payload), request_id)},
+            f"the tab's {'terminal' if fields.get('terminal') else 'opening'} row",
+        )
 
     def _observer(
-        self, agent_id: str, translator: Any, progress: dict | None = None
+        self,
+        agent_id: str,
+        translator: Any,
+        progress: dict | None = None,
+        pending: set | None = None,
     ) -> Any:
         """Feed each step through the shared pump, tagged with our id.
 
@@ -227,6 +257,14 @@ class ConsultantBridge:
         consultant would have to translate the frames a second time to
         find the answer, and two passes over one stream is two chances
         for them to disagree.
+
+        **This object is made whether or not anything is listening**, which
+        is the invariant the rest of this class is arranged around: *no sink
+        is load-bearing, and the result never depends on one*. An observer
+        with nowhere to push still translates, so the consultant has exactly
+        one way to assemble an answer and cannot acquire a second by having
+        no browser attached. What the emit gate below decides is only
+        whether anyone sees it.
         """
 
         def observe(step: Any) -> None:
@@ -242,6 +280,13 @@ class ConsultantBridge:
             # nothing to emit to, which entangled rendering with
             # answer-extraction: any window where ``_turn()`` read ``None``
             # silently shortened the reply as well as the tab.
+            #
+            # Outside the `try` below on purpose. This call *is* the
+            # accumulator, so a translator that raises is a failed
+            # consultation and must say so; everything after it is
+            # rendering, and rendering is not allowed to fail a
+            # consultation. The line between the two is the whole point of
+            # this method.
             events = translator.translate(step)
             request_id = self._turn()
             if self._emit is None or request_id is None:
@@ -250,28 +295,50 @@ class ConsultantBridge:
                 # logged is that its silence made an empty tab
                 # undiagnosable (`specs5/known-issues.md` § *An empty
                 # consultation tab*).
+                #
+                # **Two absences, two levels.** No emit at all is a server
+                # with no browser attached: ordinary, expected, and a
+                # warning per consultation would train a reader to ignore
+                # the line. An emit with no live turn is the shape that
+                # shipped the defect — something to push to, nowhere to
+                # push it — and that one is worth waking up for.
                 if progress is not None and not progress.get("muted"):
                     progress["muted"] = True
-                    logger.warning(
-                        "Consultation %s has nothing to stream to "
-                        "(emit=%s, request_id=%s) — the answer is unaffected, "
-                        "the tab will be seeded from the result frame",
-                        agent_id,
-                        self._emit is not None,
-                        request_id,
-                    )
+                    if self._emit is None:
+                        logger.debug(
+                            "Consultation %s has no browser to stream to; "
+                            "translating for the answer alone",
+                            agent_id,
+                        )
+                    else:
+                        logger.warning(
+                            "Consultation %s is streaming to nothing: there is "
+                            "an emit but no live turn to attribute it to. The "
+                            "answer is unaffected — translation happens above "
+                            "this gate — but the tab will be missing text "
+                            "until the turn is readable again",
+                            agent_id,
+                        )
                 return
-            for event in events:
-                # Counted so the tab can tell "said nothing" from "said
-                # nothing *here*", which is what `_tab` seeds against.
-                if progress is not None and event.name == "streamChunk":
-                    progress["text"] = progress.get("text", 0) + 1
-                # Fire-and-forget: an observer is called from inside the
-                # step loop and must not block it, and a dropped chunk
-                # costs a frame of text rather than the consultation.
-                task = asyncio.ensure_future(self._push(event, request_id))
-                self._tasks.add(task)
-                task.add_done_callback(self._tasks.discard)
+            try:
+                for event in events:
+                    # Counted so the tab can tell "said nothing" from "said
+                    # nothing *here*", which is what `_tab` seeds against.
+                    if progress is not None and event.name == "streamChunk":
+                        progress["text"] = progress.get("text", 0) + 1
+                    # Fire-and-forget: an observer is called from inside the
+                    # step loop and must not block it, and a dropped chunk
+                    # costs a frame of text rather than the consultation.
+                    self._schedule(event, request_id, pending)
+            except Exception:  # noqa: BLE001 - a tab is worth less than an answer
+                # Reached by a malformed event, or by a loop with no
+                # running one. The step is already accumulated, so the
+                # answer survives this and the tab loses a frame.
+                logger.exception(
+                    "Consultation %s could not dispatch a translated step; "
+                    "the answer is unaffected",
+                    agent_id,
+                )
 
         return _Observer(observe, translator)
 
@@ -280,6 +347,62 @@ class ConsultantBridge:
             await self._emit(event, request_id)
         except Exception:  # noqa: BLE001
             logger.exception("Dropping consultation event %s", event.name)
+
+    def _schedule(
+        self, event: Any, request_id: str, pending: set | None = None
+    ) -> Any:
+        """Hand one event to the sink as a task, and answer with the task.
+
+        **Every emit in this class goes through here, including the ones
+        the consultation then waits for.** Awaiting ``self._emit`` directly
+        is what made four of them load-bearing: a consumer that never
+        returns holds the coroutine, and the coroutine is on the stack of
+        the tool call. As a task, the wait is separable from the send —
+        :meth:`_drain` can give up on it without touching it.
+        """
+        task = asyncio.ensure_future(self._push(event, request_id))
+        # Two references, and they are not redundant. ``_tasks`` keeps the
+        # task alive for as long as it runs — a task with no strong
+        # reference can be garbage collected mid-await — while ``pending``
+        # is one consultation's own drain list, emptied and forgotten when
+        # its tab settles. One shared set for both jobs is how a long
+        # consultation ends up waiting on a sibling's unsent frames.
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+        if pending is not None:
+            pending.add(task)
+        return task
+
+    async def _drain(self, agent_id: str, pending: set, what: str) -> None:
+        """Wait for scheduled frames to land, but not forever.
+
+        Ordering is the reason to wait at all — ``terminal: True`` must not
+        overtake the last chunk, and a row must exist before blocks are
+        attributed to it — and the answer is the reason to stop waiting.
+        Every caller runs inside the tool call the model is blocked on.
+
+        **Nothing is cancelled on expiry, and that is the deliberate half.**
+        A send interrupted mid-``await`` is a half-written frame on a shared
+        socket, which is worse for the next consultation than a late frame
+        is for this one; the tasks stay anchored in ``_tasks`` and finish or
+        fail on their own time. What expiry gives up is only the guarantee
+        about *order*, and it is logged, because a tab that settled early
+        is indistinguishable from a model that stopped talking.
+        """
+        if not pending:
+            return
+        _, unfinished = await asyncio.wait(list(pending), timeout=DRAIN_SECONDS)
+        pending.clear()
+        if unfinished:
+            logger.warning(
+                "Consultation %s: %s did not reach the browser within %.0fs "
+                "(%d outstanding). Carrying on — the answer does not wait on "
+                "a tab, so this costs rendering order, not the reply.",
+                agent_id,
+                what,
+                DRAIN_SECONDS,
+                len(unfinished),
+            )
 
     @contextlib.asynccontextmanager
     async def _tab(self, label: str) -> Any:
@@ -291,9 +414,19 @@ class ConsultantBridge:
         spinning for the rest of the session. ``finally`` is the only
         placement that survives a refusal, a timeout and a cancel alike.
 
-        Yields the observer to hand to the consultant, or ``None`` when
-        there is nothing to emit to — which keeps the whole feature off
-        the critical path of a session with no browser attached.
+        Yields the observer to hand to the consultant — **always an
+        observer, never ``None``**, even with no browser in sight. It used
+        to yield ``None`` there, and that one word was the load-bearing
+        sink: ``AgyConsultant._run`` read it as *translate the frames
+        yourself*, so whether a tab existed decided which code assembled
+        the reply. Two paths to one answer is two things to keep in
+        agreement, and the empty tab is what it looks like when they
+        stop being. Now the sink's absence is visible in exactly one
+        place, the emit gate, and nothing downstream can see it.
+
+        What the gate still buys is the tab machinery — announce,
+        heartbeat, seed and drain — none of which a browserless session
+        pays for.
 
         **The status is earned, not assumed.** An earlier version reported
         ``completed`` unconditionally from the ``finally``, and the first
@@ -310,10 +443,6 @@ class ConsultantBridge:
         ``completed``, and a ``return`` from inside the ``with`` block
         would look like success here no matter what it returned.
         """
-        if self._emit is None or self._turn() is None:
-            yield None
-            return
-
         agent_id = self._new_agent_id()
         # Asked for rather than named: the consultant knows which raw
         # objects it will feed this thing (AG-16). `StepTranslator` is
@@ -325,15 +454,25 @@ class ConsultantBridge:
             if callable(make)
             else StepTranslator(self._turn() or "", agent_id=agent_id)
         )
-        await self._announce(agent_id, label)
-        status = "failed"
         # Mutable, shared with the heartbeat: it is the only way the
         # heartbeat can tell a queued consultation from a working one, and
         # that distinction is the whole of what it has to say.
         progress = {"steps": 0, "text": 0}
+        pending: set[Any] = set()
+        observer = self._observer(agent_id, translator, progress, pending)
+
+        if self._emit is None or self._turn() is None:
+            # Built above the gate, deliberately: the observer is how the
+            # answer is assembled, so it is not part of what a missing
+            # browser switches off. Everything below this line is.
+            yield observer
+            return
+
+        await self._announce(agent_id, label)
+        status = "failed"
         heartbeat = asyncio.ensure_future(self._heartbeat(agent_id, progress))
         try:
-            yield self._observer(agent_id, translator, progress)
+            yield observer
         except BaseException as exc:
             # The reason, into the tab. Until now a failed consultation
             # settled red and said nothing about why; the explanation went
@@ -358,11 +497,12 @@ class ConsultantBridge:
                 await self._seed_tab(agent_id, translator)
         finally:
             heartbeat.cancel()
-            # Drain what the observer scheduled before saying the tab is
-            # done, or the terminal event can arrive ahead of the text it
-            # is meant to be terminating.
-            if self._tasks:
-                await asyncio.gather(*list(self._tasks), return_exceptions=True)
+            # Drain what *this* consultation scheduled before saying its
+            # tab is done, or the terminal event can arrive ahead of the
+            # text it is meant to be terminating. Bounded: see
+            # `DRAIN_SECONDS` for why a rendering wait must not be able to
+            # hold the answer.
+            await self._drain(agent_id, pending, "its streamed text")
             await self._announce(
                 agent_id,
                 label,
@@ -378,6 +518,12 @@ class ConsultantBridge:
         the consultation it is reporting on. ``CancelledError`` is allowed
         to propagate — swallowing it is how a "harmless" background task
         becomes one that never stops.
+
+        Its notice is *scheduled* rather than awaited, which is what makes
+        that cancel safe: awaiting the send here put a half-finished frame
+        inside the thing being cancelled, so a consultation that ended
+        while the beat was in flight could cut a message in half on a
+        socket the next one is going to use.
         """
         waited = 0.0
         while True:
@@ -397,7 +543,7 @@ class ConsultantBridge:
                     "whole wait lands before the first token."
                 )
             )
-            await self._push(
+            self._schedule(
                 Event(
                     "systemEvent",
                     {
@@ -437,18 +583,20 @@ class ConsultantBridge:
             "Consultation %s streamed no text; seeding its tab from the result frame",
             agent_id,
         )
-        await self._push(
-            Event(
-                "streamChunk",
-                {
-                    "block_id": f"{agent_id}-answer",
-                    "seq": 1,
-                    "content": text,
-                    "done": True,
-                    "agent_id": agent_id,
-                },
-            ),
-            request_id,
+        seed = Event(
+            "streamChunk",
+            {
+                "block_id": f"{agent_id}-answer",
+                "seq": 1,
+                "content": text,
+                "done": True,
+                "agent_id": agent_id,
+            },
+        )
+        # Waited for so the terminal row cannot overtake it, bounded so the
+        # answer this was read *out of* is never held up by showing it.
+        await self._drain(
+            agent_id, {self._schedule(seed, request_id)}, "the seeded answer"
         )
 
     async def _push_reason(self, agent_id: str, exc: BaseException) -> None:
@@ -456,16 +604,19 @@ class ConsultantBridge:
         request_id = self._turn()
         if self._emit is None or request_id is None:
             return
-        await self._push(
-            Event(
-                "systemEvent",
-                {
-                    "subtype": "engine_error",
-                    "data": {"message": " ".join(str(exc).split())[:600]},
-                    "agent_id": agent_id,
-                },
-            ),
-            request_id,
+        reason = Event(
+            "systemEvent",
+            {
+                "subtype": "engine_error",
+                "data": {"message": " ".join(str(exc).split())[:600]},
+                "agent_id": agent_id,
+            },
+        )
+        # Bounded like the rest: this runs on the way out of a *failing*
+        # consultation, and a sink that stopped reading must not turn a
+        # reported failure into a hung tool call.
+        await self._drain(
+            agent_id, {self._schedule(reason, request_id)}, "the failure's reason"
         )
 
     async def cancel(self) -> bool:

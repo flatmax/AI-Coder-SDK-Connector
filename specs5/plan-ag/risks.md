@@ -1521,3 +1521,49 @@ code under test resolves it, and assert it lands under that root and not under `
 assertion must be on the **resolved path for a given root**, never on the constant's spelling — comparing
 strings is precisely how [AG-R-12](#ag-r-12) § *The second way it failed open* reported a gate `current`
 while every call was being auto-approved.
+
+---
+
+<a id="ag-r-19"></a>
+
+## AG-R-19 — The master turn awaits its browsers, and the slowest one sets the pace
+
+**Severity: moderate. Likelihood: certain with a wedged or paused client, and it reads as a hung engine.**
+
+Found while enforcing *no sink may be load-bearing* on the consultation path (migration step 1, and
+[`delivery.md` § The sink stops deciding what the answer is](delivery.md#the-sink-stops-deciding-what-the-answer-is-2026-09-11)).
+The bridge is fixed and tested; **the master pump is the same fault one layer out**, and it is measured
+rather than reasoned:
+
+| link in the chain | what it does with a slow consumer |
+|---|---|
+| `AcSession._emit` | `await emit(event)`, with only the *exception* absorbed. A consumer that never returns is not an exception |
+| `service._dispatch` | `await self._event_callback(...)`, then — deliberately, per its own comment — runs engine state: `_sweep_ended_subagent`, and the `_turn_footer` assignment plus `_post_response_for_background` on `streamComplete` |
+| `main._make_real_callback` | `await`s the jrpc-oo call proxy when what it returns is awaitable |
+| `JRPCCommon.call_all_remotes` | `asyncio.gather` over **every** connected remote, so with collab clients the slowest browser paces all of them |
+| `JRPC2.call` | Bounded, and this is the good news: the send is `create_task`'d and a `timeout_handler` fails the request after `remote_timeout` — `rpc.DEFAULT_REMOTE_TIMEOUT`, 120s here |
+
+So the stall is **bounded at 120s per event, not unbounded** — the difference between a bug and a
+deadlock, and the reason this is moderate rather than severe. It is also 120s of a turn that has already
+produced its answer, which no user will read as anything but a hang.
+
+**The part worth more than the latency.** Engine state is sequenced *behind* the browser. `_dispatch`
+puts `_sweep_ended_subagent` and the footer after the broadcast on purpose, and the reason given is
+sound — a subagent that ended with a dialog open needs the terminal status to explain the denial that
+follows. But it makes a *rendering* consumer a precondition for *engine bookkeeping*, which is the
+conflation named in [`../7-future/blank-sheet-architecture.md`](../7-future/blank-sheet-architecture.md#the-conflation-underneath-the-shipped-defect):
+one mechanism serving a presentation consumer and a data consumer, with the presentation consumer's
+condition in front. The empty consultation tab is what that shape looks like when it fails.
+
+**Mitigation, and it is deliberately not the one used on the bridge.** The bridge could
+schedule-and-briefly-wait because a consultation's frames have no ordering contract beyond *terminal
+last*. The master path has one — in-order websocket delivery, which the migration order names as a
+must-not-break — so fire-and-forget per event is wrong here. What fits is an **outbound queue per
+client**: the pump appends and returns, one consumer task per remote drains in order, and a client that
+stops reading grows its own queue and is dropped on a bound rather than holding the turn. Engine state
+moves ahead of the enqueue, where it never needed a browser at all.
+
+**Tripwire.** Not a unit test on `_dispatch` — an event-loop test on the artefact: a turn against a sink
+that never returns must complete, and **a second client must receive its events at full speed while the
+first is stalled**. The second half is the one that would have caught `gather`, and nothing in the suite
+asserts it today.
