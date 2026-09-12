@@ -31,7 +31,12 @@ import { withRpcTimeout } from '../rpc.js';
 import { _AGENT_LABEL_MAX_LENGTH } from './helpers.js';
 import { restoreMessage } from './restore.js';
 import { makeTabState } from './state.js';
-import { findSubagentTab, subagentTabTooltip } from './subagent-tabs.js';
+import { isConsultation } from './blocks.js';
+import {
+  findSubagentTab,
+  openConsultationTab,
+  subagentTabTooltip,
+} from './subagent-tabs.js';
 
 // ---------------------------------------------------------------
 // Request-ID → tab routing
@@ -262,11 +267,19 @@ export function onChatTabShortcut(panel, event) {
 // UI gesture ever bound to it — the writable agent tabs it closed were
 // session-scoped.
 //
-// Both kinds of tab that remain sweep themselves: `clearHistoricalTabs`
+// Every kind of tab that remains sweeps itself: `clearHistoricalTabs`
 // below drops browsed transcripts on a fresh load or session change, and
 // `subagent-tabs.js` retires a live subagent's tab with the turn that
-// spawned it. Neither has a backend scope to release — a subagent tab is
+// spawned it. None has a backend scope to release — a subagent tab is
 // a view onto block records the parent turn already streamed.
+//
+// A consultation's tab sweeps itself the most slowly of the three: it is
+// opened by hand and only a session change takes it (AG-31), which makes
+// it the one tab whose lifetime a user might reasonably want to end and
+// cannot. That is a recorded risk, AG-R-31, and the reason it is not
+// answered by restoring this function is that whether *every* tab should
+// close by hand is a question about the tab model rather than about
+// consultations.
 
 // ---------------------------------------------------------------
 // Tab strip rendering
@@ -742,61 +755,6 @@ async function _loadSubagentTranscript(panel, agentId, sessionId) {
 }
 
 /**
- * A subagent's feed, projected from the blocks its turn kept.
- *
- * For a subagent with no transcript on disk this is not a fallback — it is
- * the record. Every block a consultation produces is stamped with the id of
- * the tool call that spawned it and lands on that call's turn, and a
- * consultation is awaited *inside* that call, so it cannot outlive the turn
- * and cannot scatter blocks across later ones. One turn's blocks are
- * therefore the whole of it.
- *
- * That reasoning is what confines this to subagents whose row says
- * ``has_transcript: false``. A delegated subagent **can** outlive its turn —
- * it is what background subagents are for — and the rest of its output is
- * then translated against whichever turn is current when it lands (the
- * *Known gap* in ``specs5/5-webapp/subagent-browser.md`` § Tab Lifetime). A
- * projection from one turn would show part of its work as though it were
- * all of it, which is why disk stays that subagent's only source.
- *
- * Shaped as one assistant message carrying the blocks, which is the same
- * shape ``ensureFeedMessage`` gives a live subagent tab — so the projection
- * draws through the renderer the user already read the work in, rather than
- * through a second representation of records the renderer knows how to draw.
- * Blocks are shared by reference, as mirroring already shares them; the
- * settled turn froze its own copies and nothing writes to them again.
- *
- * @returns {Array} messages for the tab, never empty — a projection that
- *   found nothing says so, for the same reason an unreadable transcript does.
- */
-function _projectSubagentBlocks(panel, toolUseId) {
-  if (!toolUseId) {
-    return _unreadableTranscript('This subagent has no readable record');
-  }
-  // Main's, explicitly — not `panel.messages`, which is the *active* tab's
-  // and may well be a subagent feed by the time this runs. The turn that
-  // holds the blocks is in the main transcript wherever the user is standing.
-  const messages = Array.isArray(panel?._tabs?.get('main')?.messages)
-    ? panel._tabs.get('main').messages
-    : [];
-  // Backwards: the turn being asked about is nearly always a recent one, and
-  // a tool use id appears on exactly one turn, so the first hit is the only
-  // hit and the scan stops there.
-  for (let i = messages.length - 1; i >= 0; i -= 1) {
-    const blocks = messages[i]?.blocks;
-    if (!Array.isArray(blocks)) continue;
-    const mine = blocks.filter((block) => block?.agent_id === toolUseId);
-    if (mine.length > 0) {
-      return [{ role: 'assistant', content: '', blocks: mine }];
-    }
-  }
-  // The turn has aged out of the transcript, or was restored from disk —
-  // where a consultation leaves its tool card and nothing else. Either way
-  // there is no record to show, and saying that is better than a blank tab.
-  return _unreadableTranscript('This subagent\'s record is no longer held');
-}
-
-/**
  * Fill a settled subagent tab that mirrored no blocks, from its transcript.
  *
  * A live tab's feed is normally the parent turn's blocks filtered to this
@@ -884,12 +842,15 @@ export async function loadSubagentFeedIfEmpty(panel, tabId) {
  *    replace it and declining to *go* there are different decisions, and only
  *    the first one was ever argued for. A row whose own button answered "that
  *    subagent is still active in the tab strip" sent the user to look for it
- *    by hand, and for a consultation — whose tab is created eagerly, so this
- *    branch is its *normal* case — that was the only thing the button ever
- *    did.
- * 2. **No tab, and the row says it has no transcript** — project it from the
- *    blocks the turn kept. See :func:`_projectSubagentBlocks`.
- * 3. **No tab, and it has one** — read it off disk, unchanged.
+ *    by hand.
+ * 2. **No tab, and it is a consultation** — build one, from the blocks its
+ *    turn kept. A consultation has no transcript to read: it is awaited
+ *    inside the tool call that asked it, so it cannot outlive that turn or
+ *    scatter blocks across later ones, and one turn's blocks are the whole
+ *    of it. See :func:`openConsultationTab`.
+ * 3. **No tab, and it is a delegation** — read it off disk, unchanged. A
+ *    delegated subagent *can* outlive its turn, so its blocks are not the
+ *    whole of it and disk stays its only honest source.
  *
  * Tabs appear one at a time as their reads land, and the first one is
  * activated as soon as it exists rather than after the last: a turn that
@@ -924,19 +885,29 @@ async function onViewSubagentsRequested(panel, event) {
       if (!existing) existing = open;
       continue;
     }
-    wanted.push({
-      agentId: id,
-      label: agent.label,
-      // Absent means "has one": the field is sent only by the producer that
-      // knows it does not, so an older event or an unrelated producer keeps
-      // the disk path it has always had.
-      hasTranscript: agent.has_transcript !== false,
-      toolUseId:
-        typeof agent.tool_use_id === 'string' ? agent.tool_use_id : '',
-    });
+    // A consultation, which has no tab because nothing makes one for it any
+    // more (AG-31). It gets one here and always the same one, running or
+    // finished, this turn's or an older one's — `openConsultationTab` reads
+    // the blocks from the turn or from the message the turn settled into,
+    // and that is the only difference between the two cases. Handled here
+    // rather than queued with the reads below because it is synchronous and
+    // reads nothing off disk: a consultation has no transcript to read.
+    if (isConsultation(agent.row)) {
+      const owner = panel._tabs.get(panel._activeTabId);
+      const tabId = openConsultationTab(
+        panel,
+        owner?.currentRequestId || null,
+        agent.row,
+        owner,
+      );
+      if (tabId && !existing) existing = tabId;
+      continue;
+    }
+    wanted.push({ agentId: id, label: agent.label });
   }
   if (wanted.length === 0) {
-    // Every one of them is already open. Go to the first rather than say so.
+    // Every one of them is already open, or was just opened. Go to the first
+    // rather than say so.
     if (existing) {
       // Activating is not a load, so it evicts nothing — but it is still a
       // user action that a read started before it must not land on top of.
@@ -959,10 +930,8 @@ async function onViewSubagentsRequested(panel, event) {
   const generation = panel._historicalTabGeneration;
 
   let activated = false;
-  for (const { agentId, label, hasTranscript, toolUseId } of wanted) {
-    const messages = hasTranscript
-      ? await _loadSubagentTranscript(panel, agentId, sessionId)
-      : _projectSubagentBlocks(panel, toolUseId);
+  for (const { agentId, label } of wanted) {
+    const messages = await _loadSubagentTranscript(panel, agentId, sessionId);
     // The strip was cleared under us — a session resume, or another click
     // on a different turn. These messages belong to nobody now. Checked for
     // the projection too even though it cannot have been overtaken: the

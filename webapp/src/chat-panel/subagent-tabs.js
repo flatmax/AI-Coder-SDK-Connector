@@ -37,6 +37,7 @@
 
 import { makeTabState } from './state.js';
 import { taskUsage } from '../turn-cost.js';
+import { isConsultation } from './blocks.js';
 
 /**
  * Terminal statuses, mapped to what a status LED is allowed to claim.
@@ -73,7 +74,21 @@ const _TERMINAL_LED = {
  */
 export function subagentTabId(row) {
   const id = row?.agent_id || row?.task_id || row?.key;
-  return typeof id === 'string' && id ? id : null;
+  if (typeof id !== 'string' || !id) return null;
+  // A consultation's tab is a different thing from a delegated subagent's,
+  // and the prefix is what lets the rest of the strip say so in one test.
+  // It is one id for the life of the consultation — the alternative, keying
+  // a running one and a finished one differently, meant the tab you got
+  // depended on whether you clicked before or after an event you cannot see.
+  return isConsultation(row) ? `${CONSULTATION_TAB_PREFIX}${id}` : id;
+}
+
+/** Tabs opened from a consultation's card, as against a delegation's. */
+export const CONSULTATION_TAB_PREFIX = 'consultation:';
+
+export function isConsultationTab(tabId) {
+  return typeof tabId === 'string'
+    && tabId.startsWith(CONSULTATION_TAB_PREFIX);
 }
 
 /**
@@ -308,9 +323,25 @@ export function subagentTabTooltip(tab) {
  *
  * Returns `{tabId, tab, created}`, or null for a row with no usable id or one
  * whose id collides with a tab that is not a subagent's (never clobber Main,
- * an agent tab, or an archived transcript).
+ * an agent tab, or an archived transcript) — or, for a consultation, one
+ * nobody has asked to see (see `options.onDemand`).
+ *
+ * A consultation's default surface is its inline card, so creating a tab for
+ * every one of them filled the strip with feeds competing for attention with
+ * the stream the reader was already in. This function reconciles engine state
+ * into tabs and so never creates one for a consultation; that is
+ * `openConsultationTab`'s job, and the user's click is what calls it.
+ * **Updating** an existing tab is never gated: once a tab has been asked for
+ * it tracks every later event like any other, from this function, through
+ * exactly the path a delegated subagent's does.
  */
 export function syncSubagentTab(panel, requestId, row, ownerTab) {
+  return _syncSubagentTab(
+    panel, requestId, row, ownerTab, !isConsultation(row),
+  );
+}
+
+function _syncSubagentTab(panel, requestId, row, ownerTab, allowCreate) {
   if (!row || typeof row !== 'object') return null;
   const key = typeof row.key === 'string' && row.key ? row.key : null;
   if (!key) return null;
@@ -321,11 +352,20 @@ export function syncSubagentTab(panel, requestId, row, ownerTab) {
   let ordinal = 0;
 
   if (!found) {
+    if (!allowCreate) return null;
     const tabId = subagentTabId(row);
     if (!tabId || tabId === 'main') return null;
     if (panel._tabs.has(tabId)) return null;
-    // Counted before the tab is inserted, so the first subagent of a turn is 1.
-    ordinal = subagentTabs(panel).length + 1;
+    // Counted before the tab is inserted, so the first subagent of a turn is
+    // 1. Consultations are left out of the numbering on both sides: they are
+    // not workers in a fan-out, and one left open across a send (see
+    // `clearSubagentTabs`) would otherwise make the next turn's first
+    // delegation `2` with no `1` beside it. Numbering them by turn instead
+    // is worse, not better — it puts two tabs labelled `1` in the strip.
+    ordinal = isConsultation(row)
+      ? 0
+      : subagentTabs(panel)
+        .filter(({ tab }) => !isConsultation(tab.subagent)).length + 1;
     const state = makeTabState();
     // No input surface at all on this tab — see the module note.
     state.readOnly = true;
@@ -507,12 +547,29 @@ export function settleLiveSubagentTabs(panel, requestId, errored, stillRunning =
  * turn, which is where a record of past work belongs. Keeping the tabs would
  * accumulate a strip the user has to clean up by hand.
  *
+ * `keepConsultations` spares the one kind that argument does not cover, and
+ * the send is the only caller that passes it. A consultation tab exists
+ * because the user clicked to open it, and the reason to open it is to keep
+ * the second opinion beside the composer while writing the reply to it —
+ * which is exactly the keystroke that would destroy it. It is not lost work
+ * either way (the answer stays on its card, inline), but a reference that
+ * vanishes at the moment of use is no reference. The session change still
+ * takes it: those blocks belong to a transcript that is no longer on screen.
+ *
+ * So a consultation tab is closed by a session change and by nothing else,
+ * and the strip can hold as many as the user has opened. That is bounded by
+ * deliberate clicks rather than by traffic — the old eager creation, which
+ * this replaces, was the unbounded one — but there is no way to close one by
+ * hand, which is AG-R-31.
+ *
  * Switches to Main before deleting when the active tab is one of them, so the
  * per-tab accessors are never left pointing at a missing key (they would
  * silently lazy-read `undefined[field]` and throw).
  */
-export function clearSubagentTabs(panel) {
-  const open = subagentTabs(panel);
+export function clearSubagentTabs(panel, { keepConsultations = false } = {}) {
+  const open = subagentTabs(panel).filter(
+    ({ tab }) => !(keepConsultations && isConsultation(tab.subagent)),
+  );
   if (open.length === 0) return false;
   if (open.some(({ tabId }) => tabId === panel._activeTabId)) {
     panel._activeTabId = 'main';
@@ -582,6 +639,83 @@ export function mirrorSubagentBlocks(panel, ownerTab) {
     if (target.tabId === panel._activeTabId) activeChanged = true;
   }
   return activeChanged;
+}
+
+/**
+ * Every block the turn recorded for one subagent, from wherever it is now.
+ *
+ * A turn holds its blocks on `turnBlocks` while it runs and in a settled
+ * message when it ends, and which one has them is a fact about the *turn*,
+ * not about the subagent. Searching both is what lets the caller stop caring:
+ * one consultation tab, whether the turn that asked it is still going or not.
+ */
+export function findSubagentBlocks(ownerTab, toolUseId) {
+  if (!toolUseId || !ownerTab || ownerTab.subagent) return [];
+  const live = ownerTab.turnBlocks?.blocks;
+  if (Array.isArray(live)) {
+    const mine = live.filter((block) => block?.agent_id === toolUseId);
+    if (mine.length > 0) return mine;
+  }
+  const messages = Array.isArray(ownerTab.messages) ? ownerTab.messages : [];
+  // Backwards: the turn being asked about is nearly always a recent one, and
+  // a tool use id appears on exactly one turn, so the first hit is the only
+  // hit and the scan stops there.
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const blocks = messages[i]?.blocks;
+    if (!Array.isArray(blocks)) continue;
+    const mine = blocks.filter((block) => block?.agent_id === toolUseId);
+    if (mine.length > 0) return mine;
+  }
+  return [];
+}
+
+/**
+ * Open a consultation's tab because the user asked for one.
+ *
+ * The counterpart to the refusal in `syncSubagentTab`: nothing creates a
+ * consultation's tab on its own, so this is the only way one comes into
+ * being, and the user's click is what calls it.
+ *
+ * One tab, whenever it is asked for. `row.terminal` looks like a reason to
+ * build something different for a finished consultation and is not: a
+ * consultation is one question and one answer, so it is usually over well
+ * inside the turn that asked it, and a live tab that finishes simply becomes
+ * a viewer of its own blocks. Keying on it — or on whether the turn had
+ * settled — meant the entity you got depended on a boundary you cannot see,
+ * with two id spaces and two lifetimes behind it. What the turn's state
+ * decides here is only *where the blocks are read from*, which nobody can
+ * see either and nobody needs to.
+ *
+ * Returns the tab id, or null when the row cannot have one.
+ */
+export function openConsultationTab(panel, requestId, row, ownerTab) {
+  if (!isConsultation(row)) return null;
+  const synced = _syncSubagentTab(panel, requestId, row, ownerTab, true);
+  if (!synced) return null;
+  // The live route. A tab created partway through a consultation starts with
+  // an empty mirror and the blocks it missed are still on the owner's turn
+  // state; `mirrorSubagentBlocks` is idempotent on `block_id`, so the
+  // catch-up and the next streamed block cannot double up.
+  mirrorSubagentBlocks(panel, ownerTab);
+  if (synced.tab.turnBlocks.blocks.length === 0) {
+    // The settled route: the turn ended and emptied the list mirroring
+    // reads, so its record is in a message now. Projected into the feed
+    // shape `ensureFeedMessage` gives a settled subagent tab, so it draws
+    // through the renderer the user already read the answer in. Blocks are
+    // shared by reference, as mirroring already shares them — the settled
+    // turn froze its own copies and nothing writes to them again.
+    const mine = findSubagentBlocks(ownerTab, row.tool_use_id);
+    if (mine.length > 0) {
+      synced.tab.messages = [{ role: 'assistant', content: '', blocks: mine }];
+      synced.tab.subagent.feedMessage = true;
+    }
+  }
+  // Activated unconditionally, including when the tab already existed: the
+  // click is "show me this", and a second click that silently did nothing
+  // because the first one worked reads as a broken button.
+  panel._activeTabId = synced.tabId;
+  panel.requestUpdate?.();
+  return synced.tabId;
 }
 
 // ---------------------------------------------------------------

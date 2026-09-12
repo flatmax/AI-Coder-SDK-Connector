@@ -54,6 +54,8 @@ import {
   drainChunks,
   freezeBlocks,
   markAwaitingPermission,
+  isConsultationWarning,
+  noteConsultationNotice,
   noteConsultationPosture,
   resetTurnBlocks,
   stageChunk,
@@ -897,12 +899,35 @@ export function onSystemEvent(panel, event) {
   // The banner is what reaches a reader who never opens the tab, which under
   // inline-as-default is most of them (AG-29).
   noteConsultationPosture(panel, agentId, subtype, notice);
+  // And, for the three that are warnings rather than framing, onto the card
+  // itself. See below for why that replaces the Main fallback rather than
+  // joining it.
+  const onCard = noteConsultationNotice(panel, agentId, subtype, notice);
+  // From the subtype, not from whether anything was recorded: a *repeat* of a
+  // warning records nothing and must still not fall through to Main.
+  const cardOnly = !!agentId && isConsultationWarning(subtype);
 
   const scoped = agentId ? findSubagentTab(panel, agentId) : null;
+  // A consultation warning with no tab does **not** fall back to Main any
+  // more. The fallback above is a safety net for a scoped event with nowhere
+  // to go, and it was written when every consultation had a tab, so "nowhere"
+  // meant a tab the user had closed. Under inline-as-default a consultation
+  // has no tab until it is asked for, so that exception would become the
+  // normal path and every refusal would file itself as a top-level row in the
+  // main transcript — detached from the stream that caused it, and reading as
+  // though the parent turn had been refused rather than the consultant.
+  //
+  // The card is the third surface, and it is the one the reader is already
+  // looking at. The toast still fires, which is what covers a warning raised
+  // while the reader is scrolled away.
   const messages = scoped ? scoped.tab.messages : panel.messages;
 
   const turn = requestId ?? null;
   const last = messages[messages.length - 1];
+  // A card-only notice appends nothing, so this guard cannot see a repeat of
+  // one — `noteConsultationNotice` is what deduplicates those, and it already
+  // reported whether this text was new. A repeat must not re-toast.
+  if (cardOnly && !scoped && !onCard) return;
   if (last?.system_event && last.content === notice.text) return;
 
   // `system_event: true` is what `renderMessage` reads for the label and the
@@ -934,9 +959,10 @@ export function onSystemEvent(panel, event) {
     : [...messages, row];
   if (scoped) {
     scoped.tab.messages = next;
-  } else {
+  } else if (!cardOnly) {
     panel.messages = next;
   }
+
   // The toast is the glance and fires once per distinct report; a retry that
   // only refines the card it replaces does not re-interrupt the reader.
   // The toast fires whichever surface took the row, and that is the point of

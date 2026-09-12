@@ -348,14 +348,27 @@ describe('view-subagents handler — an engine that cannot read one back', () =>
   });
 });
 
-describe('a subagent with no transcript, whose record is projected', () => {
-  // A consultation. Its `agent_id` is minted and names nothing on disk, so
-  // the row says so and the handler projects the turn's blocks instead.
+describe('a consultation, whose record is the blocks its turn kept', () => {
+  // Its `agent_id` is minted and names nothing on disk — there is no session
+  // behind a consultation — so the handler builds its tab from the turn's
+  // own blocks rather than reading a transcript that was never written.
   const consulted = (id, toolUseId) => ({
     agent_id: id,
     label: 'Antigravity: review the patch',
     has_transcript: false,
     tool_use_id: toolUseId,
+    row: {
+      key: id,
+      agent_id: id,
+      tool_use_id: toolUseId,
+      task_type: 'consultation',
+      // The same server fact the descriptor above carries. It is what stops
+      // the settled tab's feed fallback (`loadSubagentFeedIfEmpty`) from
+      // reaching for a transcript that was never written — which is the one
+      // disk read the consultation path could still have made.
+      has_transcript: false,
+      terminal: true,
+    },
   });
 
   // The settled turn in Main that holds the consultation's blocks. They are
@@ -384,7 +397,7 @@ describe('a subagent with no transcript, whose record is projected', () => {
     await settle(p);
     // The whole point: no read for a record that was never written.
     expect(read).not.toHaveBeenCalled();
-    const tab = p._tabs.get('historical:agy_1');
+    const tab = p._tabs.get('consultation:agy_1');
     expect(tab.messages).toHaveLength(1);
     expect(tab.messages[0].blocks.map((b) => b.block_id)).toEqual(
       ['c0', 'c1'],
@@ -398,7 +411,7 @@ describe('a subagent with no transcript, whose record is projected', () => {
     seedTurn(p, 'toolu_9');
     ask(p, [consulted('agy_1', 'toolu_9')]);
     await settle(p);
-    const ids = p._tabs.get('historical:agy_1').messages[0].blocks
+    const ids = p._tabs.get('consultation:agy_1').messages[0].blocks
       .map((b) => b.block_id);
     expect(ids).not.toContain('b0');
     expect(ids).not.toContain('t1');
@@ -411,23 +424,24 @@ describe('a subagent with no transcript, whose record is projected', () => {
     seedTurn(p, 'toolu_9');
     ask(p, [consulted('agy_1', 'toolu_9')]);
     await settle(p);
-    expect(p._tabs.get('historical:agy_1').readOnly).toBe(true);
-    expect(p._activeTabId).toBe('historical:agy_1');
+    expect(p._tabs.get('consultation:agy_1').readOnly).toBe(true);
+    expect(p._activeTabId).toBe('consultation:agy_1');
   });
 
-  it('is swept by the same clear as a transcript tab', async () => {
+  it('is not a browsed transcript and is not swept as one', async () => {
     publishFakeRpc({});
     const p = mountPanel();
     await settle(p);
     seedTurn(p, 'toolu_9');
     ask(p, [consulted('agy_1', 'toolu_9')]);
     await settle(p);
-    expect(p._tabs.has('historical:agy_1')).toBe(true);
-    // The `historical:` prefix is what the sweep matches on, which is why the
-    // projection is keyed with it rather than given a shape of its own.
+    expect(p._tabs.has('consultation:agy_1')).toBe(true);
+    // `clearHistoricalTabs` matches on the `historical:` prefix, and a
+    // consultation's tab does not carry it: it is a live subagent tab that
+    // happens to have been opened by hand, and it retires with the turn
+    // like every other one rather than with the transcript browser.
     clearHistoricalTabs(p);
-    expect(p._tabs.has('historical:agy_1')).toBe(false);
-    expect(p._activeTabId).toBe('main');
+    expect(p._tabs.has('consultation:agy_1')).toBe(true);
   });
 
   it('says so when the turn no longer holds the record', async () => {
@@ -440,11 +454,13 @@ describe('a subagent with no transcript, whose record is projected', () => {
     ask(p, [consulted('agy_1', 'toolu_9')]);
     await settle(p);
     expect(read).not.toHaveBeenCalled();
-    // An explanation, not a blank tab, and not a transcript read that would
-    // report a missing session for a subagent that behaved correctly.
-    const tab = p._tabs.get('historical:agy_1');
-    expect(tab.messages[0].content).toContain('no longer held');
-    expect(tab.messages[0].system_event).toBe(true);
+    // The tab still opens, carrying its seed line and no answer: there is
+    // nothing to show and no read that could find any. What it must not do
+    // is fetch a transcript, which would report a missing session for a
+    // consultation that behaved correctly.
+    const tab = p._tabs.get('consultation:agy_1');
+    expect(tab.messages.every((m) => m.subagent_seed)).toBe(true);
+    expect(tab.turnBlocks.blocks).toEqual([]);
   });
 
   it('still reads disk for a subagent that has one', async () => {
@@ -474,7 +490,7 @@ describe('a subagent with no transcript, whose record is projected', () => {
       ]);
       await settle(p);
       expect(read.mock.calls.map((c) => c[0])).toEqual(['agent_abc']);
-      expect(p._tabs.get('historical:agy_1').messages[0].blocks)
+      expect(p._tabs.get('consultation:agy_1').messages[0].blocks)
         .toHaveLength(2);
       expect(p._tabs.get('historical:agent_abc').messages).toHaveLength(2);
     });

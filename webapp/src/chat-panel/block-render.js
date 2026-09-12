@@ -31,7 +31,9 @@ import { costLabel, modelUsageLines, taskUsage } from '../turn-cost.js';
 
 import {
   collectToolPaths,
+  consultationNotices,
   consultationPosture,
+  isConsultation,
   isTodoWrite,
   latestTodos,
   toolStatus,
@@ -206,7 +208,7 @@ export function subagentBlocksExpanded(panel, row) {
   if (!key) return false;
   const explicit = panel?._blockExpansion?.get(key);
   if (typeof explicit === 'boolean') return explicit;
-  return row?.task_type === 'consultation';
+  return isConsultation(row);
 }
 
 /** Flip a subagent's nested cards and repaint. */
@@ -1164,6 +1166,14 @@ function openSubagentTranscript(panel, row) {
           // The join key for a projection: blocks produced inside this
           // subagent carry the spawning call's id as their `agent_id`.
           tool_use_id: row.tool_use_id,
+          // The whole row, because a consultation has no tab until someone
+          // asks for one and this click is the asking — and building a tab
+          // needs what a tab shows (status, ordinal, label) where a
+          // projection needs only the join key. Whether it gets a tab or a
+          // projection is the handler's to decide: it turns on whether the
+          // turn is still holding the consultation, which the row does not
+          // say and the renderer has no business working out.
+          row,
         }],
       },
       bubbles: true,
@@ -1194,13 +1204,29 @@ function openSubagentTranscript(panel, row) {
  * before anything has been observed about it.
  */
 function renderConsultationPosture(panel, row) {
-  if (row?.task_type !== 'consultation') return nothing;
-  const held = consultationPosture(panel, row.agent_id || row.key);
+  if (!isConsultation(row)) return nothing;
+  const id = row.agent_id || row.key;
+  const held = consultationPosture(panel, id);
   const severity = held?.severity || 'info';
   const text = held?.text
     || 'A second opinion runs with no tools and no repository access.';
+  // The warnings below the framing, in arrival order. They used to be rows in
+  // whichever surface the notice router could find — the consultation's tab
+  // when one was mounted, the main transcript when none was. With the tab now
+  // created only on demand, the second case became the normal one, and a
+  // refusal filed as a top-level row in Main reads as though the *parent*
+  // turn had been refused rather than the consultant. They belong to the
+  // container they are about, next to the framing they qualify.
+  const notices = consultationNotices(panel, id);
   return html`
     <div class="consultation-posture ${severity}" role="note">${text}</div>
+    ${notices.map(
+      (entry) => html`
+        <div class="consultation-posture ${entry.severity}" role="note">
+          ${entry.text}
+        </div>
+      `,
+    )}
   `;
 }
 

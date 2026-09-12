@@ -1884,6 +1884,12 @@ export function renderViewSubagentsAffordance(panel, msg) {
       label: subagentLabel(row),
       has_transcript: row.has_transcript,
       tool_use_id: row.tool_use_id,
+      // The whole row, for the same reason the inline card's own button
+      // sends it: a consultation gets a tab built from this rather than a
+      // transcript read, and building one needs what a tab shows. Sent from
+      // both entry points because the two must not disagree about what a
+      // click on the same consultation produces.
+      row,
     });
   }
   if (agents.length === 0) return '';

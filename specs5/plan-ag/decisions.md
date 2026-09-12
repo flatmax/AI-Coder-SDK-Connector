@@ -3056,3 +3056,140 @@ disk keeps a consultation's tool card and nothing else. The review was right to 
 checked rather than assumed closed by construction — "do not rely on server-side exclusion
 across the network boundary" — even though the row that would trigger it is itself not
 restored.
+
+### What AG-31 took back
+
+`_projectSubagentBlocks` and the `historical:`-prefixed tab it mounted into are deleted. The
+reasoning above survives whole — one turn is the record, the projection is the shape
+`ensureFeedMessage` gives, and `has_transcript` is the fact that decides — but it now runs
+inside `openConsultationTab` as one of two sources for a single `consultation:` tab
+([AG-31](#ag-31)). What did not survive is the *second entity*: projecting into a
+`historical:` tab gave the same consultation two ids and two lifetimes depending on whether its
+turn had ended when the user clicked. The button going to the tab it names, which is the other
+half of this decision, is unchanged and is what makes the on-demand opener reachable at all.
+
+## AG-31 — A consultation's tab is opened by hand, is one entity whenever it is opened, and outlives the send **(measured and built 2026-09-12)**
+
+Migration step 3's last half. [AG-29](#ag-29) made the inline card the default surface and
+[AG-30](#ag-30) made the full view a projection instead of a disk read; what was left was the
+reason the strip needed either — that every consultation minted a tab the moment its first
+event landed, so a turn that asked four questions grew four feeds competing for attention with
+the stream the reader was already in.
+
+Three things changed together, because separately each one produces a worse artefact than the
+one it replaces.
+
+### Nothing creates the tab; the click does
+
+`syncSubagentTab` is reconciliation — it turns engine state into tabs — and reconciliation is
+exactly the wrong place to express *a user wants to look at this*. It now delegates to a shared
+`_syncSubagentTab` with `allowCreate = !isConsultation(row)`, so a consultation row updates a
+tab that exists and creates none that does not. Creation moved to `openConsultationTab`, which
+the card's own name button calls.
+
+**Updating is never gated**, and that asymmetry is load-bearing rather than incidental. Once a
+tab has been asked for it tracks every later event by exactly the path a delegated subagent's
+does — including `settleSubagentTab` at the terminal event and `settleLiveSubagentTabs` at
+`streamComplete`. A gate on updates would have meant building a second lifecycle for the one
+kind of tab that has no disk record to fall back on.
+
+The first build of this put the wanting in a `_consultationTabsWanted` set that reconciliation
+consulted. It is deleted. A set of intents has to be kept in step with a set of tabs, and the
+two answer the same question; the tab *is* the record of the asking, which is also why a
+reconnect needs to remember nothing — the tab was never destroyed, so nothing has to re-create
+it.
+
+### One id space, so the entity does not depend on when you click
+
+`subagentTabId` returns `consultation:${id}` for a consultation and the bare `agent_id` for
+everything else. One id for the whole life of the consultation, chosen from a stable property
+of the row.
+
+The build that preceded this one chose the *kind* of tab outside the opener, from whether the
+turn still held the blocks. Review named the defect precisely: that merely relocated a timing
+cliff from a visible marker (`row.terminal`) to an invisible one (the turn boundary), so
+clicking the same visibly-finished card two seconds apart produced two different entities —
+and the two carried **different lifetimes**, since a live-kind tab is swept at the next send
+and a `historical:` tab is not. Verified in the code, and adopted. `turnHoldsSubagent` is
+deleted along with the intent set.
+
+What remains inside the opener is not a choice of representation but a choice of *source*, and
+it is a question about the turn rather than about the consultation:
+
+```js
+mirrorSubagentBlocks(panel, ownerTab);
+if (synced.tab.turnBlocks.blocks.length === 0) {
+  const mine = findSubagentBlocks(ownerTab, row.tool_use_id);
+  ...
+}
+```
+
+A turn holds its blocks on `turnBlocks` while it runs and in a settled message when it ends.
+`findSubagentBlocks` searches both, newest-first, and both arms converge on the same shape —
+`turnBlocks` plus the feed message `ensureFeedMessage` gives every settled subagent tab. This
+subsumes [AG-30](#ag-30)'s `_projectSubagentBlocks` and its `historical:`-prefixed tab, both
+now deleted: the projection was right and the tab it mounted into was a second entity for the
+same consultation.
+
+Review's next round predicted this left an **orphaned live tab** — open it mid-answer, and when
+the owner's `turnBlocks` empties at the turn's end nothing settles the consultation's, because
+delegations settle by reading disk and a consultation has none. Measurement refuted it, and the
+probe is now a test. Two properties do the work: the mirror is the consultation tab's *own*
+array (`mirrorSubagentBlocks` pushes block references into `target.tab.turnBlocks`), so emptying
+the owner's cannot blank it; and settling is an in-memory buffer conversion shared with every
+delegation, not a disk operation. The predicted follow-on — a re-click returning to the broken
+tab — was downstream of it and fell with it.
+
+One detail found while measuring and recorded here because it is luck rather than design: the
+already-open lookup in `onViewSubagentsRequested` tests `panel._tabs.has(id)` against the *raw*
+agent id, which a `consultation:`-prefixed key never matches. It resolves through the fallback
+`findSubagentTab(panel, id)`, which matches on `sub.agent_id` inside the tab state rather than
+on the key, and so is blind to the prefix by construction.
+
+### It survives the send, and the send alone
+
+`clearSubagentTabs(panel, { keepConsultations: true })` at `input.js:236`; the session-change
+caller at `events.js:499` still takes everything.
+
+The argument for sweeping at the send does not reach this kind of tab. Its premise is that the
+subagents of the previous turn are finished and their transcripts are on disk, so the strip can
+be cleared without losing anything reachable. A consultation tab is not a feed of the last
+turn — it is a document the user opened by hand, and given the answer already renders inline on
+its card, the *only* reason to open it is to keep the second opinion beside the composer while
+writing the reply to it. That reply is the keystroke that destroyed it.
+
+This reverses the position first argued here, which was that the send-sweep should stay because
+the project deliberately deleted its per-tab close affordance (`tabs.js:264`: "both kinds of tab
+that remain sweep themselves") and re-adding a `×` for one kind would make consultations the
+only tab with a manual lifetime. Review refuted the premise from the codebase: `historical:`
+tabs do **not** sweep at the send — `clearHistoricalTabs` runs on session change and on opening
+another subagent view — and they have no `×` either. Surviving a send and having zero manual
+lifetime were never the same claim, and the dichotomy was invented.
+
+So a consultation tab is closed by a session change and by nothing else. Its blocks belong to a
+transcript a session change has just replaced, which is why that sweep is not optional; and the
+strip can hold as many as the user has opened, which is bounded by deliberate clicks rather
+than by traffic. The unbounded version is the one this decision removes. What it does not
+provide is a way to close one by hand, which is [AG-R-31](risks.md#ag-r-31).
+
+### The ordinal counts delegations
+
+Strip labels read `1 headings`, `2 parser`, assigned at creation by counting the open subagent
+tabs and never recomputed. Because every tab was swept at every send, that counter has always
+been per-turn *by accident*. A consultation tab that survives the send would have made the next
+turn's first delegation `2` with no `1` beside it.
+
+The fix chosen was not the obvious one. Scoping the count to the current `requestId` restates
+what the counter silently meant and was the position put to review; review refuted it with the
+resulting artefact — a survivor numbered `1` from the previous turn sitting in the strip beside
+the new turn's first delegation, also numbered `1` — and inverted orders for the same reason.
+So consultations are left out of the numbering on both sides: they are advisory documents
+rather than workers in a fan-out, `subagentTabLabel` already renders a keyword alone when the
+ordinal is absent, and delegations stay `1..n` whatever survives beside them.
+
+### What this is worth
+
+The strip now grows only when the user asks it to, a consultation is one tab whenever it is
+opened, and that tab is still there when the answer is being acted on. 4,572 webapp tests pass,
+16 of them covering this directly — including the live-open-then-settle probe review asked for,
+which refuted review's own claim.

@@ -17,7 +17,7 @@ import {
   subagentLedState,
   subagentLedTooltip,
 } from './subagent-tabs.js';
-import { consultationPosture } from './blocks.js';
+import { consultationNotices, consultationPosture } from './blocks.js';
 import {
   mountPanel,
   publishFakeRpc,
@@ -894,17 +894,59 @@ describe('a system event that names a subagent lands in its tab', () => {
     expect(p.messages.length).toBe(mainBefore);
   });
 
-  it('falls back to Main when the named tab is not open', async () => {
-    // A consultation the user closed, or a reconnect that has not rebuilt
-    // the strip yet. An unsaid warning is worse than one in the wrong place.
+  it('holds it for the card when the named tab is not open', async () => {
+    // The old behaviour put it in Main, on the reasoning that an unsaid
+    // warning is worse than one in the wrong place. That was a false
+    // dichotomy: a consultation's tab is opt-in now, so most of them never
+    // have one, and Main would have collected a warning for every
+    // consultation that ran. The card the warning is *about* is the third
+    // place, and it is on screen whether the tab exists or not.
     const p = mountPanel();
     const { reqId } = await withSubagent(p);
     pushEvent('system-event', ungrounded(reqId, { agent_id: 'agent-missing' }));
     await settle(p);
-    expect(contentsOf(p.messages)).toEqual([
-      'This consultation reached for a tool and got nothing …',
+    expect(contentsOf(p.messages)).toEqual([]);
+    expect(consultationNotices(p, 'agent-missing')).toEqual([
+      {
+        subtype: 'consultation_ungrounded',
+        text: 'This consultation reached for a tool and got nothing \u2026',
+        severity: 'warning',
+      },
     ]);
   });
+
+  it('holds the same warning once, however often it arrives', async () => {
+    // The card renders the list, so a repeat would stack a second identical
+    // banner under the first rather than being swallowed by the adjacency
+    // check that deduplicates a message feed.
+    const p = mountPanel();
+    const { reqId } = await withSubagent(p);
+    pushEvent('system-event', ungrounded(reqId, { agent_id: 'agent-missing' }));
+    await settle(p);
+    pushEvent('system-event', ungrounded(reqId, { agent_id: 'agent-missing' }));
+    await settle(p);
+    expect(consultationNotices(p, 'agent-missing')).toHaveLength(1);
+    expect(contentsOf(p.messages)).toEqual([]);
+  });
+
+  it('does not hold the standing posture, which is framing and not a warning',
+    async () => {
+      // The card draws the posture from `consultationPosture` and the
+      // warnings under it from `consultationNotices`. A posture in both
+      // would print the sentence twice.
+      const p = mountPanel();
+      const { reqId } = await withSubagent(p);
+      pushEvent('system-event', {
+        requestId: reqId,
+        data: {
+          subtype: 'consultation_posture',
+          data: { agent_id: 'agent-missing' },
+        },
+      });
+      await settle(p);
+      expect(consultationNotices(p, 'agent-missing')).toEqual([]);
+      expect(consultationPosture(p, 'agent-missing')).toBeTruthy();
+    });
 
   it('leaves an unscoped event in Main', async () => {
     // Most system events are the session speaking — a rate limit, a reset,

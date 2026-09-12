@@ -7571,3 +7571,55 @@ that make it reachable, and it is not fixed here. The honest fix reconciles two 
 same work and runs straight into the spec's own open *Known gap*, which says the repair "is a
 change to the turn model rather than an addition to it". Folding that in would have made one
 commit out of two, and the harder half would have been the one with no tests.
+
+## Four rounds, two refutations each way (2026-09-12)
+
+The tab strip filled up. Every consultation minted a tab the moment its first event landed, so a
+turn that asked four questions grew four feeds beside the stream the reader was actually in —
+and since [AG-29](decisions.md#ag-29) put the answer inline on the card and
+[AG-30](decisions.md#ag-30) made the full view a projection rather than a disk read, none of
+those tabs was carrying anything that could not be reached another way. The remaining work was
+to stop making them: let the card's own button open one, on demand. That is
+[AG-31](decisions.md#ag-31), and it took four rounds of review to get right, two of which this
+app won and two of which it lost.
+
+The first build expressed *wanting a tab* as an intent set that reconciliation consulted. Review
+took it apart on a different axis: not the set, but the discriminator beside it. The tab's kind
+was being chosen from whether the turn still held the blocks, which relocated a timing cliff
+from a visible marker to an invisible one — click the same finished card at eleven seconds and
+at thirteen and you get two different entities, chosen by a boundary nobody can see. Worse, the
+two kinds had different lifetimes, one swept at the next send and one not. That was checked in
+the code and it was true. One id space, `consultation:${id}`, and the opener choosing its
+*source* internally rather than the caller choosing a *kind* externally. The intent set went
+with it: a tab that is never destroyed is its own record of having been asked for, so a reconnect
+has nothing to remember.
+
+The next round predicted the unification had broken the live case — open the tab mid-answer, and
+when the turn ends and empties its block list nothing settles the consultation's tab, because
+delegations settle by reading disk and a consultation has no disk. It was a good prediction from
+the code it had been shown, and it was wrong. The mirror is the consultation tab's own array of
+block references, so emptying the owner's cannot blank it, and settling is an in-memory buffer
+conversion that every delegation goes through too. The probe review asked for is now the test
+that says so, and a second claim that a re-click would land on the broken tab fell with the first.
+
+The round this app lost outright was about the send. The position argued here was that the
+consultation tab should keep being swept at every send, because the project deliberately deleted
+its per-tab close affordance and re-adding a `×` for one kind would make consultations the only
+tab with a manual lifetime. Review went to the codebase and refuted the premise: `historical:`
+tabs already survive the send, and they have no `×` either. *Surviving a send* and *having a
+manual lifetime* had been welded into one claim that nothing supported. And the cost of being
+wrong was the whole point of the feature — the reason to open a consultation's tab, when its
+answer already renders inline, is to keep the second opinion beside the composer while writing
+the reply to it, and pressing Send is exactly the keystroke that had been destroying it.
+
+The last exchange was the smallest and the most useful. Sparing the tab from the send-sweep
+meant a tab now outlives a turn, and the strip's ordinal — assigned by counting open tabs, never
+recomputed — had been per-turn only because everything was swept. The fix proposed here was to
+count within the current request. Review asked what that renders: a survivor labelled `1` from
+the last turn sitting beside the new turn's first delegation, also labelled `1`. The answer was
+to stop numbering consultations at all. They are advisory documents, not workers in a fan-out,
+and the label function already renders a keyword alone when there is no ordinal.
+
+**16 tests in one file; 4,572 webapp passed.** What is left is written down rather than built:
+there is still no way to close one of these tabs by hand, and a consultation asked *by* a
+delegated subagent would open blank, both [AG-R-31](risks.md#ag-r-31).

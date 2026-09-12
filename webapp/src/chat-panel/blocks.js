@@ -477,6 +477,22 @@ export function subagentRowFor(turn, payload) {
  * branch exists to refuse. Each notice carries its own sentence, so this
  * stores the sentence rather than deriving one from the subtype.
  */
+/**
+ * Whether a subagent row is a consultation rather than a delegated subagent.
+ *
+ * One predicate for a rule that three surfaces now share: a consultation's
+ * stream renders expanded inline, its posture and warnings are drawn on that
+ * card, and it gets no strip tab until someone asks for one. All three follow
+ * from the same fact — the inline card is a consultation's default surface —
+ * so they should not each carry their own copy of the string.
+ *
+ * `task_type` and not `subagent_type`: the bridge sets the first to
+ * `"consultation"` and the second to the consultant's name, which is a label.
+ */
+export function isConsultation(row) {
+  return row?.task_type === 'consultation';
+}
+
 const POSTURE_RANK = {
   consultation_posture: 0,
   consultation_ungrounded: 1,
@@ -514,6 +530,56 @@ export function noteConsultationPosture(panel, agentId, subtype, notice) {
 export function consultationPosture(panel, agentId) {
   if (!panel || !agentId) return null;
   return panel._consultationPosture?.get(agentId) || null;
+}
+
+/**
+ * Whether a notice subtype is a consultation warning drawn on the card.
+ *
+ * The posture is excluded: it is the container's framing, it has its own
+ * severity-monotonic slot, and it would otherwise be drawn twice.
+ */
+export function isConsultationWarning(subtype) {
+  return (
+    POSTURE_RANK[subtype] !== undefined
+    && subtype !== 'consultation_posture'
+  );
+}
+
+/**
+ * Record a consultation's warning for its inline card.
+ *
+ * Separate from the posture store above, and kept as a list rather than a
+ * severity-monotonic slot, because these are *events* where the posture is a
+ * standing condition: a consultation that was refused a tool and then
+ * breached the gate did two things, and a store that kept only the worse one
+ * would report the second as though the first had not happened.
+ *
+ * The posture is excluded — it is the container's framing and has its own
+ * slot, and repeating it in the list would draw it twice on the same card.
+ *
+ * Deduplicated on the text, which is what a repeat of the same refusal
+ * produces. The warning is about a *kind* of thing having happened; a
+ * consultation refused four times does not need the sentence four times.
+ *
+ * @returns {boolean} whether anything was added, i.e. whether a repaint is owed.
+ */
+export function noteConsultationNotice(panel, agentId, subtype, notice) {
+  if (!panel || !agentId || !notice?.text) return false;
+  if (!isConsultationWarning(subtype)) return false;
+  if (!panel._consultationNotices) panel._consultationNotices = new Map();
+  const held = panel._consultationNotices.get(agentId) || [];
+  if (held.some((entry) => entry.text === notice.text)) return false;
+  panel._consultationNotices.set(agentId, [
+    ...held,
+    { subtype, text: notice.text, severity: notice.severity || 'warning' },
+  ]);
+  return true;
+}
+
+/** Every warning recorded against one consultation, in arrival order. */
+export function consultationNotices(panel, agentId) {
+  if (!panel || !agentId) return [];
+  return panel._consultationNotices?.get(agentId) || [];
 }
 
 // ---------------------------------------------------------------

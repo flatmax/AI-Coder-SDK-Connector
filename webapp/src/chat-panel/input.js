@@ -233,7 +233,12 @@ export async function send(panel) {
   // settled turn (specs5/5-webapp/subagent-browser.md § Tab Lifetime). Safe
   // here because the read-only gate above has already established that the
   // tab we are sending from is not one of them.
-  clearSubagentTabs(panel);
+  //
+  // A consultation's tab stays, which is the one case where "last turn's
+  // feed" is the wrong description of what the user is looking at: they
+  // opened it by hand to read a second opinion, and the prompt being sent
+  // is usually the answer to it (AG-31).
+  clearSubagentTabs(panel, { keepConsultations: true });
   // Stamp the run-timer start the instant the prompt is
   // sent, and kick the panel-level ticker so the live
   // elapsed counter on the streaming card starts moving.

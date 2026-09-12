@@ -2851,3 +2851,56 @@ this belongs to, and folding it into a consultation-rendering change would make 
 of two, with the harder half the one carrying no tests.
 
 Listed as unbuilt work in [README.md](README.md).
+
+## AG-R-31 — A consultation's tab has no way to be closed, and one opened inside a delegation opens blank
+
+Two consequences of [AG-31](decisions.md#ag-31), recorded together because they are the two
+places that change's reasoning stops rather than defects in what it built.
+
+### There is no close affordance, and now there is a tab that wants one
+
+A consultation's tab survives every send and is swept only by a session change. That is the
+point — it exists so the second opinion can sit beside the composer while the reply to it is
+written — but it makes this the first tab in the strip whose lifetime the user cannot end.
+`tabs.js:264` records that `onTabClose` was **deliberately removed**, on the grounds that "both
+kinds of tab that remain sweep themselves"; that is no longer true of all three kinds.
+
+The exposure is bounded and slow. A tab appears only when the user clicks a consultation's name
+button, there is at most one per consultation, and a session change clears the lot. A long
+session in which many second opinions were each opened by hand ends with a strip the user can
+neither thin nor close, and the only way out is to change session.
+
+It is not fixed here because the two available fixes are each larger than they look. Restoring
+`onTabClose` re-adds a primitive the project removed on purpose, for one kind, and the question
+of whether *every* tab should close by hand is a tab-model question rather than a consultation
+one. Sweeping at the `clearHistoricalTabs` cadence instead — which review floated — would close
+the first consultation the moment a second is opened, and comparing two second opinions is a
+reasonable thing to want.
+
+### A consultation asked by a delegation opens with its seed line and nothing else
+
+`openConsultationTab` takes its blocks from the owning tab, and both routes into it refuse an
+owner that is itself a subagent:
+
+```js
+if (!ownerTab || ownerTab.subagent) return [];   // findSubagentBlocks
+if (!ownerTab || ownerTab.subagent) return false; // mirrorSubagentBlocks
+```
+
+For the mirror that guard is correct and its comment says why — "a subagent tab is a mirror
+target, never a source", since mirroring from one would re-mirror its own blocks straight back
+into itself. `findSubagentBlocks` inherited it, and a read cannot self-feed, so there the guard
+looks unnecessary.
+
+**Reachability, as far as it was measured.** Nothing restricts a delegated subagent from
+calling `second_opinion`: `allowed_tools` is never set (`claude_code/options.py` says so
+deliberately), and the agent types that ship with the workspace carry `Tools: *`. So a Task
+subagent can ask a consultation, its card renders in that subagent's tab, and clicking its row
+passes a subagent tab as the owner.
+
+What was **not** measured is whether the lookup would then find anything. A delegation's feed
+is read from its on-disk transcript, and whether those reconstructed blocks carry the
+`agent_id` stamp that `findSubagentBlocks` matches on is an open question — if they do not,
+dropping the guard changes a blank tab into a blank tab. That is why the one-line fix review
+endorsed is not applied here: it is cheap, but shipping it blind would mean claiming a fix that
+has never been seen to work.
