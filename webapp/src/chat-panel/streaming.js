@@ -59,6 +59,7 @@ import {
   subagentRowFor,
 } from './blocks.js';
 import {
+  findSubagentTab,
   mirrorSubagentBlocks,
   settleLiveSubagentTabs,
   syncSubagentTab,
@@ -638,6 +639,98 @@ export function systemNotice(subtype, data) {
       collapse: true,
     };
   }
+  if (subtype === 'consultation_posture') {
+    // The standing condition, raised once at the head of every
+    // consultation tab before the model has said anything. Its counterpart
+    // for the asking model is the first sentence of the bridge's grounding
+    // header, which is unconditional for the same reason: the consultation
+    // that *tries* to read a file and is stopped announces itself, and the
+    // one that answers from its weights without trying does not. A tab
+    // that only speaks on a refusal is silent in exactly the second case.
+    //
+    // No toast. This is true of every consultation, and a toast on each
+    // one is a notification the reader learns to dismiss — which would
+    // also cost the `consultation_ungrounded` toast beside it, where a
+    // retrieval really was attempted and lost.
+    return {
+      text: message
+        || 'A second opinion runs with no tools and no repository access.',
+      severity: 'info',
+    };
+  }
+  if (subtype === 'consultation_breach') {
+    // The inverse of `consultation_ungrounded`, and the only notice in this
+    // file that should never fire: a tool a consultation was not permitted
+    // to use came back with output rather than an error, so it ran. The card
+    // beside it renders `agy`'s own success, truthfully, which is exactly
+    // why this has to be louder than the card.
+    //
+    // Not folded into `engine_error`, which was the first cut. That entry
+    // prefixes "The engine reported an error", and the engine reported no
+    // error — this app did, about the engine. It also sets `collapse`, so a
+    // later error of that subtype in the same turn would quietly replace
+    // the one row saying containment failed.
+    return {
+      text: message
+        || 'A tool ran inside a second opinion that permits none: the '
+          + 'consultation gate did not hold.',
+      toast: '⚠️ A consultation escaped its gate',
+      severity: 'error',
+    };
+  }
+  if (subtype === 'consultation_unverified') {
+    // The third thing a barred call can end as, beside refused and escaped:
+    // this app could not establish which. No refusal mark came back with it
+    // and no output did either — rejected upstream, or killed between the
+    // request and the result. The row beside `consultation_ungrounded` says
+    // "nothing was read", which is a fact about a refusal and a fabrication
+    // about a call nobody watched finish, so the two cannot share a branch.
+    //
+    // Warning rather than error: nothing is known to have gone wrong. It is
+    // the certainty that is missing, not the containment.
+    //
+    // No `collapse`, for `consultation_ungrounded`'s reason — raised once
+    // per consultation, so there is no second row to supersede, and setting
+    // it would let a later consultation in the same turn erase this one.
+    return {
+      text: message
+        || 'This consultation reached for a tool and ended without saying '
+          + 'what came back from it.',
+      toast: '❔ A consultation call went unaccounted for',
+      severity: 'warning',
+    };
+  }
+  if (subtype === 'consultation_ungrounded') {
+    // AG-R-22. The gate held and the model narrated around it: asked for a
+    // page it could not fetch, `agy` has been measured both declining
+    // honestly and answering with invented page contents, from the same
+    // policy and the same shape of prompt. So the app says that a retrieval
+    // came back empty, because it is the only party that knows for certain
+    // and the answer above cannot be trusted to mention it.
+    //
+    // The sentence names no tool, and the fallback below must not either:
+    // this is raised once, at the first such call, with further refused
+    // cards rendering beneath it, so any list in it is an inventory that
+    // has stopped being kept. The names are on the cards.
+    //
+    // `collapse` is deliberately absent. These are one per consultation by
+    // construction — the pump raises it at the first refusal and not again
+    // — so there is never a second card to supersede, and setting it would
+    // let a second consultation in the same turn overwrite the first's
+    // card, erasing the record of an answer still sitting above it.
+    //
+    // It carries an `agent_id`, so the row below routes it into the
+    // consultation's own tab. Main is not left silent: the answer handed
+    // back opens with the same statement in the bridge's voice, and that is
+    // the first paragraph of the `second_opinion` result card.
+    return {
+      text: message
+        || 'This consultation reached for a tool and got nothing back: a '
+          + 'second opinion runs with no tools and no repository access.',
+      toast: '🚫 The consultation had no tools',
+      severity: 'warning',
+    };
+  }
   if (subtype === 'turn_timeout') {
     const seconds = Number.isFinite(payload.seconds) ? payload.seconds : null;
     const bound = seconds === null ? '' : ` after ${Math.round(seconds)}s`;
@@ -758,6 +851,14 @@ export function systemNotice(subtype, data) {
  * without `collapse` — `engine_notice` — always append, because two harness
  * notices are two facts and collapsing them would lose one.
  *
+ * **An event that names an agent is that agent's, not the session's.** Every
+ * block on the stream is scoped by `agent_id` and drawn in the matching
+ * subagent tab; this handler was the last producer not to honour that, so a
+ * consultation's own warning landed in Main while its tab — which held the
+ * cards the warning was about — said nothing. Scoped events are routed;
+ * unscoped ones are the session speaking and stay in Main. A scoped event
+ * whose tab is closed falls back to Main rather than being dropped.
+ *
  * `pre_compact` deliberately does not toast. The compaction it announces runs
  * for tens of seconds; the toast expired after three, so the stall it existed
  * to explain was unexplained for most of its duration.
@@ -778,8 +879,20 @@ export function onSystemEvent(panel, event) {
   const notice = systemNotice(subtype, data?.data);
   if (!notice) return;
 
+  // An event about one subagent belongs in that subagent's tab, beside the
+  // cards it is about — the same scoping every block on the payload's
+  // `agent_id` already gets, which this handler was the last producer not to
+  // honour. Only events that carry one are moved; everything else is the
+  // session speaking and stays in Main. A scoped event whose tab is not open
+  // — a consultation the user closed, a reconnect mid-turn — falls back to
+  // Main rather than being dropped, because an unsaid warning is worse than
+  // one in the wrong place.
+  const agentId = typeof data?.data?.agent_id === 'string' ? data.data.agent_id : '';
+  const scoped = agentId ? findSubagentTab(panel, agentId) : null;
+  const messages = scoped ? scoped.tab.messages : panel.messages;
+
   const turn = requestId ?? null;
-  const last = panel.messages[panel.messages.length - 1];
+  const last = messages[messages.length - 1];
   if (last?.system_event && last.content === notice.text) return;
 
   // `system_event: true` is what `renderMessage` reads for the label and the
@@ -806,11 +919,19 @@ export function onSystemEvent(panel, event) {
     && last?.system_event
     && last.system_subtype === subtype
     && last.system_request === turn;
-  panel.messages = supersedes
-    ? [...panel.messages.slice(0, -1), row]
-    : [...panel.messages, row];
+  const next = supersedes
+    ? [...messages.slice(0, -1), row]
+    : [...messages, row];
+  if (scoped) {
+    scoped.tab.messages = next;
+  } else {
+    panel.messages = next;
+  }
   // The toast is the glance and fires once per distinct report; a retry that
   // only refines the card it replaces does not re-interrupt the reader.
+  // The toast fires whichever surface took the row, and that is the point of
+  // it for a scoped one: the tab is opt-in, so a reader who never opens it is
+  // told something happened by the only channel that reaches every reader.
   if (notice.toast && !supersedes) panel._emitToast(notice.toast, notice.severity);
   panel.requestUpdate();
 }

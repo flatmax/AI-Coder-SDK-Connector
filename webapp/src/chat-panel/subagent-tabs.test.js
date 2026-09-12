@@ -787,3 +787,87 @@ describe('the label a tab keeps', () => {
     expect(p._tabLabels.get('task-1')).toBe('1 task-1');
   });
 });
+
+// ---------------------------------------------------------------------------
+// System events about one subagent
+// ---------------------------------------------------------------------------
+
+describe('a system event that names a subagent lands in its tab', () => {
+  function ungrounded(reqId, over = {}) {
+    return {
+      requestId: reqId,
+      data: {
+        subtype: 'consultation_ungrounded',
+        data: {
+          agent_id: 'agent-1',
+          tool: 'read_url_content',
+          message: 'This consultation reached for a tool and got nothing …',
+          ...over,
+        },
+      },
+    };
+  }
+
+  // The tab's own opening line — `seedDescription`'s "🤖 Explore — …" — is a
+  // system row too, so it is skipped rather than asserted around: what is
+  // under test is where the *engine's* notices land.
+  function contentsOf(messages) {
+    return messages
+      .filter((m) => m.system_event && !m.subagent_seed)
+      .map((m) => m.content);
+  }
+
+  it('puts the notice in the subagent tab rather than in Main', async () => {
+    // AG-R-22's routing half. Unscoped, this landed in Main — where the
+    // answer's own first paragraph already says the same thing — and the
+    // consultation's tab, which held the refused cards, said nothing about
+    // what they meant for the answer.
+    const p = mountPanel();
+    const { reqId, tab } = await withSubagent(p);
+    const mainBefore = p.messages.length;
+    pushEvent('system-event', ungrounded(reqId));
+    await settle(p);
+    expect(contentsOf(tab.messages)).toEqual([
+      'This consultation reached for a tool and got nothing …',
+    ]);
+    expect(p.messages.length).toBe(mainBefore);
+  });
+
+  it('still toasts, because the tab is opt-in', async () => {
+    // The row is only read by someone who opens the tab. The toast is the
+    // one channel that reaches a reader who never does.
+    const p = mountPanel();
+    const { reqId } = await withSubagent(p);
+    const seen = [];
+    p._emitToast = (message, type) => seen.push([message, type]);
+    pushEvent('system-event', ungrounded(reqId));
+    await settle(p);
+    expect(seen).toEqual([['🚫 The consultation had no tools', 'warning']]);
+  });
+
+  it('falls back to Main when the named tab is not open', async () => {
+    // A consultation the user closed, or a reconnect that has not rebuilt
+    // the strip yet. An unsaid warning is worse than one in the wrong place.
+    const p = mountPanel();
+    const { reqId } = await withSubagent(p);
+    pushEvent('system-event', ungrounded(reqId, { agent_id: 'agent-missing' }));
+    await settle(p);
+    expect(contentsOf(p.messages)).toEqual([
+      'This consultation reached for a tool and got nothing …',
+    ]);
+  });
+
+  it('leaves an unscoped event in Main', async () => {
+    // Most system events are the session speaking — a rate limit, a reset,
+    // a compaction — and belong where the turn is.
+    const p = mountPanel();
+    const { reqId, tab } = await withSubagent(p);
+    pushEvent('system-event', {
+      requestId: reqId,
+      data: { subtype: 'engine_notice', data: { message: 'Switching model.' } },
+    });
+    await settle(p);
+    expect(contentsOf(p.messages)).toEqual(['Switching model.']);
+    expect(contentsOf(tab.messages)).toEqual([]);
+  });
+});

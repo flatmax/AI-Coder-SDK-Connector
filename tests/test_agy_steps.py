@@ -28,11 +28,23 @@ from __future__ import annotations
 
 import logging
 import os
+from typing import Any
 
 import pytest
 
 from aic_dc.agy import steps
-from aic_dc.agy.steps import AgyTranslator, unwrap
+from aic_dc.agy.consultant import SECOND_OPINION_POLICY
+from aic_dc.agy.gate_server import StaticPolicy
+from aic_dc.agy.steps import UNNAMED_TOOL, AgyTranslator, unwrap
+
+#: The consultation's policy as a *stamped* one, which is the only shape
+#: that ever reaches a gate: `AgyConsultant._run` mints a nonce per
+#: consultation and the pump recognises a refusal by that rather than by
+#: the fixed mark, which this repository's own files contain in plain
+#: text. A fixture built on the unstamped policy would be testing a state
+#: that cannot occur, and every refusal in it would read as a call whose
+#: outcome the app could not establish.
+POLICY = SECOND_OPINION_POLICY.stamped()
 
 
 def frame(step: dict) -> dict:
@@ -84,6 +96,36 @@ SUBAGENT_ACTIVE = {
     "subagent_info": {"subagents": [SUBAGENT_ENTRY]},
 }
 SUBAGENT_DONE = dict(SUBAGENT_ACTIVE, state="DONE", duration_seconds=6.1)
+# Transcribed verbatim from a live consultation on 2026-09-12 (P20): the
+# question needed the web, the consultation gate refused it, and this is
+# the frame `agy` sent back. The reason is *this app's own*, round-tripped
+# through the vendor and prefixed by it — which is the whole of what the
+# pump used to discard (AG-R-22).
+DENIED = {
+    "conversation_id": "3e34efc6",
+    "step_index": 2,
+    "state": "ERROR",
+    "step_type": "tool",
+    "tool_name": "read_url_content",
+    "duration_seconds": 0.260418395,
+    "tool_info": {
+        "name": "read_url_content",
+        "parameters": {"Url": "https://www.kernel.org/"},
+        "error": {
+            "type": "TOOL_ERROR",
+            # `agy` prefixes its own sentence and forwards the rest of
+            # ours, which is why the fixture composes the two rather than
+            # quoting a string: what the pump matches on is
+            # `StaticPolicy.MARK`, at the head of the policy's reason, and
+            # a fixture that hard-coded a paraphrase of either would keep
+            # passing after the real wording moved out from under the code.
+            "message": (
+                "tool call denied by pre-tool hook: "
+                f"{POLICY.reason}"
+            ),
+        },
+    },
+}
 RESULT = {
     "event": "result",
     "result": {
@@ -213,6 +255,840 @@ class TestToolCards:
             t.translate(frame(dict(TOOL_DONE, state="ERROR")))[1].payload["status"]
             == "error"
         )
+
+
+class TestADeniedCallSaysWhy:
+    """AG-R-22, and it is a data-loss bug rather than a missing feature.
+
+    The reason arrives in the frame and was dropped one line from the
+    browser, so every denial and every tool error drew the literal "No
+    output." on its card. Measured on both surfaces before it was fixed:
+    a consultation denied ``read_url_content``, and the master engine
+    denied ``view_file``.
+    """
+
+    def test_the_reason_reaches_the_card(self):
+        t = AgyTranslator("r1")
+        result = t.translate(frame(DENIED))[-1].payload
+        assert result["status"] == "error"
+        assert "denied by pre-tool hook" in result["preview"]
+        assert "no tools here" in result["preview"], (
+            "the card shows why, not merely that"
+        )
+        assert result["full_bytes"] > 0
+
+    def test_an_empty_output_on_a_failure_is_still_replaced(self):
+        """``not output``, not ``output is None``.
+
+        A failed call that names an empty output is a failure with nothing
+        to read, and the version of this that tested for ``None`` left
+        exactly those cards blank.
+        """
+        step = dict(DENIED)
+        step["tool_info"] = dict(step["tool_info"], output="")
+        assert "denied" in AgyTranslator("r1").translate(frame(step))[-1].payload[
+            "preview"
+        ]
+
+    def test_a_real_output_on_a_failure_wins(self):
+        """The error is a fallback. A tool that failed *and* said something
+        has the thing it said read first."""
+        step = dict(DENIED)
+        step["tool_info"] = dict(step["tool_info"], output="partial output")
+        assert (
+            AgyTranslator("r1").translate(frame(step))[-1].payload["preview"]
+            == "partial output"
+        )
+
+    def test_an_error_that_is_a_bare_string_does_not_raise(self):
+        """Measured as a mapping; the SDK transport spells its own as a
+        string. Neither shape is assumed, because this runs while drawing
+        a card and a raise here would fail the turn over decoration."""
+        step = dict(DENIED)
+        step["tool_info"] = dict(step["tool_info"], error="it went wrong")
+        assert (
+            AgyTranslator("r1").translate(frame(step))[-1].payload["preview"]
+            == "it went wrong"
+        )
+
+    def test_a_success_is_not_given_an_error_body(self):
+        """A call that reported no error has none to show."""
+        step = dict(DENIED, state="DONE")
+        step["tool_info"] = dict(step["tool_info"])
+        del step["tool_info"]["error"]
+        assert AgyTranslator("r1").translate(frame(step))[-1].payload["preview"] == ""
+
+    def test_an_error_under_a_done_state_is_still_an_error(self):
+        """Hole C, from the sixth review round, on the master engine.
+
+        ``failed`` used to fold the error test into a barred-only branch,
+        so for every tool on this transport that the allowlist does not
+        cover — which is all of them here, and the consultation's own
+        ``finish`` — it reduced to ``state == "ERROR"`` alone. A release
+        that reported a failed call under ``DONE`` with the reason in
+        ``tool_info.error`` therefore drew a green card and discarded the
+        reason one line from the browser, which is AG-R-22's original
+        shape in the place it was supposed to have been fixed.
+        """
+        step = dict(DENIED, state="DONE")
+        result = AgyTranslator("r1").translate(frame(step))[-1].payload
+        assert result["status"] == "error"
+        assert "denied by pre-tool hook" in result["preview"]
+
+
+class TestAnUngroundedAnswerIsMarked:
+    """The second half of AG-R-22: the card says a call came back empty,
+    and this says what that makes of the *answer*.
+
+    One question decides both, and it is a fact about the policy rather
+    than a reading of anybody's prose: *could this tool have run here?* A
+    barred tool that reported an error is over, so its card is settled,
+    and it took no data into the answer, so the notice is raised. Two
+    review rounds were spent on a second condition — that the error carry
+    this app's own refusal mark — and it failed open both times it was
+    relied on. What that condition was protecting is a claim, and the
+    claim lives in the error text the card already shows.
+    """
+
+    def setup_method(self) -> None:
+        """A stamped policy per test, as `_run` mints one per consultation.
+
+        Not a module constant. The gate mints a **single-use** token per
+        denial and the pump spends it on the way back, so a refusal frame
+        built once and replayed across tests would authenticate in the
+        first test and read as unverified in every one after it. Sharing
+        the issuer between the frame and the pump is also what makes
+        these tests honest: the token in the message below is one this
+        translator's own policy issued, rather than a string the test
+        handed to both sides.
+        """
+        self.policy = SECOND_OPINION_POLICY.stamped()
+
+    def denied(self, **over: Any) -> dict[str, Any]:
+        """A denial frame for one barred call, from the live policy.
+
+        The token is minted for whichever tool the frame names, because
+        the gate binds each one to the tool it refused — a token issued
+        denying `view_file` cannot authenticate a `run_command` that
+        escaped.
+        """
+        step = dict(DENIED, **over)
+        tool = str(step.get("tool_name") or "")
+        step["tool_info"] = dict(
+            step["tool_info"],
+            name=tool,
+            error={
+                "type": "TOOL_ERROR",
+                "message": (
+                    f"tool call denied by pre-tool hook: "
+                    f"{self.policy.refusal(tool)}"
+                ),
+            },
+        )
+        return step
+
+    def consultation(self) -> AgyTranslator:
+        """A pump told the real policy, not a paraphrase of it."""
+        t = AgyTranslator("r1")
+        t.note_consultation(self.policy.allowed, self.policy.refusals)
+        return t
+
+    def test_the_notice_follows_the_card_that_provoked_it(self):
+        """Not at the end of the turn, which is where this started.
+
+        A notice under a thousand words the reader has already believed
+        arrives after the damage, and a consultation that is stopped or
+        times out never emits the ``result`` frame that used to carry it.
+        Here it precedes everything the model writes after being refused.
+        """
+        t = self.consultation()
+        events = t.translate(frame(self.denied()))
+        assert names(events) == ["toolUse", "toolResult", "systemEvent"]
+        payload = events[-1].payload
+        assert payload["subtype"] == "consultation_ungrounded"
+        assert payload["data"]["tool"] == "read_url_content"
+        assert t.ungrounded_tools == ("read_url_content",)
+
+    def test_the_result_frame_no_longer_carries_it(self):
+        """It was said once already, and twice is not twice as true."""
+        t = self.consultation()
+        t.translate(frame(self.denied()))
+        assert t.translate(RESULT) == []
+
+    def test_three_refusals_raise_one_notice_and_the_list_keeps_all_three(self):
+        """One sentence, because a model refused three tools has not
+        learned three things — and the later cards each carry their own
+        reason, which is where per-call attribution belongs. The full list
+        still reaches the model that asked, through ``ungrounded_tools``."""
+        t = self.consultation()
+        notices = []
+        for index, name in enumerate(("search_web", "read_url_content", "view_file")):
+            notices += [
+                e
+                for e in t.translate(frame(self.denied(step_index=index, tool_name=name)))
+                if e.name == "systemEvent"
+            ]
+        assert len(notices) == 1
+        assert notices[0].payload["data"]["tool"] == "search_web"
+        assert t.ungrounded_tools == ("search_web", "read_url_content", "view_file")
+
+    def test_a_consultation_that_asked_for_nothing_says_nothing(self):
+        """The ordinary case, and the reason this can be said out loud at
+        all: a second opinion on a diff reaches for no tools."""
+        t = self.consultation()
+        assert t.translate(RESULT) == []
+        assert t.ungrounded_tools == ()
+
+    def test_an_allowed_tool_that_failed_is_a_failure_not_a_refusal(self):
+        """``generate_image`` is on the image policy's list, so a failed one
+        broke rather than being denied, and no grounding claim follows."""
+        t = AgyTranslator("r1")
+        t.note_consultation({"finish", "generate_image"})
+        events = t.translate(frame(self.denied(tool_name="generate_image")))
+        assert names(events) == ["toolUse", "toolResult"]
+        assert t.ungrounded_tools == ()
+
+    def test_a_tool_that_failed_before_the_gate_still_warns(self):
+        """The hole a review round found, and the reason the two questions
+        were split apart.
+
+        Arguments that fail validation, or a name the model invented, fail
+        without this app being consulted: `agy`'s own error comes back
+        with no mark in it. The answer that follows is missing the fetch
+        just the same, and keying the warning on the mark meant saying
+        nothing about it — AG-R-22 again by another road. What is withheld
+        is only the claim that *we* refused it: the card carries the
+        vendor's error verbatim and no sentence of ours is put on it.
+
+        **Which is now withheld from the sentence about the answer too.**
+        A sixth round called the old rendering of this by its name: the
+        app cannot see what happened to a call it was never asked about,
+        and "got nothing back" is a certainty it is not entitled to. It
+        is warned about, under :attr:`unverified_tools`, in weaker words.
+        """
+        t = self.consultation()
+        step = self.denied(tool_name="call_fabricated_search_tool")
+        step["tool_info"] = dict(
+            step["tool_info"],
+            name="call_fabricated_search_tool",
+            error={"type": "TOOL_ERROR", "message": "unknown tool"},
+        )
+        events = t.translate(frame(step))
+        assert names(events) == ["toolUse", "toolResult", "systemEvent"]
+        assert "unknown tool" in events[1].payload["preview"]
+        assert SECOND_OPINION_POLICY.MARK not in events[1].payload["preview"], (
+            "the card says what came back; it does not claim our gate is why"
+        )
+        assert events[2].payload["subtype"] == "consultation_unverified"
+        assert t.unverified_tools == ("call_fabricated_search_tool",)
+        assert t.ungrounded_tools == (), (
+            "nobody watched this one end; the app does not claim it did"
+        )
+
+    def test_a_reason_cut_to_nothing_changes_nothing(self):
+        """What the pump reads is the policy, not the string coming back.
+
+        The reason travels out through this app's hook, through `agy`, and
+        back in an error field, and an earlier version searched it for a
+        fixed mark — which made every length limit on that path a way to
+        turn a refusal into an unrecognised failure. A reviewer showed the
+        mark does not even arrive first: `agy` prefixes 35 characters of
+        its own on a tool step, so a tail-truncating buffer keeps the
+        vendor's words and cuts ours. Nothing here depends on that any
+        more. One character of error is enough, because the allowlist is
+        what says the call could not have run.
+        """
+        t = self.consultation()
+        step = dict(DENIED)
+        step["tool_info"] = dict(
+            step["tool_info"],
+            error={"type": "TOOL_ERROR", "message": "t"},
+        )
+        assert names(t.translate(frame(step))) == [
+            "toolUse",
+            "toolResult",
+            "systemEvent",
+        ]
+
+    def test_a_barred_call_that_errored_is_over_whoever_said_so(self):
+        """The card must not be left spinning for want of our own words.
+
+        `agy`'s own auto-deny prose, a future hook of the user's in the
+        same merged hooks file, or its schema validator — all of them
+        stop a call this app's gate never saw, and an earlier version
+        required our mark before settling the card. On a state word this
+        pump does not read as terminal that left a pending spinner on a
+        finished consultation, which a reader takes for a retrieval still
+        in flight: the worst of the readings available. A tool that
+        cannot run here and has reported an error has nothing further to
+        say, whoever wrote the error.
+        """
+        t = self.consultation()
+        step = self.denied(state="BLOCKED")
+        step["tool_info"] = dict(
+            step["tool_info"],
+            error={
+                "type": "TOOL_ERROR",
+                "message": "tool call denied by pre-tool hook: not our words",
+            },
+        )
+        events = t.translate(frame(step))
+        assert names(events) == ["toolUse", "toolResult", "systemEvent"]
+        assert events[1].payload["status"] == "error"
+        assert "not our words" in events[1].payload["preview"]
+
+    def test_the_notice_is_scoped_to_the_consultation(self):
+        """It belongs in the tab the refused cards are in.
+
+        Unscoped it landed in the main transcript, where the answer's own
+        first paragraph already says the same thing — twice in one place
+        and nothing in the other. The frontend routes a system event that
+        names an agent into that agent's tab.
+        """
+        t = AgyTranslator("r1", agent_id="consultation-9")
+        t.note_consultation(self.policy.allowed, self.policy.refusals)
+        notice = t.translate(frame(self.denied()))[-1].payload
+        assert notice["data"]["agent_id"] == "consultation-9"
+
+    def test_the_notice_names_no_tool_so_it_cannot_go_stale(self):
+        """It fires once, at the first refusal, and further refused cards
+        render beneath it.
+
+        Naming the tool that provoked it made the sentence an inventory
+        frozen at one entry — "reached for search_web" sitting above a
+        refused `read_url_content`. What is left says what the *policy*
+        is rather than counting what has happened, which is a fact no
+        later frame can age.
+        """
+        t = self.consultation()
+        message = t.translate(frame(self.denied()))[-1].payload["data"]["message"]
+        assert "read_url_content" not in message
+        assert "anything else it reaches for will come back the same way" in message
+
+    def test_one_call_is_drawn_finished_once(self):
+        """A refusal ends the call on *this app's* authority, so `agy`'s
+        own ERROR frame for the same step can still arrive afterwards.
+
+        Tool cards are keyed by call id in `blocks.js`, so a second result
+        against the same id would redraw a card the reader has already
+        seen settle — and would double-count the call.
+        """
+        t = self.consultation()
+        first = t.translate(frame(self.denied(state="BLOCKED")))
+        second = t.translate(frame(self.denied()))
+        assert names(first) == ["toolUse", "toolResult", "systemEvent"]
+        assert second == [], "the late terminal frame redraws nothing"
+        assert t.ungrounded_tools == ("read_url_content",)
+        assert t.stats.tool_calls == 1
+
+    def test_a_refusal_is_not_read_off_the_state_word(self):
+        """``state == "ERROR"`` is `agy`'s vocabulary, and ``TERMINAL_STATES``
+        is this pump's reading of it.
+
+        A release that spelled a denial ``BLOCKED`` would leave the card
+        pending forever and the notice unraised — the refusal would be
+        rendered as a call still running. That a barred tool reported an
+        error is known independently of that vocabulary, so it is what
+        ends the call here.
+        """
+        t = self.consultation()
+        events = t.translate(frame(self.denied(state="BLOCKED")))
+        assert names(events) == ["toolUse", "toolResult", "systemEvent"]
+        assert events[1].payload["status"] == "error"
+        assert t.ungrounded_tools == ("read_url_content",)
+
+    def test_the_engine_raises_nothing(self):
+        """No `note_consultation`, no claim. The master's denials are the
+        user's own clicks, and telling them what they just decided is not
+        information."""
+        t = AgyTranslator("r1")
+        t.translate(frame(self.denied()))
+        assert t.translate(RESULT) == []
+        assert t.ungrounded_tools == ()
+
+
+class TestTheAppIsNeverTheOneSayingSomethingFalse:
+    """Four rounds of review found the app *silent* in cases nobody had
+    imagined. These are the cases where it would have been **wrong**, which
+    is a different category and was argued as such by a reviewer.
+    """
+
+    def setup_method(self) -> None:
+        """A stamped policy per test, as `_run` mints one per consultation.
+
+        Not a module constant. The gate mints a **single-use** token per
+        denial and the pump spends it on the way back, so a refusal frame
+        built once and replayed across tests would authenticate in the
+        first test and read as unverified in every one after it. Sharing
+        the issuer between the frame and the pump is also what makes
+        these tests honest: the token in the message below is one this
+        translator's own policy issued, rather than a string the test
+        handed to both sides.
+        """
+        self.policy = SECOND_OPINION_POLICY.stamped()
+
+    def denied(self, **over: Any) -> dict[str, Any]:
+        """A denial frame for one barred call, from the live policy.
+
+        The token is minted for whichever tool the frame names, because
+        the gate binds each one to the tool it refused — a token issued
+        denying `view_file` cannot authenticate a `run_command` that
+        escaped.
+        """
+        step = dict(DENIED, **over)
+        tool = str(step.get("tool_name") or "")
+        step["tool_info"] = dict(
+            step["tool_info"],
+            name=tool,
+            error={
+                "type": "TOOL_ERROR",
+                "message": (
+                    f"tool call denied by pre-tool hook: "
+                    f"{self.policy.refusal(tool)}"
+                ),
+            },
+        )
+        return step
+
+    def consultation(self) -> AgyTranslator:
+        t = AgyTranslator("r1")
+        t.note_consultation(self.policy.allowed, self.policy.refusals)
+        return t
+
+    def test_a_refusal_agy_reports_as_done_in_output_is_still_a_refusal(self):
+        """The frame shape this whole invariant was added for, and the
+        one the first version of it got backwards.
+
+        A release that reports a hook-denied step as ``DONE`` with the
+        refusal in ``output`` rather than ``error``: under the rule
+        before that round, a green success card for a call that retrieved
+        nothing, with the notice and the header both silent. Under the
+        first fix for it — which read *barred and no error and output
+        means it ran* — the same green card **plus** a containment alarm
+        and a withdrawn assurance, for a gate that had held perfectly. A
+        sixth round found that; the token minted for the denial is what
+        tells the two apart, and it is this app's own, travelling in
+        whichever field the vendor puts it in.
+        """
+        t = self.consultation()
+        step = self.denied(state="DONE")
+        step["tool_info"] = {
+            "name": "read_url_content",
+            "parameters": {"Url": "https://www.kernel.org/"},
+            "output": (
+                "tool call denied by pre-tool hook: "
+                f"{self.policy.refusal('read_url_content')}"
+            ),
+        }
+        events = t.translate(frame(step))
+        assert names(events) == ["toolUse", "toolResult", "systemEvent"]
+        assert events[1].payload["status"] == "error", (
+            "a refused call is not a success, whichever field said so"
+        )
+        assert events[2].payload["subtype"] == "consultation_ungrounded"
+        assert t.ungrounded_tools == ("read_url_content",)
+        assert t.breached_tools == (), (
+            "our own sentence coming home is not a page somebody fetched"
+        )
+        assert t.unverified_tools == ()
+
+    def test_a_refusal_this_app_did_not_write_is_not_read_as_its_own(self):
+        """The spoof, found by a seventh round, and the reason the mark
+        alone was never enough.
+
+        ``StaticPolicy.MARK`` is a fixed sentence written in this
+        repository's own source and specs. A test that asks "does the
+        output contain the mark" is therefore a **content** test: a gate
+        that failed open, plus a consultation that read this file, plus
+        a model that echoed what it read, passes it. That path ends with
+        a genuine containment breach filed as a refusal — the alarm
+        suppressed, the escaped bytes on a card labelled *denied*, and
+        the asking model told in this app's own voice that nothing was
+        read.
+
+        The nonce is what closes it. It is minted per consultation from
+        `secrets`, never written down, and reaches the model only if the
+        gate really refused a call and the vendor really carried our
+        sentence back. Here the output carries the mark and a *wrong*
+        nonce, which is the strongest form the forgery can take.
+        """
+        t = self.consultation()
+        step = self.denied(state="DONE", tool_name="view_file")
+        step["tool_info"] = {
+            "name": "view_file",
+            "parameters": {"AbsolutePath": "/repo/src/aic_dc/agy/gate_server.py"},
+            "output": (
+                f'    MARK = "{StaticPolicy.MARK}"\n'
+                "    # [ref deadbeefdeadbeef] and the rest of the file\n"
+            ),
+        }
+        events = t.translate(frame(step))
+        assert [e.payload.get("subtype") for e in events if e.name == "systemEvent"] == [
+            "consultation_breach"
+        ], "a barred read that came back with this file in it is an escape"
+        assert t.breached_tools == ("view_file",)
+        assert t.ungrounded_tools == (), (
+            "quoting this app's refusal is not being refused by it"
+        )
+        assert t.unverified_tools == ()
+
+    def test_a_token_the_consultant_has_already_seen_is_worth_nothing(self):
+        """The reflection attack, and the reason a token is spent.
+
+        The consultant **reads every refusal this app sends it** — that
+        is what the reason is for, prose written to steer a refused model
+        into answering instead of looking for another route. So one
+        denial hands the model the token. If the gate then fails open, a
+        tool that quotes the conversation, echoes its own arguments, or
+        errors naming them carries that token home in ``output``, and
+        `_outcome` tests for a refusal *before* it tests for output: the
+        escape is filed as a denial, the containment alarm never fires,
+        and the asking model is told nothing was read. An eighth review
+        round put that attack, and it is why the first cut of this —
+        one token minted per consultation — was unsound.
+
+        Single use closes it by causality rather than by secrecy. The
+        frame that showed the token to the model went through this pump
+        first, which spent it; by the time the model can repeat it, it
+        authenticates nothing.
+        """
+        t = self.consultation()
+        first = t.translate(frame(self.denied()))
+        assert t.ungrounded_tools == ("read_url_content",), (
+            "the genuine refusal has to authenticate, or this proves nothing"
+        )
+        leaked = first[1].payload["preview"]
+        assert "[ref " in leaked, "the model was shown no token to reflect"
+
+        escaped = self.denied(state="DONE", step_index=4)
+        escaped["tool_info"] = {
+            "name": "read_url_content",
+            "parameters": {"Url": "https://www.kernel.org/"},
+            # The gate failed open, the call ran, and what came back
+            # quotes the transcript — which now contains the refusal the
+            # model was shown, token and all.
+            "output": f"<html>Linux kernel 6.19</html>\n<!-- {leaked} -->",
+        }
+        events = t.translate(frame(escaped))
+        assert [e.payload.get("subtype") for e in events if e.name == "systemEvent"] == [
+            "consultation_breach"
+        ], "a spent token authenticated a second call"
+        assert t.breached_tools == ("read_url_content",)
+        assert t.ungrounded_tools == ("read_url_content",), (
+            "and the first call is still a refusal, because it was one"
+        )
+
+    def test_a_token_minted_for_one_tool_cannot_vouch_for_another(self):
+        """The residue of the reflection attack, narrowed.
+
+        Single use leaves one live case: a denial whose frame never
+        arrived leaves its token unspent, and a later escape could
+        reflect it. The gate binds each token to the tool it refused, so
+        that reflection has to come from the same tool as well — which
+        does not close the case, but costs an attacker a dropped frame,
+        an open gate, a reflection *and* a coincidence of names.
+        """
+        t = self.consultation()
+        # Denied, and the frame is never translated — the token stays
+        # outstanding, exactly as a dropped frame would leave it.
+        leaked = self.policy.refusal("view_file")
+        assert self.policy.refusals.outstanding == 1
+        step = self.denied(state="DONE", tool_name="run_command")
+        step["tool_info"] = {
+            "name": "run_command",
+            "parameters": {"Command": "cat /etc/passwd"},
+            "output": f"root:x:0:0:root:/root:/bin/bash\n{leaked}",
+        }
+        events = t.translate(frame(step))
+        assert [e.payload.get("subtype") for e in events if e.name == "systemEvent"] == [
+            "consultation_breach"
+        ]
+        assert t.breached_tools == ("run_command",)
+        assert self.policy.refusals.outstanding == 2, (
+            "and neither token was spent by a call it was not issued for"
+        )
+
+    def test_a_consultation_nobody_stamped_claims_nothing(self):
+        """The fail-safe, for the one wiring mistake this design can make.
+
+        `AgyConsultant._run` stamps the policy before it starts the pump.
+        If some later path forgets to — a new caller, a refactor that
+        threads the policy but not the nonce — then no refusal can ever
+        be authenticated. The question is what the app says then, and
+        the answer has to be *nothing*: an unauthenticated refusal is
+        exactly the state `UNVERIFIED` names, and defaulting it to
+        `REFUSED` would restore the forgeable test by accident, in the
+        one configuration where nobody is looking.
+        """
+        t = AgyTranslator("r1")
+        t.note_consultation(SECOND_OPINION_POLICY.allowed)
+        events = t.translate(frame(self.denied()))
+        assert names(events) == ["toolUse", "toolResult", "systemEvent"]
+        assert events[2].payload["subtype"] == "consultation_unverified"
+        assert t.unverified_tools == ("read_url_content",)
+        assert t.ungrounded_tools == (), (
+            "the mark is in that message, and it is still not evidence"
+        )
+        assert t.breached_tools == (), (
+            "and an unstamped consultation is not an escape either: the "
+            "call reported no output, so there is nothing to retract"
+        )
+
+    def test_a_barred_call_that_completed_clean_ran_even_with_nothing_to_show(self):
+        """`DONE`, no error, no output — and that is an escape, not a doubt.
+
+        This test asserted `UNVERIFIED` until P28 measured the wire. The
+        premise was that a call carrying neither a refusal nor any output
+        is a call the app cannot account for. It is not: *every* shape
+        P28 captured that did not run carries an `error` — this app's own
+        denial, or the vendor's schema rejection — and `tool_info.output`
+        is per-tool, absent even from a **completed** `find_by_name`. So
+        a barred call that reaches `DONE` clean is one that ran and had
+        nothing to print, which is exactly the silent breach a review
+        round asked about: a `run_command` that writes a file and says
+        nothing.
+
+        The round's own proposed repair, `output is not None`, would not
+        have caught this frame at all — there is no `output` key to test.
+        """
+        t = self.consultation()
+        step = self.denied(state="DONE")
+        step["tool_info"] = {
+            "name": "read_url_content",
+            "parameters": {"Url": "https://www.kernel.org/"},
+        }
+        events = t.translate(frame(step))
+        assert names(events) == ["toolUse", "systemEvent", "toolResult"]
+        assert events[1].payload["subtype"] == "consultation_breach"
+        assert events[2].payload["status"] == "error", (
+            "a breach is a failure of the policy, so the card is not green"
+        )
+        assert t.breached_tools == ("read_url_content",)
+        assert t.unverified_tools == ()
+        assert t.ungrounded_tools == ()
+
+    def test_a_rejection_the_vendor_wrote_is_still_unaccounted_for(self):
+        """P28's measured schema rejection: `DONE`, and an error not ours.
+
+        The frame is verbatim from the wire — `agy` reported a malformed
+        `read_url_content` as **`DONE`** in 8ms, with the parser's
+        complaint in `tool_info.error` and, tellingly, **no `parameters`**,
+        because the arguments never validated and so were never carried
+        back.
+
+        It stays `UNVERIFIED`, and the reason is the whole of this
+        round's argument. On the wire it is indistinguishable from a
+        barred call that escaped the gate and then failed in the host —
+        both are a barred tool, a terminal state, an error this app did
+        not write, and no token. Separating them means parsing the
+        vendor's prose, counting milliseconds, or testing whether
+        `parameters` came back, and those rot on a weekly release. The
+        error key is what keeps this out of the breach list, and its
+        presence is the only thing being read.
+        """
+        t = self.consultation()
+        step = self.denied(state="DONE")
+        step["tool_info"] = {
+            "name": "read_url_content",
+            "error": {
+                "type": "TOOL_ERROR",
+                "message": (
+                    "invalid arguments:\n- missing properties 'Url', "
+                    "'toolSummary', 'toolAction'\n- additional properties "
+                    "'url' not allowed"
+                ),
+            },
+        }
+        events = t.translate(frame(step))
+        assert names(events) == ["toolUse", "toolResult", "systemEvent"]
+        assert events[1].payload["status"] == "error", (
+            "the state word is the vendor's; the allowlist is ours"
+        )
+        assert events[2].payload["subtype"] == "consultation_unverified"
+        assert t.unverified_tools == ("read_url_content",)
+        assert t.ungrounded_tools == ()
+        assert t.breached_tools == ()
+
+    def test_an_error_whose_message_a_serialiser_dropped_is_still_an_error(self):
+        """`agy` is Go, and Go omits empty fields.
+
+        The first draft of the breach test read `state == "DONE" and not
+        message`, and a reviewer took it apart on this: an error whose
+        message is the empty string arrives with the *message* gone and
+        the `type` still there, so `bool(message)` would call it a clean
+        completion and the app would manufacture a containment alarm out
+        of a vendor serialising a default. The test is the presence of
+        the `error` key, which survives an empty message, an error
+        spelled as a bare string, and an explicit `null`.
+        """
+        for error in ({"type": "TOOL_ERROR"}, "invalid arguments", None):
+            t = self.consultation()
+            step = self.denied(state="DONE")
+            step["tool_info"] = {"name": "read_url_content", "error": error}
+            events = t.translate(frame(step))
+            assert [
+                e.payload.get("subtype") for e in events if e.name == "systemEvent"
+            ] == ["consultation_unverified"], (
+                f"an error spelled {error!r} is a call that reported failing"
+            )
+            assert t.breached_tools == ()
+
+    def test_a_tool_this_pump_cannot_name_is_barred(self):
+        """An allowlist that cannot identify the call must answer no.
+
+        The names come from the vendor's keys. A release that renamed
+        them would empty every one, and the version of this that required
+        a name would have called the whole consultation permitted.
+        """
+        t = self.consultation()
+        step = {
+            "conversation_id": "3e34efc6",
+            "step_index": 2,
+            "state": "ERROR",
+            "step_type": "tool",
+            "tool_info": {"error": "tool call denied by pre-tool hook"},
+        }
+        events = t.translate(frame(step))
+        assert names(events) == ["toolUse", "toolResult", "systemEvent"]
+        assert events[1].payload["status"] == "error"
+        assert t.unverified_tools == (UNNAMED_TOOL,), (
+            "counted, and not named, because the pump has no name to give"
+        )
+        assert t.ungrounded_tools == (), (
+            "the vendor's error carries no mark of ours, so this app does "
+            "not put its own certainty on it"
+        )
+
+    def test_a_barred_call_that_came_back_with_data_is_an_escape(self):
+        """The one observation that makes the bridge's header a lie.
+
+        Output with no mark in it from a tool the gate bars: this app
+        never wrote those bytes, so something else did, which means the
+        call ran.
+
+        Not normalised into a refusal, which is what "never let a barred
+        tool succeed" means taken literally: that would file a
+        containment failure as a denial and leave the header saying
+        nothing was read. But it is still a *failure* — the card's word
+        is binary and a green one for an escaped call is indefensible,
+        which the sixth round pointed out about the first cut of this.
+        What makes it different is said in the row above it, where it
+        cannot be mistaken for the vendor's opinion of the call.
+        """
+        t = self.consultation()
+        step = self.denied(state="DONE")
+        step["tool_info"] = {
+            "name": "read_url_content",
+            "parameters": {"Url": "https://www.kernel.org/"},
+            "output": "<html>Linux kernel 6.19</html>",
+        }
+        events = t.translate(frame(step))
+        assert names(events) == ["toolUse", "systemEvent", "toolResult"]
+        assert events[1].payload["subtype"] == "consultation_breach", (
+            "not `engine_error`, which renders as the engine reporting a "
+            "fault and collapses under the next one of its kind"
+        )
+        assert "it ran" in events[1].payload["data"]["message"]
+        assert "agent_id" in events[1].payload["data"], (
+            "routed into the consultation's tab, where `onSystemEvent` "
+            "reads it from — beside the card it contradicts"
+        )
+        assert events[2].payload["status"] == "error", (
+            "a breach is not a success; the alarm above says which kind "
+            "of not-success it is"
+        )
+        assert events[2].payload["preview"] == "<html>Linux kernel 6.19</html>", (
+            "and the card still shows what came back, which is the "
+            "evidence somebody now has to go and look at"
+        )
+        assert t.breached_tools == ("read_url_content",)
+        assert t.ungrounded_tools == (), (
+            "that call was grounded — in the worst possible way"
+        )
+
+    def test_data_that_came_back_with_an_error_beside_it_is_still_an_escape(self):
+        """Hole A, from the sixth round, and the sharpest of the three.
+
+        A command that writes to stdout and then exits non-zero; a read
+        that returns a page and warns that it truncated it. The first cut
+        of the breach test required *no* error — ``barred and not message
+        and bool(output)`` — so a single byte in ``tool_info.error``
+        turned an escape back into a refusal, and the app then told the
+        asking model that nothing had been read about material sitting in
+        that model's context. That is the failure the breach test exists
+        to catch, reachable by adding an error message to it.
+        """
+        t = self.consultation()
+        step = self.denied(state="ERROR")
+        step["tool_info"] = {
+            "name": "read_url_content",
+            "parameters": {"Url": "https://www.kernel.org/"},
+            "output": "<html>Linux kernel 6.19</html>",
+            "error": {"type": "TOOL_ERROR", "message": "response truncated"},
+        }
+        events = t.translate(frame(step))
+        assert [e.payload.get("subtype") for e in events if e.name == "systemEvent"] == [
+            "consultation_breach"
+        ]
+        assert t.breached_tools == ("read_url_content",)
+        assert t.ungrounded_tools == ()
+        assert t.unverified_tools == ()
+
+    def test_an_allowed_tool_that_errors_under_done_is_not_drawn_green(self):
+        """Hole C in the consultation, where the allowlist holds one name.
+
+        ``finish`` is permitted, so the barred branch says nothing about
+        it, and before the sixth round that left its verdict resting on
+        the vendor's state word alone.
+        """
+        t = self.consultation()
+        step = self.denied(state="DONE", tool_name="finish")
+        step["tool_info"] = dict(
+            step["tool_info"], name="finish", error="could not finish"
+        )
+        events = t.translate(frame(step))
+        assert names(events) == ["toolUse", "toolResult"]
+        assert events[1].payload["status"] == "error"
+        assert events[1].payload["preview"] == "could not finish"
+        assert t.ungrounded_tools == ()
+        assert t.unverified_tools == (), (
+            "nothing is claimed about a call the policy allowed"
+        )
+
+    def test_a_call_that_never_reported_is_closed_when_the_turn_ends(self):
+        """A crash, a timeout or a token ceiling between the two frames
+        used to leave a spinner under a finished answer, which reads as a
+        retrieval still in flight."""
+        t = self.consultation()
+        opened = t.translate(frame(dict(TOOL_ACTIVE, tool_name="view_file")))
+        assert names(opened) == ["toolUse"]
+        closing = t.stream_complete()
+        assert names(closing)[:2] == ["toolResult", "systemEvent"]
+        assert closing[0].payload["status"] == "error"
+        assert "ended before this call reported" in closing[0].payload["preview"]
+        assert "not known" in closing[0].payload["preview"], (
+            "a killed call is not a refused one: whether anything came "
+            "back before the process died is the thing nobody saw"
+        )
+        assert closing[1].payload["subtype"] == "consultation_unverified"
+        assert t.unverified_tools == ("view_file",)
+        assert t.ungrounded_tools == ()
+
+    def test_a_call_that_reported_is_not_closed_twice(self):
+        t = self.consultation()
+        t.translate(frame(self.denied()))
+        assert names(t.stream_complete()) == ["turnUsage", "streamComplete"]
+
+    def test_the_engine_closes_its_own_stragglers_and_claims_nothing(self):
+        """The spinner outlives a master-engine turn too, and that half is
+        not about grounding: the card is closed, and no consultation
+        sentence is attached to a session that never had a policy."""
+        t = AgyTranslator("r1")
+        t.translate(frame(TOOL_ACTIVE))
+        closing = t.stream_complete()
+        assert names(closing) == ["toolResult", "turnUsage", "streamComplete"]
+        assert t.ungrounded_tools == ()
+        assert t.unverified_tools == ()
 
 
 class TestASubagentIsAnnounced:

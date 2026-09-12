@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import sys
 import textwrap
 
@@ -44,7 +45,7 @@ from aic_dc.agy.consultant import (
     AgyConsultant,
     choose_consultant,
 )
-from aic_dc.agy.gate_server import AgyGateServer
+from aic_dc.agy.gate_server import AgyGateServer, StaticPolicy
 from aic_dc.antigravity.consultant import ConsultationError
 
 CONV = "0d9d1f3a-6c1e-4a51-9b0e-3f5f0f1b2c34"
@@ -54,6 +55,8 @@ def _fake_agy(
     *,
     image_path: str | None = None,
     image_in_brain: str | None = None,
+    denied: str = "",
+    denied_error: str = "",
     answer: str = "It depends.",
     log: str = "",
 ) -> str:
@@ -82,7 +85,70 @@ def _fake_agy(
     reason a user would.
     """
     tool = ""
-    if image_in_brain is not None:
+    if denied:
+        # The gate's own refusal, as `agy` reports it back: an ERROR step
+        # whose message is the pre-tool hook's, transcribed from the P20
+        # live capture (2026-09-12). `output` is absent, which is the
+        # whole of AG-R-22 — the reason lives in `error.message` and a
+        # pump that reads only `output` throws it away.
+        #
+        # **The reason is not written here — it is asked for.** This used
+        # to interpolate ``SECOND_OPINION_POLICY.reason`` at generation
+        # time, on the reasoning that quoting the policy beat inventing a
+        # paraphrase. Then the policy stopped being a constant: it is
+        # stamped per consultation with a nonce minted inside ``_run``,
+        # and the pump authenticates a refusal by that nonce rather than
+        # by the fixed mark, precisely because the mark is a string this
+        # repository's own files contain and a model could echo. A fixture
+        # that spelled the reason could not know the nonce, and would have
+        # had to be handed one — which is testing the pump against a
+        # string the test supplied to both sides.
+        #
+        # So the fake does what ``agy`` does: reads the hooks file from
+        # the config root it was spawned against, runs the ``PreToolUse``
+        # command, and reports whatever came back on its stdout. The
+        # refusal therefore travels the real path — stamped policy, gate
+        # server, socket, hook, wire — and the nonce in it is one nothing
+        # in this file has seen.
+        tool = textwrap.dedent(
+            f'''
+            message = {denied_error!r}
+            if not message:
+                import subprocess
+                hooks = json.load(open(os.path.join(
+                    os.environ["HOME"], ".gemini", "config", "hooks.json")))
+                command = hooks["aic-dc-gate"]["PreToolUse"][0]["hooks"][0]["command"]
+                asked = subprocess.run(
+                    ["sh", "-c", command],
+                    input=json.dumps({{"conversationId": conv, "toolCall": {{
+                        "name": {denied!r},
+                        "args": {{"Url": "https://www.kernel.org/"}}}}}}),
+                    capture_output=True, text=True,
+                )
+                answer = json.loads(asked.stdout or "{{}}")
+                if answer.get("decision") == "deny":
+                    message = (
+                        "tool call denied by pre-tool hook: " + answer["reason"]
+                    )
+                else:
+                    # Allowed, and then failed on its own — which is a real
+                    # shape and the one `test_a_failure_of_an_allowed_tool_
+                    # is_not_a_refusal` is about. Emitted rather than
+                    # raised: a fake that gave up here would leave that
+                    # test asserting an absence of notices against a
+                    # consultation that never drew a card.
+                    message = "the tool ran and failed"
+            emit({{"event": "step_update", "step_update": {{
+                "step_index": 2, "state": "ERROR", "step_type": "tool",
+                "conversation_id": conv,
+                "tool_name": {denied!r},
+                "tool_info": {{"name": {denied!r},
+                              "parameters": {{"Url": "https://www.kernel.org/"}},
+                              "error": {{"type": "TOOL_ERROR",
+                                        "message": message}}}}}}}})
+            '''
+        )
+    elif image_in_brain is not None:
         tool = textwrap.dedent(
             f'''
             path = os.path.join(
@@ -186,6 +252,8 @@ def gated(tmp_path, monkeypatch):
         *,
         image_path: str | None = None,
         image_in_brain: str | None = None,
+        denied: str = "",
+        denied_error: str = "",
         answer: str = "It depends.",
         log: str = "",
     ):
@@ -194,6 +262,8 @@ def gated(tmp_path, monkeypatch):
             _fake_agy(
                 image_path=image_path,
                 image_in_brain=image_in_brain,
+                denied=denied,
+                denied_error=denied_error,
                 answer=answer,
                 log=log,
             ),
@@ -374,6 +444,33 @@ class TestTheStaticPolicy:
         assert "Answer from the question" in reason
         assert "do not look for another way" in reason.lower()
 
+    def test_every_refusal_opens_with_the_mark(self, tmp_path):
+        """The token the pump reads a refusal back by (AG-R-22).
+
+        At the head of the message rather than anywhere in it, so a
+        transport that truncates the reason still leaves it intact, and
+        prepended by ``StaticPolicy.of`` rather than by each posture, so a
+        policy cannot be written without one. It is addressed to the
+        reader too: this is what a denied card shows, in place of the
+        vendor's "denied by pre-tool hook" and nothing else.
+        """
+        for policy in (SECOND_OPINION_POLICY, IMAGE_POLICY):
+            assert policy.reason.startswith(StaticPolicy.MARK), policy.reason
+            server = self._server(tmp_path, policy)
+            assert self._decide(server, "run_command")["reason"].startswith(
+                StaticPolicy.MARK
+            )
+
+    def test_the_mark_is_not_doubled_on_a_policy_built_from_one(self):
+        """``of`` is idempotent — a reason that already carries the mark
+        keeps exactly one. Policies are built from other policies'
+        reasons in tests and probes, and a doubled mark is the kind of
+        thing nobody reads closely enough to catch."""
+        once = StaticPolicy.of({"finish"}, "Because.")
+        twice = StaticPolicy.of({"finish"}, once.reason)
+        assert twice.reason == once.reason
+        assert once.reason.count(StaticPolicy.MARK) == 1
+
     def test_it_never_reaches_the_broker(self, tmp_path):
         """No dialog: the user answered when they approved the MCP call.
 
@@ -472,6 +569,276 @@ class TestASecondOpinion:
 
         assert with_tab == without == "I would not merge this."
         assert recorder.frames, "the observer was never fed, so this proves nothing"
+
+
+class TestARefusalIsNotAFailure:
+    """AG-R-22: the pump is told the policy, so it can tell the two apart.
+
+    ``_run`` hands the translator ``policy.allowed`` because that is the
+    only place the policy and the pump are both in scope, and because the
+    alternative — reading ``agy``'s error prose for the word "denied" —
+    couples this app to a vendor's wording. A tool that is not on the
+    allowlist *cannot have run*, so a failed call of one was refused here;
+    a failed call of an allowed one is an ordinary failure and must not be
+    dressed up as containment.
+    """
+
+    def test_a_refused_tool_is_named_as_soon_as_it_is_refused(self, gated):
+        build, _repo, _cfg = gated
+        consultant = build(denied="read_url_content")
+        recorder = Recorder(consultant.make_translator("r1", "consultation-1"))
+        asyncio.run(consultant.second_opinion("what is on kernel.org?", "", recorder))
+
+        assert recorder.translator.ungrounded_tools == ("read_url_content",)
+        names = [e.name for e in recorder.events]
+        notices = [
+            e for e in recorder.events
+            if e.name == "systemEvent"
+            and e.payload.get("subtype") == "consultation_ungrounded"
+        ]
+        assert len(notices) == 1, "the reader was told nothing"
+        assert notices[0].payload["data"]["tool"] == "read_url_content"
+        # The nonce, on the wire, in a string nothing in this file wrote.
+        # The fake asked the installed hook for this reason rather than
+        # quoting a constant, so the tag below was minted inside `_run`,
+        # carried through the gate server, the socket and the hook, and
+        # came back as `agy` would carry it. It is what tells this app's
+        # own refusal from a copy of its own refusal — the mark beside it
+        # is a fixed sentence sitting in this repository's source, which
+        # a consultation that read that source could repeat verbatim.
+        preview = [
+            e.payload["preview"] for e in recorder.events if e.name == "toolResult"
+        ][-1]
+        assert re.search(r"\[ref [0-9a-f]{16}\]", preview), (
+            f"no minted refusal tag reached the pump: {preview!r}"
+        )
+        # Before the turn ends, not after: a consultation that is stopped
+        # or times out never emits a `result` frame, and a sentence under
+        # prose the reader has already believed arrives too late.
+        assert names.index("systemEvent") == names.index("toolResult") + 1
+
+    def test_the_card_carries_the_reason_the_gate_gave(self, gated):
+        """Not merely that it failed. The gate wrote a sentence; show it."""
+        build, _repo, _cfg = gated
+        consultant = build(denied="read_url_content")
+        recorder = Recorder(consultant.make_translator("r1", "consultation-1"))
+        asyncio.run(consultant.second_opinion("what is on kernel.org?", "", recorder))
+
+        results = [e for e in recorder.events if e.name == "toolResult"]
+        assert results, "the denied call produced no card at all"
+        assert "denied by pre-tool hook" in results[-1].payload["preview"]
+
+    def test_a_call_that_never_reached_the_gate_still_warns(self, gated):
+        """Measured live, P24 arm C: told to call `read_url_content` with a
+        parameter it does not have, `agy` rejected the call against the
+        tool's schema in 203ms and never ran the hook. What came back was
+        "invalid arguments: missing properties \'Url\'…" — the vendor's
+        words, no mark in them.
+
+        The answer that follows is missing the fetch, so the reader is
+        told. What is not said is that this app refused it — this app was
+        never asked — and, since a sixth review round, that nothing came
+        back from it either. Live measurement can say the call was made
+        and the answer is over; only the gate's own mark can say what
+        happened in between, and there is none here.
+        """
+        build, _repo, _cfg = gated
+        consultant = build(
+            denied="read_url_content",
+            denied_error=(
+                "invalid arguments:\n- missing properties 'Url', "
+                "'toolSummary', 'toolAction'\n- additional properties "
+                "'invalid_parameter' not allowed"
+            ),
+        )
+        recorder = Recorder(consultant.make_translator("r1", "consultation-1"))
+        asyncio.run(consultant.second_opinion("well?", "", recorder))
+
+        assert recorder.translator.unverified_tools == ("read_url_content",)
+        assert recorder.translator.ungrounded_tools == ()
+        assert [
+            e for e in recorder.events
+            if e.name == "systemEvent"
+            and e.payload.get("subtype") == "consultation_unverified"
+        ], "the answer lost a retrieval and nothing said so"
+        results = [e for e in recorder.events if e.name == "toolResult"]
+        assert "invalid arguments" in results[-1].payload["preview"]
+        assert StaticPolicy.MARK not in results[-1].payload["preview"], (
+            "the card says what came back; our gate never saw this call"
+        )
+
+    def test_a_failure_of_an_allowed_tool_is_not_a_refusal(self, gated):
+        """``finish`` is on the allowlist, so a failed one ran and failed.
+
+        This is what makes the previous test about the *policy* rather
+        than about the word ERROR: mark every failure as containment and
+        this one goes red too.
+        """
+        build, _repo, _cfg = gated
+        consultant = build(denied="finish")
+        recorder = Recorder(consultant.make_translator("r1", "consultation-1"))
+        asyncio.run(consultant.second_opinion("well?", "", recorder))
+
+        assert "finish" in CONTROL_TOOLS, "this test's premise moved"
+        results = [e for e in recorder.events if e.name == "toolResult"]
+        assert results, (
+            "no card was drawn at all, so the assertions below hold "
+            "vacuously — the fake asks the real gate, and a change that "
+            "stops it emitting is invisible without this line"
+        )
+        assert results[-1].payload["status"] == "error"
+        assert recorder.translator.ungrounded_tools == ()
+        assert recorder.translator.unverified_tools == ()
+        assert not [
+            e for e in recorder.events
+            if e.name == "systemEvent"
+            and e.payload.get("subtype") == "consultation_ungrounded"
+        ]
+
+    def test_a_consultation_that_reached_for_nothing_says_nothing(self, gated):
+        """The ordinary case. A notice on every consultation is noise."""
+        build, _repo, _cfg = gated
+        consultant = build()
+        recorder = Recorder(consultant.make_translator("r1", "consultation-1"))
+        asyncio.run(consultant.second_opinion("well?", "", recorder))
+
+        assert recorder.translator.ungrounded_tools == ()
+        assert recorder.translator.unverified_tools == ()
+        assert not [
+            e for e in recorder.events
+            if e.name == "systemEvent"
+            and e.payload.get("subtype") == "consultation_ungrounded"
+        ]
+
+    def test_the_refusal_does_not_cost_the_answer(self, gated):
+        """A denied tool is the design working, not the consultation dying."""
+        build, _repo, _cfg = gated
+        consultant = build(denied="read_url_content", answer="I would not merge this.")
+        assert asyncio.run(consultant.second_opinion("well?")) == (
+            "I would not merge this."
+        )
+
+
+class TestAnEmptyAnswerStillReportsWhatHappened:
+    """The two surfaces have to say the same thing, including on failure.
+
+    P28's malformed-call arm spent the whole consultation on a tool call
+    the vendor rejected and wrote no prose at all. The tab was correct —
+    `consultation_unverified` — and the asking model was handed
+    *"Antigravity returned an empty answer"*, a sentence that reads as a
+    transport hiccup and invites a retry. The surface an agent is
+    actually blocked on was the one that lost the containment event, and
+    that inverts the invariant this whole mechanism rests on.
+    """
+
+    def test_an_unverified_call_is_named_in_the_failure(self, gated):
+        """Empty prose plus a rejection the app cannot authenticate.
+
+        `denied_error` makes the fake report a failure of its own instead
+        of asking the gate, so the message is not this app's and no token
+        comes back with it — the wire shape of P28's schema rejection.
+        """
+        build, _repo, _cfg = gated
+        consultant = build(
+            answer="",
+            denied="read_url_content",
+            denied_error=(
+                "invalid arguments:\n- additional properties 'url' not allowed"
+            ),
+        )
+        with pytest.raises(ConsultationError) as raised:
+            asyncio.run(consultant.second_opinion("well?"))
+        said = str(raised.value)
+        assert "read_url_content" in said, (
+            "the tab knew which call it was; the caller was told nothing"
+        )
+        assert "cannot account for" in said
+        assert "empty answer" in said, "and it is still an empty answer"
+
+    def test_a_breach_is_named_rather_than_called_an_empty_answer(self):
+        """The same path when the gate did not hold at all.
+
+        Unit rather than end-to-end: the fake `agy` reports every tool
+        call with an error in it, and a breach is by definition a call
+        that came back without one.
+        """
+
+        class Escaped:
+            breached_tools = ("run_command",)
+            unverified_tools = ()
+
+        said = consultant_mod._empty_answer_reason(Escaped())
+        assert "run_command ran despite" in said
+        assert "containment failure" in said
+
+    def test_an_ordinary_empty_answer_is_not_dressed_up_as_a_breach(self):
+        class Clean:
+            breached_tools = ()
+            unverified_tools = ()
+
+        said = consultant_mod._empty_answer_reason(Clean())
+        assert "empty answer" in said
+        assert "containment" not in said
+        assert "cannot account for" not in said
+
+    def test_two_unverified_calls_are_both_named(self):
+        class Twice:
+            breached_tools = ()
+            unverified_tools = ("view_file", "read_url_content")
+
+        said = consultant_mod._empty_answer_reason(Twice())
+        assert "view_file and read_url_content" in said
+
+
+class TestTheNoToolsInvariantIsCheckedRatherThanAssumed:
+    """A future edit must not be able to make the header false in silence.
+
+    The answer goes back under a sentence in this app's own voice saying
+    nothing was read or fetched, which is true of the second-opinion
+    policy only because its one entry, `finish`, retrieves nothing.
+    Adding a read tool "just for consultations" would leave that sentence
+    asserting something false with every test still green: a permitted
+    call raises no refusal and no breach, because there is nothing to
+    notice.
+    """
+
+    def test_a_policy_that_permits_a_read_tool_will_not_launch(self):
+        policy = StaticPolicy.of({"view_file", *CONTROL_TOOLS}, "because")
+        with pytest.raises(ConsultationError, match="policy permits view_file"):
+            consultant_mod._no_tools_or_fail(policy)
+
+    def test_the_real_policy_passes_and_is_handed_back_unchanged(self):
+        assert (
+            consultant_mod._no_tools_or_fail(SECOND_OPINION_POLICY)
+            is SECOND_OPINION_POLICY
+        )
+
+    def test_it_is_a_raise_and_not_an_assert(self):
+        """`python -O` strips `assert`, and unattended builds run with it.
+
+        Read from the source rather than by running an optimised
+        interpreter: the point is that the invariant is not written in a
+        statement the compiler is allowed to delete.
+        """
+        import inspect
+
+        source = inspect.getsource(consultant_mod._no_tools_or_fail)
+        assert "raise ConsultationError" in source
+        assert "assert " not in source
+
+    def test_a_second_opinion_goes_through_the_check(self, gated):
+        """The guard is on the launch path, not merely available to it."""
+        build, _repo, _cfg = gated
+        seen: list = []
+        original = consultant_mod._no_tools_or_fail
+        consultant_mod._no_tools_or_fail = lambda policy: (
+            seen.append(policy) or original(policy)
+        )
+        try:
+            asyncio.run(build(answer="It depends.").second_opinion("well?"))
+        finally:
+            consultant_mod._no_tools_or_fail = original
+        assert seen == [SECOND_OPINION_POLICY]
 
 
 class TestItDoesNotEndTheTurnThatAskedIt:

@@ -6905,3 +6905,443 @@ Seventeen rounds, and the verdict closed the same way it opened: *"Yes. We are d
 That is the whole thread's method in one exchange — the reviewer that reverses when it is wrong, concedes
 what a measurement did not cover, and holds out on the one claim that needed a better artefact than the
 one offered.
+
+---
+
+## The denial that was in the frame all along (2026-09-12)
+
+[AG-R-22](risks.md#ag-r-22) was written as a missing feature: *render a denied tool call in the
+consultation tab*, filed as presentational, with the note that "the hook already reports the deny". The
+first ten minutes of building it turned that premise over. **`agy` reports a failure in
+`tool_info.error` and never in `tool_info.output`, and `AgyTranslator` read only `output`.** The gate's
+own refusal — this app's sentence, round-tripped through the vendor and handed straight back — reached
+the pump in every frame and was dropped one line from the browser. What the user saw was not an absent
+feature. It was the literal words **"No output."** under a call that had been refused for a reason
+somebody had written down.
+
+The scope moved with the diagnosis. A reason discarded in `_tool` is discarded for *every* tool on the
+transport, so the master engine had it too: a user who denies `view_file` at the dialog gets the same
+blank card as a consultation denied `read_url_content`. Both were measured before the fix, and both are
+fixed by the same four lines. A feature is scoped by its surface; a data-loss bug is scoped by the code
+path that loses the data.
+
+### Telling a refusal from a failure without asking the vendor
+
+The card can now say *why*. The harder question is who gets to say *that the gate held* — because the
+answer goes to a model that is blocked on it and about to act, and "this app refused that" is a claim
+about our own containment.
+
+The first cut read it off the allowlist: a tool that is not on a static policy's list cannot have run, so
+a failed call of one was refused by us. Review took that apart with a case the code could not distinguish
+— a gate that **failed open**, let the call through, and then failed for its own reasons, which is
+exactly the situation where announcing that containment held is worst. The rule is now a conjunction: off
+the list **and** carrying `StaticPolicy.MARK`, the fixed token every refusal from this app's postures
+opens with.
+
+The mark replaced a worse idea of mine that survived a whole review round. The first version matched the
+policy reason's first sentence, `reason.partition(".")[0]` — which makes a wire format a property of
+copy-editing. An "e.g." in the prose, a version number, a rewording by someone improving the wording:
+each shortens the match silently, and the failure mode is the original bug returning with tests passing.
+`StaticPolicy.of` now prepends the mark to every reason it builds, so a posture cannot be defined without
+one, and it is addressed to the reader as much as to the parser: the card shows *"AIC-DC refused this
+tool call."* where it used to show the vendor's *"denied by pre-tool hook"* and nothing else.
+
+### Where the sentence goes, and when
+
+The ungrounded notice — the app saying what the answer was produced *without* — was first raised when the
+`result` frame was absorbed, which reads well and fails twice. A consultation that is stopped, times out
+or crashes never sends that frame, so the prose it had already streamed stayed on screen with nothing
+against it. And a notice underneath a thousand words the reader has already believed arrives after the
+damage. It now fires at the **first** refusal, before anything the model writes in response to being
+refused.
+
+Firing first creates a staleness problem, because later refusals do not re-raise it: a banner naming
+`search_web` is on screen while the model goes on to be denied `read_url_content` as well. The fix is not
+to keep the banner updated — it is to write a sentence that cannot age. It names the tool that provoked
+it **and** says that anything else it reaches for will be refused too, which is a property of the policy
+rather than a count of what has happened so far.
+
+Firing on this app's authority rather than on `agy`'s state word also means the card is drawn finished
+before the vendor says it is, so the terminal frame for the same step can still arrive afterwards. Tool
+cards are keyed by call id in `blocks.js`, so that is a second result against a card the reader has
+already seen settle. One `_settled` set closes it: one result per call, first telling wins, because the
+first telling is the one that carries the refusal.
+
+### The routing paradox, and the fence
+
+Two surfaces, and the first cut got both wrong in the same direction. The notice was left **unscoped** so
+it would land in the main transcript, on the reasoning that the consultation tab is opt-in. But the
+answer handed back to the asking model already opens with the bridge's own grounding header, and that
+header is the first paragraph of the `second_opinion` result card — a louder position in the main
+transcript than a floating row beneath it. So the warning appeared twice in the one place that had it and
+not at all in the tab, which held the refused cards and said nothing about what they meant. The notice
+now carries `agent_id` and `onSystemEvent` routes a scoped system event into that agent's tab — which is
+the scoping every *block* on the stream already had, and this handler was the last producer not to
+honour it. A scoped event whose tab is closed falls back to Main rather than being dropped.
+
+The header itself was called theatre, and it was. `second_opinion` returns the consultant's answer
+verbatim, on purpose — so nothing stopped the consultant from writing that same header, claiming it had
+been refused nothing, and leaving the asking model with two contradictory statements and no way to tell
+which was ours. Reading order is a convention, not a boundary. The answer is now quoted between markers
+carrying a **per-call nonce**, generated after the answer is already in hand. The consultant never sees
+it, so it cannot open a second fence, and a marker inside the quote is by construction the consultant's
+own words. It is four bytes: enough that guessing is hopeless, short enough to stay readable in a card a
+person is looking at.
+
+### What the runs said
+
+Three live runs on the subscription, each one changing the next round of the design.
+
+**P21**, the first fix: card preview `""` → 298 bytes, one `consultation_ungrounded`, the trailer
+present.
+
+**P22**, after the conjunction landed: two refusals in one consultation, `search_web` then
+`read_url_content`. The notice fired once, immediately after the first card and before any prose; the
+second card carried its own reason in place; the header named both. Validated against the real hook
+message rather than a fixture.
+
+**P23**, after the rework, in two arms. The refusal arm: the mark in the preview at 329 bytes, the notice
+scoped to the consultation's `agent_id`, the answer inside `⟦aic-dc:1e122bff⟧`. The second arm ran the
+one hazard review said was not closed by construction — ask for a tool that does not exist, and find out
+whether `agy` consults our hook before validating the name. It never became a tool step: `agy`'s tool
+calls are constrained to its declared set, so the model reached for `list_dir` instead, was refused, and
+then wrote in prose that `frobnicate_repository` "is not a declared or available tool in this
+environment". That arm of the hazard is unreachable from the model side; the conjunction still earns its
+keep on the others. The same answer is the clearest evidence the mark is legible to a human reader — the
+model quoted it back verbatim as the error it had been handed.
+
+In all three runs the model declined honestly. The whole point of the mechanism is that the app no longer
+depends on it doing so.
+
+### Round three: the case for saying it when nothing happened (2026-09-12)
+
+The rework above went back for a third round and came back with "no, this is not done" again. Four of its
+findings held up, and two of them were the same mistake wearing different clothes: **the app was speaking
+only when it had a refusal to report, and the refusal is not the dangerous case.**
+
+The first is a hole in the detection rule. Keying the grounding notice on `StaticPolicy.MARK` meant the
+warning was conditional on *this app* having been the component that said no. **P24 arm C** measured what
+that costs. Told to call `read_url_content` with `{"invalid_parameter": 42}`, `agy` validated the call
+against the tool's own schema and rejected it in 203ms without ever running our hook:
+
+```
+invalid arguments:
+- missing properties 'Url', 'toolSummary', 'toolAction'
+- additional properties 'invalid_parameter' not allowed
+```
+
+No mark in it, so the old rule said nothing — no notice in the tab, no sentence in the header — while the
+consultation went on to answer a question whose fetch had failed. That is AG-R-22 again, reached by a
+different road, and the distinction it turned on is one the reader has no use for: *who* refused is a
+detail, *nothing came back* is the finding. So the two questions are now asked separately.
+`_is_ungrounded` — off the allowlist and failed, whoever stopped it — raises the notice and fills the
+list the bridge reads. `_is_refusal` — the mark — keeps only the narrower job of drawing the card
+finished on this app's authority when `agy`'s state word would leave it pending. Attribution is not lost:
+the gate's marked sentence is on the card whenever the gate is what answered, which is where per-call
+attribution belonged all along.
+
+The second is the case where nothing is refused at all. The bridge header was empty whenever a
+consultation had reached for nothing, on the reasoning that most consultations reach for nothing and a
+disclaimer on every one of them is wallpaper. That had the risk backwards. A consultation that *tries* to
+read a file and is stopped is the safe one — it learns it has no tools, and in every live run so far it
+then said so. The dangerous one never tries: asked what a config file sets a timeout to, it answers from
+its weights, calls nothing, is refused nothing, and the old header was silent exactly there — leaving the
+agent that asked to suppose the answer came from the repository it can itself see. **P24 arm D**: 45
+events, not one tool call, 1844 output tokens of confident review. A posture is a static property of how
+the consultant was launched, so it is now stated whether or not anything happened to demonstrate it, and
+the reached-for sentence is appended to it when there is one.
+
+The third was staleness, again, and the answer is that a notice raised once may either name nothing or
+update — and naming nothing is the honest half of that choice here. "Reached for `search_web`" sitting
+above a refused `read_url_content` card reads as an inventory that has stopped being kept, however
+carefully the rest of the sentence is worded. The tool names are already on the cards; the sentence's
+subject is the answer. The payload's `tools` list went the same way, replaced by the single `tool` that
+provoked it, because a frozen list one layer down where nothing renders it is the same trap with nobody
+watching it.
+
+The fourth was about noise rather than correctness. The fence explained itself in three sentences, one of
+which pointed out that a marker appearing *inside* the quote must be the consultant's own — true, and an
+invitation to spend the answer's reading on forgery that has not happened. One sentence now. The
+reviewer wanted the brackets replaced by an XML tag as the shape models parse most readily; that one was
+declined and said so. A consultation is asked about code and its answers routinely contain markup and
+tag-shaped prose, so a delimiter drawn from the same alphabet as the payload is the one kind a reader has
+to disambiguate. `⟦aic-dc:…⟧` cannot occur by accident, and the nonce means it cannot occur on purpose.
+
+One correction to the record, from the same round: the mark does **not** stand at the head of the wire
+string. `agy` prefixes its own framing — 35 characters on a tool step, 71 in the prose it writes about
+one — so the earlier claim that a truncation would have to cut inside the first 29 characters to defeat
+the match was wrong. What the rule does depend on is reading the error *whole*, and it does: detection
+runs on the wire string before this app's own preview limit cuts the copy that goes to the card.
+
+### Round four: the mark stops being a detector, and the tab learns to say it (2026-09-12)
+
+Round three's rework went back for a fourth round, and the verdict opened *"you are not done"* for the
+third time running. Two of its four findings were adopted, one was conceded and then made moot, and one
+was refuted by measurement.
+
+**The adopted pair are the same bug seen from two sides.** Round three had left `StaticPolicy.MARK`
+doing one narrow job: settling a tool card when `agy` sends no terminal state for a call it refused.
+That job had the hole the round before had just closed in the notice. A barred call that fails *without*
+our mark — the schema rejection of P24 arm C, rejected before the hook ran — carries an error and no
+terminal state, so the card spun forever. The consultation completed, the header warned, the notice
+fired, and a pending spinner sat underneath all of it implying a fetch still in flight. So the mark is
+out of detection entirely. One predicate, `_is_barred`, asks whether the tool is off the consultation's
+allowlist, and answers both questions from it: *is the call over* is barred plus an error message, *did
+the answer lose a retrieval* is barred plus a failure. `_is_refusal` is gone. The mark is now only the
+sentence a person reads on the card, which is what it was always best at.
+
+The second adoption is the tab's half of round three's own fix. The header was made to state the
+no-tools posture unconditionally; the tab was not, so a human watching a consultation that called
+nothing saw an ordinary agent working and no statement of what it could not do. A `consultation_posture`
+system event is pushed as the tab opens, ahead of any output, in the tab's own voice. It raises no
+toast — a standing property of every second opinion does not deserve a notification each time — where
+`consultation_ungrounded` still does, because that one is an event.
+
+**The concession, and why it stopped mattering.** The reviewer showed the truncation arithmetic in the
+record was wrong in its favour: a buffer that truncates a tail keeps `agy`'s 35-character prefix and
+cuts the mark off the end, so a detector keyed on the mark fails *open* — reporting no containment where
+containment happened. Conceded. It is also now unreachable, because nothing is keyed on the mark.
+
+**The refutation.** The round's first finding was that the bridge singulates, naming one tool where
+several were refused, so a reader of a cascade would underestimate what the answer is missing. P25 arm E
+asked one consultation for two different barred tools. Both cards opened and settled, `pending=0`, the
+posture row came first, the notice fired once after the first failure, and the header read *"This one
+reached for view_file and read_url_content, and got nothing back."* The finding described code that does
+not exist. Arm F is the control: no tool call at all, posture row present, 2748 output tokens of
+confident review handed over under a header that says where they came from.
+
+Three rounds, three verdicts of "not done", and each one found something real. The pattern across them
+is worth naming: every finding that survived was about the app being **silent in a case it had not
+imagined**, and every one that did not survive was about mechanism — a string format, a delimiter
+choice, a control-flow claim that measurement then contradicted. The consultation is good at asking
+*what does the reader believe when nothing is said*, and unreliable about what the code does. Both
+halves are in the protocol for a reason.
+
+### Round five: the category that was claimed to be empty (2026-09-12)
+
+The position taken into the fifth round was that the mechanism was finished, and the argument for it
+was a pattern: four rounds had found the app **silent** in cases nobody had imagined, never wrong, so
+stating the posture unconditionally and adding the event-driven sentence when a retrieval was lost
+covered everything there was. The round's first move was to produce a counter-example to the pattern,
+and it was one line of arithmetic in this repository.
+
+`failed = state == "ERROR" or stopped`, with `stopped` requiring an error message. A release that
+reported a hook-denied step as `DONE` with the refusal in `output` rather than `error` would have drawn
+a **green success card** for a call that retrieved nothing, and — since `_is_ungrounded` takes `failed`
+— would have kept the tab's notice and the bridge's header quiet as well. That is not a gap in what the
+app says. A green tick under a refused call is the app saying the opposite of what happened, and it is
+worth naming as its own category because the fix for silence (say the posture always) does nothing
+about it. A barred call that settles now fails whatever word the vendor put on it.
+
+The same round found `_is_barred` requiring a name — `self._allowed is not None and name and name not
+in self._allowed` — so a tool step whose name this pump could not read was treated as *permitted*. The
+names come from the vendor's own keys. A release that renamed them would empty every one, and this
+predicate would then have called every tool in every consultation allowed. An allowlist that cannot
+identify what it is being asked about must answer no; a nameless call now reaches the asking model as
+"a tool it did not name", counted and honestly not named.
+
+**One adoption with a correction, and it is the more interesting half.** The reviewer's closing advice
+was to force `failed` true for every barred call — "never let a barred tool succeed". Taken literally
+that files a containment escape as a refusal. A barred tool that returns *output and no error* did not
+fail; it ran, and that is the single observation that turns the bridge's unconditional "nothing below
+was read" from a cautious sentence into a false one. So the invariant has a hole cut in it on purpose:
+`breached` leaves the card saying what `agy` said, fires a `consultation_breach` row beside it, and the
+bridge **withdraws** the posture rather than appending to it. It has never fired. The reason to build it
+is that the header is a claim this app makes in its own voice to a model that will act on it, and a
+claim has to be retractable by whatever can falsify it.
+
+**And the pending card, measured for the first time.** P26 arm H killed `agy` the instant the first
+tool card was pushed — the shape a timeout, a crash or a token ceiling produces — and the tab kept a
+spinner under a finished consultation, which reads as a retrieval still in flight. `settle_pending`
+closes every open card and adds the barred ones to the ungrounded list. It is called from two places,
+and the second one is the finding inside the finding: **a consultation never reaches
+`stream_complete`.** `AgyConsultant._run` iterates the frames itself and `ConsultantBridge._tab` is
+what ends the tab, so a flush written only into the pump's footer would have fixed the master engine
+and left the consultation — the surface the whole round was about — exactly as it was.
+
+### Round six: the carve-out ate its own invariant, and a category nobody had named (2026-09-12)
+
+The fifth round's hole was cut on purpose and in the wrong shape. `breached = barred and not message and
+bool(output)`, with `failed` dropped for that call. The sixth round walked both edges of it.
+
+Add an error message to an escape — a command that writes to stdout and exits non-zero, a fetch that
+returns a page and says it truncated — and `breached` goes false, the call is filed as a refusal, and the
+app tells the asking model that nothing was read about material sitting in that model's context. Take the
+error message away from a *refusal* — the `DONE`-with-the-refusal-in-`output` frame that the invariant was
+built for in the first place — and `breached` goes true with `failed` false: a green success card, a
+containment alarm, and a withdrawn assurance, for a gate that had held. The exception did not merely fail
+to close the category; it re-opened it from both sides at once.
+
+What tells the two apart is the gate's own mark, and the argument for using it here is narrower than the
+two rounds that threw it out. `StaticPolicy.MARK` is this app's string and nothing else on the wire says
+*this app refused this call*. Present in either field: refused. Output without it: bytes this app did not
+write, so something ran. Neither: this app cannot say. The earlier rounds were right that a card which
+*waits* for the mark spins forever and a warning that *requires* it is silent exactly when the gate
+failed — and neither of those is this, because here the mark's absence is never read as containment. It
+can only strengthen a claim, never manufacture one. P27 arm I measured it arriving on the live wire on
+both denied calls, which is the fact the whole cut rests on.
+
+A breach is now a failure like everything else the allowlist bars. The card has one word for it, a green
+one for an escaped call is indefensible, and the thing that makes an escape different already has a row
+of its own above the card.
+
+The same round found `failed` asking the vendor about a call that had reported an error: `stopped` was
+barred-only, so on the master engine — and for the consultation's one permitted tool — it reduced to
+`state == "ERROR"`, and an error under a `DONE` state drew green with the reason discarded one line from
+the browser. AG-R-22's own shape, alive inside the fix for it.
+
+**And the fourth category, which is the part worth keeping.** Three defects had been chased through six
+rounds: the app saying nothing, the app saying something false, the app showing a clock that had stopped.
+The fourth is the app being *certain*. A barred call can end carrying neither the mark nor any output —
+rejected upstream against a schema, or killed between the request and the result — and `settle_pending`
+wrote those into the ungrounded list, so the header said "got nothing back": a clean policy refusal
+certified for a `SIGKILL`. The app does not know that and cannot. It knows a subprocess stopped while a
+call was in flight, which is a fact about its own view rather than about what reached the model inside it.
+
+Three lists now, and three sentences: refused (*nothing below was read*), breached (posture withdrawn),
+and unverified (*treat anything that looks retrieved as unverified rather than as absent*). The tab gets
+`consultation_unverified` as a warning rather than an error, because nothing is known to have gone wrong
+— it is the certainty that is missing, not the containment.
+
+P27 arm J measured it. `agy` killed the instant the `view_file` card opened, on a question written to get
+prose out first, so an answer came back and the header was actually composed — which P26 arm H never
+reached, because an empty answer takes the error path before the header exists. It read *"It reached for
+view_file, and ended without reporting what came back from that."* The previous version of the same run
+would have said the call was refused.
+
+Two things were declined. The claim that the pump keys only on the allowlist was this app's
+overstatement and is withdrawn: `TERMINAL_STATES` and `state == "ERROR"` are the vendor's words and are
+still read. What barred-implies-failed buys is that they are no longer load-bearing in the direction
+that matters. And the observation that a renamed `finish` would deny the consultant its own turn-ending
+tool and hang every consultation is correct, real, and about the gate rather than about grounding; it
+is recorded as unbuilt rather than folded into this.
+
+P26 arm G is the regression half: the P25 cascade re-run under all of the above, posture row first,
+both cards settled, `pending=0`, both tools named in the header, no breach row. The changes altered
+what happens in the cases nobody has seen and nothing in the case everybody has.
+
+### Round seven: the app's own signature, and a paragraph that argued with itself (2026-09-12)
+
+The seventh round attacked a mechanism that was working, and found that what it worked from could be
+manufactured.
+
+`StaticPolicy.MARK` — *"AIC-DC refused this tool call."* — is a fixed sentence written in this
+repository's source, quoted in these specs and asserted in three test files. The pump looked for it in a
+barred call's `error.message` or `output` and, finding it, certified the call as refused: *nothing below
+was read*, in this app's voice, to a model about to act. Now run the failure this whole mechanism exists
+for. The gate fails open, a barred `view_file` runs, it reads `gate_server.py`, and the output comes back
+carrying the mark — because the mark is in that file. The escape is filed as a denial, the containment
+alarm stays silent, and the asking model is told affirmatively that nothing was retrieved while the
+retrieved material sits in its context. A content test had been doing a provenance test's job, on content
+this project publishes.
+
+`StaticPolicy.stamped()` mints `secrets.token_hex(8)` per consultation and writes `[ref <nonce>]` into
+the reason after the mark; `_run` stamps before the pump starts and hands the nonce over; the pump
+matches on the nonce alone. Nothing writes it down, and it reaches a model only by the gate really
+refusing and the vendor really carrying our sentence back — so the test is about the wire rather than
+about a string's contents. An unstamped policy matches nothing and every refusal under it classifies
+`UNVERIFIED`, which is the honest answer and not a degradation: an unauthenticated refusal is exactly
+that state, and defaulting it to *refused* would rebuild the forgeable test in the one configuration
+nobody is watching.
+
+A gate-side ledger was considered first and rejected on the reviewer's argument, which generalises past
+this case: a ledger records what the gate **ordered**, not what the engine **did**. An engine that
+ignored a deny and ran the tool would reconcile perfectly and be certified clean, because from the gate's
+side a breach and a denial are the same entry.
+
+The round's second finding was in the prose. P27 arm J's live header asserted *"so nothing below was
+read, fetched or looked up"* and then, two sentences later, *"treat anything in the answer that looks
+retrieved as unverified rather than as absent"* — a contradiction in the one paragraph whose entire
+value is that it can be relied on, resolved by any reader in favour of the flatter grammar. Round six had
+qualified only the sentence it added, on the reasoning that the posture still stood. It did not: the
+posture concludes from the launch that nothing was retrieved, and that conclusion is the single thing the
+call cannot support. `_grounding` now keeps the launch fact and drops the conclusion whenever anything is
+unaccounted for.
+
+The fixture had the same defect as the pump. The fake `agy` interpolated the policy's reason at
+generation time, which a per-consultation nonce makes impossible to do honestly — it would have to be
+handed the nonce, testing the pump against a string supplied to both sides. It now reads `hooks.json`
+from the root it was spawned against and runs the real `PreToolUse` command, so a refusal in the offline
+suite travels stamped policy → gate server → socket → hook → wire → pump, and the test asserts a
+`[ref <16 hex>]` tag that nothing in the file wrote. That immediately exposed a second-order defect: with
+the fake asking the real gate, `denied="finish"` is *allowed*, so the allowed-tool test had been
+asserting an absence of notices against a consultation that drew no card at all. It asserts the card
+first now.
+
+One of round seven's three defects was declined and is argued back in round eight. It held that the
+posture sentence is false whenever any tool is permitted and that `settle_pending` strands non-barred
+cards. The one permitted tool is `finish`, which retrieves nothing and therefore leaves the posture true;
+and `settle_pending` does close every stranded card — it is only the *notice* that is gated on the
+allowlist, which is deliberate, because there is no grounding claim to make about a session that never
+had a policy.
+
+### Round eight: the gate's own words used against it, and three frames that settled an argument (2026-09-12)
+
+The eighth round attacked the seventh's repair and broke it. A per-consultation token is written into
+every refusal, and a refusal is read by the model — that is what the reason is *for*. One denial therefore
+publishes the credential to the party it is meant to authenticate against. The full attack is in
+[AG-R-22](risks.md#ag-r-22); the shape is that a later gate failure plus any tool output quoting the
+conversation carries the token home in `output`, and because `_is_our_refusal` runs before the output
+test, the escape is filed as a denial.
+
+`StaticPolicy.nonce` is gone and `Refusals` replaces it: a fresh `secrets.token_hex(8)` per **denial**,
+remembered against the tool it was issued for, matched once and consumed. Binding to the tool was not in
+the proposal and is cheap, so a token minted for `view_file` cannot vouch for a `run_command` that
+escaped. `Refusals.LIMIT = 64` bounds the live set. Seven tests in
+`TestARefusalCarriesATokenForItself` cover the issuing side and two more the spending side, including
+`test_a_token_the_consultant_has_already_seen_is_worth_nothing`.
+
+The round also confirmed two things that had been left as my own judgement: that declining round six's
+`if output or message: BREACHED` was right on the P24 arm C measurement, and that round seven's
+Defect 2 was correctly declined on both halves. And it corrected me twice, both accepted — a
+desynchronised per-denial scheme produces `UNVERIFIED` rather than the false `BREACHED` I feared, under
+this app's own code; and the scheme needs a set rather than a counter.
+
+**P28 ran the three frames the round asked for, and they changed the conclusion.** Three live
+consultations dumping `tool_info` verbatim: a gate denial, a schema rejection provoked by asking the
+model to misspell a parameter, and — under a policy written for the probe alone — two tools that really
+ran and really failed. The table is in [AG-R-22](risks.md#ag-r-22). The headline is that `output` is
+**absent**, never empty, on every failing shape, and this pump already knew it to be absent on a
+*completed* call too — so the round's proposed `output is not None` repair is safe but cannot close the
+hole it was aimed at, because a silent successful breach arrives with no `output` key either. The
+discriminator that does work is `state == "DONE"` with no `error`, which is a call that ran. The
+round's own suggested discriminator — parser terminology — is refuted: `invalid_args` appears verbatim
+in a genuine execution failure.
+
+The regression passed on the wire. Two denials in one consultation carried two different `[ref …]`
+tokens, both were spent, and the tab said `consultation_ungrounded` with the strong sentence.
+
+### Rounds nine and ten: the argument converges, and the wire's limit is priced (2026-09-12)
+
+Round nine attacked the `output` test with P28's frames in front of it and round ten resolved the
+contradiction round nine left behind. Round ten's verdict, asked plainly: *"Yes, the design is converged
+— ship the hardened check and freeze the design."*
+
+The classifier now reads `state` and the **presence of the `error` key** rather than the truthiness of
+`output`. Round nine's own proposed repair, `output is not None`, is dead on the measurement — `output`
+is absent rather than empty, including on a completed call — and its objection to my first draft
+(`state == "DONE" and not message`) was the best catch of the round: `agy` is Go, its JSON omits empty
+fields, and an error with an empty message arrives with the message gone and the `type` still there, so
+reading the message would have invented a breach out of a vendor serialising a default. Testing
+`"error" in info` closes that and two related shapes by construction rather than by heuristic. Full
+argument in [AG-R-22](risks.md#ag-r-22).
+
+Round nine also claimed a defect I do not accept as one, and round ten adjudicated it. The claim — **a
+breach requires execution, not success** — is right in principle, and its evidence was wrong: it read
+P28 rows 4 and 5 as escapes, when those ran under a probe-only policy that *permitted* both tools so the
+"ran and failed" shape could be captured at all. But the same answer had elsewhere insisted that
+unauthenticated pre-gate rejections must stay `UNVERIFIED` because no vendor-shaped heuristic may be
+trusted, and the two demands are irreconcilable: on the wire an escaped-then-failed call and a pre-gate
+rejection are the same frame. Round ten agreed the contradiction was fatal to the position, and agreed
+that both must stay `UNVERIFIED` — but rejected my framing of it as "the system working" in favour of
+**an accepted blind spot of an unauthenticated wire**, priced explicitly: detection soundness traded for
+alarm precision, with a catastrophic gate failure whose calls all fail in the host reported as unverified
+noise. That correction is adopted; the docstring and the risk now say it that way.
+
+Two smaller holes closed with it. A consultation that produced no prose used to hand the asking model
+*"Antigravity returned an empty answer"* while the tab showed `consultation_unverified` — the surface an
+agent is blocked on losing the containment event, which is this mechanism's founding invariant inverted.
+And the no-tools posture is now enforced at the launch path by `_no_tools_or_fail`, as a raised
+`ConsultationError` rather than an `assert`, because `assert` is stripped under `python -O`.
+
+Nineteen tests, four suites, and the full run: **5234 Python passed, 4533 webapp passed.**

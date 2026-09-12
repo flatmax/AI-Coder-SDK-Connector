@@ -20,13 +20,14 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import subprocess
 import sys
 
 import pytest
 
 from aic_dc.agy import hook, registry
-from aic_dc.agy.gate_server import AgyGateServer, StaticPolicy
+from aic_dc.agy.gate_server import AgyGateServer, Refusals, StaticPolicy
 from aic_dc.antigravity.permissions import AntigravityPermissionGate
 
 OURS = "cd4edb7f-6de3-468f-9815-e76b310a920a"
@@ -862,3 +863,99 @@ class TestARevivedLoopIsNamedInTheLog:
         with caplog.at_level("WARNING"):
             server.decide_invocation(invocation(num=0))
         assert caplog.text == ""
+
+
+class TestARefusalCarriesATokenForItself:
+    """Why a consultation's refusals are recognisable coming back.
+
+    The pump reads a barred call's error out of the frames and has to
+    tell *this app refused it* from *this ran*. It used to test for
+    ``StaticPolicy.MARK``, a fixed sentence written in this repository's
+    own source — so a gate that failed open on a consultation that then
+    read that source would have had the escape filed as a denial. These
+    are the properties of the replacement.
+    """
+
+    def test_an_unstamped_policy_carries_no_token(self):
+        """And is therefore unrecognisable, deliberately.
+
+        The pump answers *unverified* to a refusal it cannot
+        authenticate. Nothing about an unstamped policy should look
+        provable.
+        """
+        policy = StaticPolicy.of(["finish"], "no tools here")
+        assert policy.refusals is None
+        assert policy.refusal("view_file") == policy.reason
+        assert "[ref " not in policy.refusal("view_file")
+
+    def test_every_denial_gets_its_own(self):
+        """Not one per consultation, which an eighth review round showed
+        unsound: the consultant *reads* the refusal, so one denial hands
+        it a consultation-wide secret that a later escape can echo back.
+        """
+        policy = StaticPolicy.of(["finish"], "no tools here").stamped()
+        first = policy.refusal("view_file")
+        second = policy.refusal("view_file")
+        tags = [re.findall(r"\[ref [0-9a-f]{16}\]", r) for r in (first, second)]
+        assert all(len(t) == 1 for t in tags), (first, second)
+        assert tags[0] != tags[1]
+        assert first.startswith(StaticPolicy.MARK), (
+            "the token goes after the mark, which a person reads off the card"
+        )
+        assert policy.refusals.outstanding == 2
+
+    def test_a_token_is_spent_the_first_time_it_comes_home(self):
+        policy = StaticPolicy.of(["finish"], "no tools here").stamped()
+        sent = policy.refusal("view_file")
+        wire = f"tool call denied by pre-tool hook: {sent}"
+        assert policy.refusals.spend("view_file", wire) is True
+        assert policy.refusals.spend("view_file", wire) is False, (
+            "the second use is the reflection this design exists to refuse"
+        )
+        assert policy.refusals.outstanding == 0
+
+    def test_a_token_is_bound_to_the_tool_it_refused(self):
+        policy = StaticPolicy.of(["finish"], "no tools here").stamped()
+        sent = policy.refusal("view_file")
+        assert policy.refusals.spend("run_command", sent) is False
+        assert policy.refusals.spend("view_file", sent) is True
+
+    def test_the_outstanding_set_is_bounded(self):
+        """A looping model is not a hypothesis.
+
+        An evicted token fails to authenticate, which reports the call as
+        one whose outcome could not be established — the safe direction,
+        and the reason a bound is affordable at all.
+        """
+        policy = StaticPolicy.of(["finish"], "no tools here").stamped()
+        first = policy.refusal("view_file")
+        for _ in range(Refusals.LIMIT + 8):
+            policy.refusal("view_file")
+        assert policy.refusals.outstanding == Refusals.LIMIT
+        assert policy.refusals.spend("view_file", first) is False
+
+    @pytest.mark.asyncio
+    async def test_the_gate_mints_one_when_it_denies(self, tmp_path):
+        """The property the whole design rests on, at the one place that
+        can establish it: what the gate *sends* is what the pump will
+        later have to recognise."""
+        policy = StaticPolicy.of(["finish"], "no tools here").stamped()
+        server = AgyGateServer(
+            tmp_path / "c.sock", policy=policy, config_dir=tmp_path
+        )
+        answer = await server.decide(
+            {"toolCall": {"name": "view_file", "args": {"AbsolutePath": "/x"}}}
+        )
+        assert answer["decision"] == "deny"
+        assert policy.refusals.spend("view_file", answer["reason"]) is True
+
+    @pytest.mark.asyncio
+    async def test_an_allowed_call_mints_nothing(self, tmp_path):
+        policy = StaticPolicy.of(["finish"], "no tools here").stamped()
+        server = AgyGateServer(
+            tmp_path / "c.sock", policy=policy, config_dir=tmp_path
+        )
+        assert await server.decide({"toolCall": {"name": "finish"}}) == {
+            "decision": "allow"
+        }
+        assert policy.refusals.outstanding == 0

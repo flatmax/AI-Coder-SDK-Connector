@@ -63,9 +63,10 @@ import asyncio
 import dataclasses
 import json
 import logging
+import secrets
 from collections.abc import Iterable
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 from aic_dc.agy import hook, registry, scope
 from aic_dc.antigravity.permissions import (
@@ -93,6 +94,80 @@ UNREADABLE = {
 #: that lets this host tell a loop **it** ended from one a stranger's hook
 #: ended in the same merged hooks file (AG-R-16).
 HOOK_TERMINATION = "TERMINAL_CUSTOM_HOOK"
+
+
+class Refusals:
+    """Single-use tokens, minted per denial and spent when one comes home.
+
+    **The consultant reads every refusal this app sends it.** That is the
+    point of the reason — it is prose written to steer a refused model
+    into answering rather than into looking for another route — and it is
+    also what makes a per-consultation secret unsound as an
+    authenticator. An eighth review round put the attack plainly: deny one
+    call, and the model now holds the token; if the gate later fails open,
+    any tool whose output quotes the conversation, echoes its arguments,
+    or reports an error naming them carries that token back, and the pump
+    reads the escape as a refusal. The model does not have to be
+    adversarial for this — it only has to be a model, in a loop that
+    quotes itself.
+
+    Nothing here can keep a secret from the consultant, so nothing tries.
+    A token authenticates **one** denial, and spending it is what makes
+    the second use of the same string worthless: by the time the model
+    could reflect a token it has seen, the frame that showed it to the
+    model has already been through the pump, which consumed it.
+
+    Bound to a tool name as well, so a token minted denying ``view_file``
+    cannot authenticate a ``run_command`` that escaped — the case where a
+    frame carrying the first denial never arrived, leaving its token
+    unspent. That is the residue this design does not close: a *dropped*
+    denial frame leaves one live token, and an escape of the same tool
+    could still reflect it. It costs a lost frame, an open gate and a
+    reflection at once, and the alternative — asking the gate what it
+    denied — is the authority trap the seventh round named, which
+    certifies an engine that ignored the deny.
+
+    A capped set, oldest evicted. A consultation is one turn and denials
+    are few, but a looping model is not a hypothesis, and an evicted token
+    fails to authenticate — which reports *unverified*, the safe
+    direction, rather than growing without bound.
+    """
+
+    #: Enough for any consultation that is behaving, and a bound on one
+    #: that is not.
+    LIMIT: ClassVar[int] = 64
+
+    def __init__(self) -> None:
+        self._live: dict[str, str] = {}
+
+    def mint(self, tool: str) -> str:
+        """A token for one denial of ``tool``, recorded as outstanding."""
+        token = secrets.token_hex(8)
+        self._live[token] = str(tool or "")
+        while len(self._live) > self.LIMIT:
+            self._live.pop(next(iter(self._live)))
+        return token
+
+    def spend(self, tool: str, *parts: Any) -> bool:
+        """Whether ``parts`` carry an unspent token issued for ``tool``.
+
+        Substring rather than prefix: what comes back has `agy`'s own
+        framing in front of it, measured as ``"tool call denied by
+        pre-tool hook: AIC-DC refused this tool call. [ref …] …"``.
+        """
+        wanted = str(tool or "")
+        for token, issued in tuple(self._live.items()):
+            if issued and wanted and issued != wanted:
+                continue
+            if any(token in str(part) for part in parts if part):
+                self._live.pop(token, None)
+                return True
+        return False
+
+    @property
+    def outstanding(self) -> int:
+        """How many denials have not come back. For tests and probes."""
+        return len(self._live)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -124,15 +199,125 @@ class StaticPolicy:
     into looking for another route (AG-R-11's mechanism, used positively).
     """
 
+    #: The first words of every refusal this posture sends, and the token
+    #: by which a refusal is recognised when it comes back.
+    #:
+    #: **A fixed string rather than a sentence extracted from the reason.**
+    #: The reason travels out through this app's hook, through `agy`, and
+    #: returns in a tool step's error field, and the pump that renders that
+    #: step has to tell *we refused this* from *this failed* — the
+    #: difference between a gate that held and a gate that failed open and
+    #: then broke. An earlier version matched the reason's first sentence,
+    #: which made a wire protocol a property of copy-editing: an "e.g." or
+    #: a version number in the prose would have silently shortened the
+    #: match, and a long-enough error truncated anywhere on that path would
+    #: have gone unrecognised. This is short, stands at the head of the
+    #: message, and survives every rewording of what follows it.
+    #:
+    #: It is also addressed to the reader. The card shows this text, so a
+    #: person looking at a denied call is told which program refused it
+    #: rather than being left with the vendor's "denied by pre-tool hook".
+    MARK: ClassVar[str] = "AIC-DC refused this tool call."
+
     #: Tool names, in ``agy``'s own spelling, that may run without asking.
     allowed: frozenset[str]
     #: What the model is told when it reaches for anything else.
     reason: str
+    #: The issuer of this consultation's refusal tokens, or ``None`` on
+    #: an unstamped policy — whose refusals can therefore never be
+    #: recognised coming back, which is the safe direction. See
+    #: :meth:`stamped` and :meth:`refusal`.
+    refusals: Refusals | None = None
 
     @classmethod
     def of(cls, allowed: Iterable[str], reason: str) -> StaticPolicy:
-        """Build one from any iterable of names."""
+        """Build one from any iterable of names, marked as ours.
+
+        The mark is prepended here rather than at each call site so that a
+        posture cannot be defined without it — a policy whose refusals are
+        unrecognisable would deny correctly and report nothing, which is
+        the failure AG-R-22 is about.
+        """
+        reason = reason.strip()
+        if not reason.startswith(cls.MARK):
+            reason = f"{cls.MARK} {reason}"
         return cls(allowed=frozenset(allowed), reason=reason)
+
+    def stamped(self) -> StaticPolicy:
+        """This policy with an issuer of its own for refusal tokens.
+
+        **Because :attr:`MARK` is a fixed string, and a fixed string is a
+        content test.** The pump reads a refusal back out of the frames to
+        tell *we refused this* from *this ran*, and the mark is written in
+        this repository's own source, tests and specs. So a gate that
+        failed open, on a consultation that then read one of those files,
+        would hand the pump output containing the mark — and a genuine
+        containment escape would be classified as a refusal, with the app
+        going on to state that nothing had been read. The falsehood the
+        whole mechanism exists to prevent, reintroduced by the code that
+        recognises refusals. Raised in this app's own review and confirmed
+        by a seventh consultation round.
+
+        **A token rather than a ledger of what the gate denied.** The
+        obvious repair is to stop reading the wire and ask the gate, which
+        knows what it refused. That is worse, and the reviewer's name for
+        it is the right one: the gate records what it *ordered*, and the
+        premise of the whole mechanism is that the vendor process is not
+        taken on faith. An engine that mishandled the deny and ran the
+        tool anyway would be certified clean by a ledger, because the
+        ledger says the gate said no. The token keeps the test on the wire
+        — where an escape is visible — and only makes it unforgeable.
+
+        **Per denial, not per consultation, and this was argued twice.**
+        The first cut minted one token for the whole consultation, on the
+        reasoning that the pump asks *is this refusal ours* rather than
+        *which of our refusals is this* — authentication, not
+        correlation, so nothing has to line up and there is no counter to
+        desynchronise. An eighth round showed the reasoning true and the
+        conclusion wrong, because it omits who reads the refusal. **The
+        consultant does.** The reason is prose written for it. So one
+        denial hands the model the consultation's whole secret, and if
+        the gate later fails open, a tool that quotes the conversation or
+        errors naming its own arguments carries that secret back — and
+        `_outcome` tests for the refusal *before* it tests for output, so
+        the escape is classified as a denial and the alarm never fires.
+
+        A token that can only be spent once is not worth reflecting: the
+        frame that showed it to the model went through the pump first,
+        which consumed it. See :class:`Refusals`, which also binds each
+        token to the tool it was issued for, and :meth:`refusal`, which
+        mints them.
+
+        The round also corrected this method's other argument. Minting
+        per denial does *not* require an ordered sequence — a set of
+        outstanding tokens has no order to lose — and the desynchronised
+        counter this feared would in any case have produced *unverified*
+        rather than a false breach, since a denial carries no output.
+        """
+        return dataclasses.replace(self, refusals=Refusals())
+
+    def refusal(self, tool: str) -> str:
+        """What one denial of ``tool`` says, carrying a token for itself.
+
+        Called by the gate at the moment it refuses, rather than read off
+        :attr:`reason`, because the token is per denial. An unstamped
+        policy has no issuer and answers with the bare reason — its
+        refusals are unrecognisable coming back, and every barred call
+        under it is reported as one whose outcome this app could not
+        establish.
+
+        The token goes at the head, immediately after the mark, because
+        everything on this return path is somebody else's to truncate —
+        `agy` already prefixes 35 characters of its own — and a
+        tail-truncating buffer keeps the head.
+        """
+        if self.refusals is None:
+            return self.reason
+        token = self.refusals.mint(tool)
+        rest = self.reason
+        if rest.startswith(self.MARK):
+            rest = rest[len(self.MARK):].lstrip()
+        return f"{self.MARK} [ref {token}] {rest}"
 
 
 class _AgyContext:
@@ -502,7 +687,10 @@ class AgyGateServer:
             if tool_name in self._policy.allowed:
                 return {"decision": "allow"}
             logger.debug("Consultation gate refused %s", tool_name)
-            return {"decision": "deny", "reason": self._policy.reason}
+            # `refusal()` rather than `reason`: each denial carries a
+            # single-use token minted for it, which is what the pump
+            # authenticates the refusal by when it comes home.
+            return {"decision": "deny", "reason": self._policy.refusal(tool_name)}
 
         # The narrowing that keeps reads out of the dialog, shared with the
         # SDK transport rather than reimplemented. Calling the broker

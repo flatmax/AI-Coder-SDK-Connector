@@ -51,6 +51,7 @@ from __future__ import annotations
 import logging
 import shutil
 import time
+from collections.abc import Iterable
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -69,6 +70,30 @@ logger = logging.getLogger(__name__)
 
 #: ``state`` values that end a step. Anything else leaves it in flight.
 TERMINAL_STATES = frozenset({"DONE", "ERROR", "CANCELED"})
+
+#: How a tool whose name this pump could not read is listed to the model
+#: that asked. Phrased as prose rather than as a placeholder token
+#: because that is where it is rendered — into "this one reached for X
+#: and Y" — and a reader seeing `<unknown>` there would reasonably think
+#: it was the tool's name.
+UNNAMED_TOOL = "a tool it did not name"
+
+#: What this app can say about a call the consultation's allowlist
+#: barred, once that call has reported. Three words rather than a
+#: boolean, because a review round found that collapsing them into
+#: *refused* is the app asserting something it does not know.
+#:
+#: ``REFUSED`` — the gate's own mark came back with it, so this app
+#: refused it and nothing was retrieved. That is the only state in
+#: which the header's *nothing below was read* is a fact.
+#: ``BREACHED`` — it came back with output the gate never wrote, so
+#: it ran. :meth:`AgyTranslator._breach_notice`.
+#: ``UNVERIFIED`` — it ended, and this app cannot establish which of
+#: the two happened: no mark, no output, or no result at all because
+#: the process died mid-call. :meth:`AgyTranslator._note_unverified`.
+REFUSED = "refused"
+BREACHED = "breached"
+UNVERIFIED = "unverified"
 
 #: The ``step_type`` members this pump dispatches on. Listed so an unknown
 #: one is *recognised as unknown* rather than silently matching nothing —
@@ -210,6 +235,64 @@ class AgyTranslator:
         #: `mark_stopped` — `agy` reports a starved subagent as DONE, so
         #: the terminal word for these is ours rather than the stream's.
         self._stopped: set[str] = set()
+        #: The tool names this turn's policy allows, when the turn is a
+        #: consultation; ``None`` on the engine, where the dialog decides
+        #: per call and there is no static answer to compare against.
+        #:
+        #: Set by :meth:`AgyConsultant._run`, which is the only place the
+        #: policy and the translator are both in scope. It is what lets a
+        #: *denial* be told from a *failure* without reading `agy`'s error
+        #: prose: under a static policy a tool that is not on the list
+        #: cannot have run, so a failed call of one was refused by this
+        #: app — which is a fact this app owns rather than a string the
+        #: vendor round-trips.
+        self._allowed: frozenset[str] | None = None
+        #: Tools this consultation reached for and got nothing back
+        #: from, in the order they were first reached for. A dict rather
+        #: than a set because the order is the reader's: "it tried the
+        #: web, then tried to read a file" is a sentence, and a set would
+        #: shuffle it.
+        #:
+        #: **Not only the calls this app's own gate refused,
+        #: deliberately.** What the reader of an answer needs to know is
+        #: that the consultation tried to fetch something and has none of
+        #: it, which is true of a call this app refused *and* of one that
+        #: died before reaching the gate. Keying this on the gate's
+        #: refusal mark made the warning depend on which component said
+        #: no, so an argument rejected upstream, or a gate that failed and
+        #: took the call with it, produced an answer that may describe a
+        #: page nobody fetched with nothing said about it — the original
+        #: bug, reached by a different road. See :meth:`_is_barred`.
+        self._ungrounded: dict[str, None] = {}
+        #: Tools this consultation was not permitted to use that reported
+        #: *output* anyway. Insertion-ordered and expected to stay empty
+        #: forever: it is populated only where the gate did not hold, and
+        #: every measured run has left it empty. It exists because the
+        #: bridge header states, unconditionally and in this app's own
+        #: voice, that nothing was read — and this is the one observation
+        #: that can make that sentence false. See :meth:`_breach_notice`.
+        self._breached: dict[str, None] = {}
+        #: Tools this consultation was not permitted to use that ended
+        #: without this app being able to establish whether anything came
+        #: back from them — no refusal mark, no output, or no result at
+        #: all. Insertion-ordered. The header qualifies itself for these
+        #: rather than claiming they retrieved nothing, which is the one
+        #: thing this app cannot know about them. See
+        #: :meth:`_note_unverified`.
+        self._unverified: dict[str, None] = {}
+        #: This consultation's refusal-token issuer, from its stamped
+        #: policy. ``None`` on the master engine and on a consultation
+        #: nobody stamped. See :meth:`note_consultation`.
+        self._refusals: Any = None
+        #: Call ids that have already been given a ``toolResult``. A
+        #: barred call that reported an error is drawn as finished on
+        #: *this app's* reading rather than on `agy`'s state word, so the
+        #: frame that says ``ERROR`` can still arrive afterwards for a
+        #: card the reader has already seen settle — and would draw a
+        #: second result against the same id, which `blocks.js` keys tool
+        #: cards by. One result per call, first telling wins, because the
+        #: first telling is the one that carries the reason.
+        self._settled: set[str] = set()
         self._text: dict[int, str] = {}
         self._seq: dict[int, int] = {}
         self._tools: dict[int, dict[str, Any]] = {}
@@ -536,6 +619,42 @@ class AgyTranslator:
         params = info.get("parameters")
         params = dict(params) if isinstance(params, dict) else {}
         call_id = f"agy-tool-{index}"
+        # Read before the card is drawn, because a call that could not
+        # have run is over whatever `agy` calls the state it is in. The
+        # state words are the vendor's and can grow a `BLOCKED` or a
+        # `REJECTED` without notice; *this tool cannot run here and it has
+        # reported an error* is a thing this app knows on its own.
+        message = _error_message(info)
+        # **The key, not the message.** `_outcome` needs to know whether
+        # the frame reported a failure *at all*, and the message is the
+        # wrong instrument for that: `agy` is Go, its JSON omits empty
+        # fields, and an error whose message is the empty string arrives
+        # with the message gone and the `type` still there. Reading
+        # `bool(message)` would call such a frame a clean completion,
+        # which is the one mistake in this method that manufactures a
+        # containment alarm out of a vendor serialising a default. The
+        # key survives an empty message, an error spelled as a bare
+        # string, and an explicit `null`.
+        has_error = "error" in info
+        # `tool_info.output` is per-tool rather than universal, so a
+        # completed call with none is complete with no output — never left
+        # pending, which would spin forever.
+        output = info.get("output")
+        barred = self._is_barred(name)
+        # **A barred call that has reported anything is over.** This used
+        # to require an *error*, which left the one shape that matters
+        # most — a barred call that came back with output, meaning the
+        # gate did not hold — waiting for the vendor to say a terminal
+        # word before this app would look at it. The gate's answer is
+        # final and output from a call that could not run is not going to
+        # be revised into a success, so either is enough to settle it.
+        stopped = barred and bool(message or output)
+
+        if call_id in self._settled:
+            # See `_settled`. Nothing is re-emitted: the card exists, its
+            # result is drawn, and the file bookkeeping below has already
+            # run once for this call.
+            return []
 
         if call_id not in self._tools:
             self.stats.tool_calls += 1
@@ -555,11 +674,11 @@ class AgyTranslator:
             }
             self._tools[call_id] = card
             events = [Event("toolUse", card)]
-            if state not in TERMINAL_STATES:
+            if state not in TERMINAL_STATES and not stopped:
                 return events
         else:
             events = []
-            if state not in TERMINAL_STATES:
+            if state not in TERMINAL_STATES and not stopped:
                 return events
 
         # A completed write that landed somewhere else. Checked here
@@ -593,11 +712,63 @@ class AgyTranslator:
                     )
                 ]
 
-        # `tool_info.output` is per-tool rather than universal, so a
-        # completed call with none is complete with no output — never left
-        # pending, which would spin forever.
-        output = info.get("output")
-        failed = state == "ERROR"
+        # **A barred call that settles has failed, whatever word `agy`
+        # put on it.** This used to read `state == "ERROR" or stopped`,
+        # which asks the vendor whether a call this app had already
+        # established could not run here went well. The state words are
+        # the vendor's: a release reporting a hook-denied step as `DONE`
+        # with the refusal in `output` rather than `error` would have
+        # drawn a green success card for a call that retrieved nothing
+        # and — because the grounding test took `failed` — left both the
+        # notice and the bridge header silent. Every other hole found in
+        # this mechanism was the app being quiet in a case nobody had
+        # imagined; this is the shape where it is *wrong*, which a review
+        # round was right to separate from the rest.
+        #
+        # There is no exception to it, and the version that carved one
+        # out for a breach was wrong twice over. It read `barred and not
+        # message and bool(output)` and then *dropped* `failed` for that
+        # call, on the reasoning that a tool which ran did not fail — true
+        # about the word, and it drew a **green success card for an
+        # escaped call** and left the same green card standing for a
+        # refusal a release chose to report in `output` instead of
+        # `error`, which is the exact frame shape this whole invariant
+        # was added for. A breach is not a success. It fails like
+        # everything else the allowlist bars, and what makes it different
+        # is said in its own row, above the card, where it cannot be read
+        # as the vendor's word for the call.
+        #
+        # `bool(message)` in its own right, not folded into `stopped`:
+        # `stopped` is barred-only, so on the master engine — and on the
+        # consultation's one allowed tool — this used to reduce to `state
+        # == "ERROR"` alone, and a call whose error `agy` reported under
+        # a `DONE` state drew green with its reason discarded.
+        outcome = self._outcome(name, message, output, state, has_error)
+        failed = state == "ERROR" or bool(message) or bool(outcome)
+        if outcome == BREACHED:
+            self._breached.setdefault(name, None)
+            events = events + self._breach_notice(name)
+        # **A failed call says why, and this pump used to throw the reason
+        # away.** `agy` reports a failure in `tool_info.error`, never in
+        # `output`, so every denial and every tool error reached the card
+        # with `preview: ""` and drew the literal "No output." — measured
+        # on both surfaces: a consultation denied `read_url_content`, and
+        # the master denied `view_file`. The reason was in the frame each
+        # time, in this app's own words, and was discarded one line from
+        # the browser (AG-R-22).
+        #
+        # `not output` rather than `output is None`: a failed call that
+        # named an empty output is still a failure with nothing to read,
+        # and the version of this that tested for `None` would have left
+        # exactly those cards blank.
+        if not output and failed:
+            output = message
+        self._settled.add(call_id)
+        notice: list[Event] = []
+        if outcome == REFUSED:
+            notice = self._note_ungrounded(name)
+        elif outcome == UNVERIFIED:
+            notice = self._note_unverified(name)
         # Which files this call put on disk, from the one shared table
         # (`claude_code.messages.files_written_by`, which knows all three
         # engines' tool vocabularies). This payload had no such key at
@@ -606,7 +777,14 @@ class AgyTranslator:
         # the repository as it was before. Empty on a failed call — a
         # refused write modified nothing, and saying otherwise would make
         # the tree reload for a file that is not there.
-        files = [] if failed else files_written_by(name, params)
+        # A breached call is a failed one and still wrote what it
+        # wrote: the gate did not hold, so the tree has to learn about
+        # the file the same way it learns about a permitted write.
+        files = (
+            files_written_by(name, params)
+            if not failed or outcome == BREACHED
+            else []
+        )
         content = "" if output is None else str(output)
         # `files_written_by` is a table of tools to their *path arguments*
         # and `generate_image` has none, so it cannot answer for this one
@@ -639,6 +817,10 @@ class AgyTranslator:
         # does a card show" would show a user different amounts on
         # different engines for the same reason.
         preview, truncated = truncate_tool_result(content)
+        # The refusal notice lands *after* the card that provoked it and
+        # before whatever the model writes next, which is the order a
+        # reader needs: the call, why it was refused, and then the prose
+        # produced without it.
         return events + [
             Event(
                 "toolResult",
@@ -654,7 +836,7 @@ class AgyTranslator:
                     "files_modified": files,
                 },
             )
-        ]
+        ] + notice
 
     def _collect_image(self, params: dict[str, Any]) -> str:
         """Copy a generated image into the repository, and say where.
@@ -756,6 +938,482 @@ class AgyTranslator:
             self._absorb_usage(result)
         return []
 
+    def _is_barred(self, name: str, /) -> bool:
+        """Whether this tool could not have run in this consultation.
+
+        One condition, and it is a fact about the policy rather than a
+        reading of anybody's prose: a consultation runs under a static
+        allowlist, so a name that is not on it cannot have executed. Two
+        different questions are answered from it — whether the call is
+        *over* (:meth:`_tool`, where a barred tool that reported an error
+        can have nothing further to say) and whether the answer is
+        *missing something* (:meth:`_outcome`).
+
+        **This used to be half of a conjunction with the policy's own
+        refusal mark, and the mark lost the argument twice.** It was
+        introduced to keep a call that failed *before* reaching the gate
+        from being reported as containment that held, which was right
+        about the claim and wrong about where to enforce it: the claim
+        lives in the error text on the card, which says *"AIC-DC refused
+        this tool call."* when that is what happened and says `agy`'s own
+        words when it is not, so nothing has to be inferred at all. Then
+        it was measured to fail open — P24 arm C, arguments rejected
+        against the tool's schema in 203ms with our hook never called —
+        and the second review round pointed out that requiring the mark
+        for *lifecycle* leaves that card spinning forever, which reads to
+        a human as a retrieval still in flight. The mark remains what the
+        gate says; it is no longer what this pump listens for. Its
+        travelling, truncation and versioning worries went with it.
+
+        **The empty name is barred, and that is the point of having an
+        allowlist.** This used to require a name — ``and name`` — so a
+        tool step this pump could not read the name of was treated as
+        permitted. The names come from the vendor's keys (``tool_name``,
+        then ``tool_info.name``); a release that renamed either would
+        empty them, and the version of this test that asked for a name
+        would then have called every tool in the consultation allowed,
+        settled its card green, and told the model that asked that
+        nothing had been reached for. An allowlist that cannot identify
+        what it is being asked about must answer *no*. Found by a review
+        round, and it is the only direction this predicate could fail in
+        that is not merely noisy.
+        """
+        return bool(self._allowed is not None and name not in self._allowed)
+
+    def _is_our_refusal(self, name: str, *parts: Any) -> bool:
+        """Whether any of these carries *this call's own* refusal.
+
+        One of the single-use tokens the gate minted for this
+        consultation, issued for this tool and not yet seen coming back.
+        The issuer is :class:`~aic_dc.agy.gate_server.Refusals` and the
+        spending happens here, once per call id, because `_tool` returns
+        early for a call it has already settled.
+
+        This was a search for the policy's fixed ``MARK`` until this
+        app's own review found that a fixed string is a *content* test:
+        the mark is written in this repository's source, tests and specs,
+        so a gate that failed open on a consultation that then read one
+        of those files would have returned it as retrieved content and
+        had the escape filed as a refusal — the exact falsehood the
+        classification exists to prevent, arriving through it.
+
+        It was then a single token minted per consultation, until an
+        eighth review round pointed out who reads a refusal: the
+        consultant. One denial hands the model the secret, and a gate
+        that fails open afterwards lets any tool that quotes the
+        conversation carry it home — where this test runs *before* the
+        output test, so the escape is filed as a denial. A token spent on
+        the frame that showed it to the model is worth nothing by the
+        time the model could repeat it.
+
+        No issuer answers false, always. An unstamped consultation is one
+        this app cannot prove anything about, and the honest failure is
+        to claim nothing.
+        """
+        if self._refusals is None:
+            return False
+        return bool(self._refusals.spend(name, *parts))
+
+    def _outcome(
+        self,
+        name: str,
+        message: str,
+        output: Any,
+        state: str,
+        has_error: bool,
+    ) -> str:
+        """What this app knows about a barred call that has reported.
+
+        :data:`REFUSED`, :data:`BREACHED`, :data:`UNVERIFIED`, or ``""``
+        for a call the allowlist permits, about which this asks nothing.
+
+        **The three are not the same sentence, and a review round was
+        right that collapsing them is this app asserting what it does not
+        know.** The header above every answer says, in this app's own
+        voice, that nothing below was read. That is a fact about a call
+        the gate refused. It is *false* about a call that ran. And about
+        a call that ended with neither the gate's mark nor any output —
+        an argument rejected upstream, a state word this pump does not
+        recognise, a process killed between the request and the result —
+        it is a guess dressed as a fact, which is the failure this whole
+        mechanism exists to prevent, committed by the component that was
+        supposed to prevent it.
+
+        **The gate's own refusal, in the one direction it is sound.** It
+        says *this app refused this call*, and nothing else on the wire
+        says that — see :meth:`_is_our_refusal` for why it is a token
+        rather than the policy's fixed mark.
+        Two earlier rounds removed it from the lifecycle test and from
+        the ungrounded test, and both were right: a card that waits for
+        the mark before settling spins forever when the mark never comes,
+        and a warning that requires the mark is silent exactly when the
+        gate failed and took the call with it. Neither of those is this.
+        Here its *absence* is never read as containment — absence is what
+        produces :data:`UNVERIFIED`, the weaker claim — so the mark can
+        only ever strengthen what is said, and a release that stopped
+        carrying it would cost this app its certainty rather than its
+        honesty. Measured present in P26 arm G, in `tool_info.error`, on
+        both denied calls.
+
+        **What it is still blind to, deliberately: who refused.** The
+        predicate this replaces earned that, and it holds. A call `agy`
+        rejected against its own schema before the hook ever saw it is
+        as absent from the answer as one this app denied, and the reader
+        of an answer has no use for the difference — which is why
+        :data:`UNVERIFIED` warns rather than reassures, and why the
+        per-call attribution stays where it belongs, on the card, in
+        whosever words came back with it.
+
+        Read from the output as well as the error, because the frame
+        shape that started this argument is a release that reports a
+        denial under `DONE` with the refusal text in ``output``. Such a
+        call is refused, not breached: the bytes in it are this app's own
+        sentence coming home, not a page somebody fetched.
+
+        **Output is not the test for whether a call ran, and used to be
+        the only one.** ``if output`` is false for ``""`` — so a barred
+        call that escaped and printed nothing would have been filed
+        :data:`UNVERIFIED`, a warning where the alarm belongs. The
+        obvious repair, ``output is not None``, was proposed by a review
+        round and killed by P28: on this transport ``output`` is not
+        *empty* on a call that retrieved nothing, it is **absent**, and
+        the module header above records it absent from a **completed**
+        ``find_by_name`` as well. It does not separate ran from did-not-run
+        in either direction, and no test built on it can.
+
+        What does separate them is the pair ``state`` and *did the frame
+        report a failure at all*. Every shape P28 measured that did not
+        run carries an ``error`` — the gate's denial, the vendor's schema
+        rejection. A call that ran to completion and produced nothing is
+        ``DONE`` with none. So a barred call that reaches ``DONE`` clean
+        **ran**, whatever it did or did not print, and that is a breach.
+
+        **The blind spot this leaves, which is accepted rather than
+        fixed.** A barred call that escaped the gate and *then* failed in
+        the host — ``stat: no such file``, ``dial tcp: connection
+        refused`` — really did execute, and lands :data:`UNVERIFIED`
+        here. It is indistinguishable on the wire from a call the vendor
+        rejected against its own schema before the gate ever saw it: both
+        are a barred tool, a terminal state, an error this app did not
+        write, and no token. Promoting one without the other means
+        parsing the vendor's error prose, counting milliseconds, or
+        testing whether ``parameters`` came back — and those are the
+        vendor-shaped heuristics that every round of this argument has
+        rightly refused, because they rot on a weekly release and because
+        a false breach on a model's schema typo is an alarm nobody can
+        keep believing. The trade is detection soundness for alarm
+        precision, and the cost is stated in `AG-R-22`: a catastrophic
+        gate failure whose calls all fail in the host is reported as
+        unverified noise rather than as a breach. What it never does is
+        assert containment — :data:`UNVERIFIED` already withdraws the
+        header's conclusion — so the blind spot costs this app its alarm,
+        never its honesty.
+        """
+        if not self._is_barred(name):
+            return ""
+        if self._is_our_refusal(name, message, output):
+            return REFUSED
+        if output:
+            return BREACHED
+        if state == "DONE" and not has_error:
+            return BREACHED
+        return UNVERIFIED
+
+    def _note_ungrounded(self, name: str) -> list[Event]:
+        """Record a call that took nothing back, and notice the first.
+
+        A nameless call is recorded under :data:`UNNAMED_TOOL` rather than
+        under ``""``. It is barred — :meth:`_is_barred` bars what it
+        cannot identify — so it belongs in this list, and the bridge
+        renders the list into a sentence a model reads: an empty string
+        there would produce *"reached for view_file and , and got nothing
+        back"*. Counting it and declining to name it is the honest
+        rendering of a call whose name this pump could not read.
+        """
+        first = not self._ungrounded
+        self._ungrounded.setdefault(name or UNNAMED_TOOL, None)
+        return self._grounding_notice() if first else []
+
+    def _note_unverified(self, name: str) -> list[Event]:
+        """Record a call whose outcome this app could not establish.
+
+        The mirror of :meth:`_note_ungrounded`, and the reason there are
+        two: that one's sentence is *nothing was read or retrieved*,
+        which is a fact about a refusal and a fabrication about a call
+        that was killed between the request and the result. A review
+        round named the category — an indeterminate outcome resolved into
+        an affirmative certification of safety — and it is a third kind
+        of defect beside the two this mechanism already chased. Silence
+        is an omission. A false statement is a commission. This one is
+        the app being *certain*, which is worse than either, because the
+        header's whole value is that a model can act on it.
+
+        Three shapes reach here, and the sentence has to be true of all
+        of them: a call killed between the request and the result; a
+        call the vendor rejected against its own schema before the gate
+        ever ran, which carries a message that is not ours; and a
+        refusal this app cannot authenticate as its own. The last is why
+        the wording is *cannot account for* rather than *reported
+        nothing* — there may well be a message on that card, and the
+        point is that this app did not write it.
+
+        Once per consultation and nameless in the prose, for
+        :meth:`_grounding_notice`'s reason: a list frozen at one entry
+        while further cards render beneath it reads as an inventory that
+        has stopped being kept. The provoking tool is in the payload and
+        the full list is on :attr:`unverified_tools`, which the bridge
+        reads after the turn.
+        """
+        first = not self._unverified
+        self._unverified.setdefault(name or UNNAMED_TOOL, None)
+        if not first:
+            return []
+        return [
+            Event(
+                "systemEvent",
+                {
+                    "subtype": "consultation_unverified",
+                    "data": {
+                        "agent_id": self._agent_id,
+                        "tool": next(iter(self._unverified), ""),
+                        "message": (
+                            "This consultation reached for a tool, and "
+                            "what came back is something this app cannot "
+                            "account for: no refusal it can recognise as "
+                            "its own gate's, and nothing reported as a "
+                            "result. "
+                            "A second opinion runs with no tools and no "
+                            "repository access, so almost certainly nothing "
+                            "was retrieved; but almost certainly is not the "
+                            "same as nothing, and this app will not claim "
+                            "the stronger one. Treat any file contents, page "
+                            "contents, search results or live values below "
+                            "as unverified rather than as absent."
+                        ),
+                    },
+                },
+            )
+        ]
+
+    def _breach_notice(self, name: str) -> list[Event]:
+        """The gate did not hold, said louder than the card that hides it.
+
+        A tool absent from the consultation's allowlist that comes back
+        with output and no error was *run*. Nothing in the frames is
+        wrong at that point — the card renders the vendor's success and
+        its output, which is exactly what happened — and that is the
+        problem: the thing that needs saying is not in the call, it is in
+        the paragraph this app has already committed to writing above the
+        answer, which says nothing was read.
+
+        ``engine_error`` was the first cut, on the reasoning that the
+        diverted-write correction a few lines up reuses it for the same
+        shape — a card that says success and a correction that has to be
+        louder. It is wrong here twice. That entry renders as *"the
+        engine reported an error"*, and the engine reported nothing: this
+        app is reporting on the engine. And it sets ``collapse``, which
+        lets the next error of that subtype in the turn replace the one
+        row saying the gate failed. So this has a subtype of its own,
+        with a toast and no collapse.
+
+        It names the tool, unlike :meth:`_grounding_notice`, because this
+        one cannot go stale in the way that one could: a list of what was
+        refused grows while the reader watches, but an escape is a
+        specific call that a specific person now has to go and look at.
+        """
+        return [
+            Event(
+                "systemEvent",
+                {
+                    "subtype": "consultation_breach",
+                    "data": {
+                        # Inside `data`, which is where `onSystemEvent`
+                        # reads it from to route the row into the
+                        # consultation's own tab. A copy at the top level
+                        # is read by nothing.
+                        "agent_id": self._agent_id,
+                        "message": (
+                            f"{name or 'A tool'} is not permitted in a second "
+                            f"opinion, and it returned output rather than an "
+                            f"error — so it ran. The consultation's gate did "
+                            f"not hold for that call, and anything the answer "
+                            f"says about what it read may be real. Nothing in "
+                            f"this repository was changed by it unless the "
+                            f"card above says a file was written, but this is "
+                            f"worth looking at: it should not be possible."
+                        )
+                    },
+                },
+            )
+        ]
+
+    def settle_pending(self) -> list[Event]:
+        """Finish every card the turn left open, once, at the end.
+
+        A tool card is drawn ``pending`` the moment ``agy`` mentions the
+        call and settled when the call reports. **Nothing closed the gap
+        when the call never reported.** A consultation that timed out,
+        crashed, hit a token ceiling or was killed between the two frames
+        left a spinner on screen under a finished answer, which reads as
+        a retrieval still running — a reader waiting for it to resolve is
+        waiting on something that is already over, which is the AG-R-22
+        belief arrived at from the other end. Raised by a review round as
+        the surviving half of the settling bug, and it is not specific to
+        consultations: the same spinner outlives a master-engine turn
+        whose process died mid-call.
+
+        The result says the turn ended rather than guessing why, because
+        this runs on every ending — success with an unreported call,
+        crash, and stop alike — and the one thing common to all of them
+        is that no result ever arrived.
+
+        A barred call settled here is :data:`UNVERIFIED`, never
+        ungrounded. It is tempting to call it ungrounded — from the
+        answer's point of view a retrieval that never reported looks
+        exactly as absent as one that was refused — and it is the same
+        mistake in a new place. This app does not know that the call was
+        refused. It knows the process stopped while the call was in
+        flight, which is a statement about *this app's* view of a
+        subprocess and not about what did or did not reach the model
+        inside it. Saying "nothing came back" there certifies a clean
+        refusal for an abortion, and a review round was right to
+        separate them. The notice can still fire this late because the
+        bridge reads the lists after the turn either way.
+
+        **Public, because the two ways a turn can end do not share a
+        code path.** :meth:`stream_complete` is the master engine's
+        ending; a *consultation* never reaches it — ``AgyConsultant._run``
+        iterates ``stream_frames`` itself and the bridge closes the tab —
+        so a flush that lived only in the footer would have fixed the
+        spinner everywhere except the surface the review round was
+        talking about. Idempotent by :attr:`_settled`, so both callers
+        may run and the second finds nothing to do.
+        """
+        events: list[Event] = []
+        for call_id, card in self._tools.items():
+            if call_id in self._settled:
+                continue
+            self._settled.add(call_id)
+            name = str(card.get("name") or "")
+            message = (
+                "The turn ended before this call reported a result. "
+                "Whether anything came back from it is not known."
+            )
+            events.append(
+                Event(
+                    "toolResult",
+                    {
+                        "tool_use_id": call_id,
+                        "name": name,
+                        "status": "error",
+                        "preview": message,
+                        "truncated": False,
+                        "full_bytes": len(message.encode("utf-8")),
+                        "duration_ms": 0,
+                        "agent_id": self._agent_id,
+                        "files_modified": [],
+                    },
+                )
+            )
+            if self._is_barred(name):
+                events.extend(self._note_unverified(name))
+        return events
+
+    def _grounding_notice(self) -> list[Event]:
+        """The app saying what the answer is being produced without.
+
+        AG-R-22: the gate holds and the model narrates around it. Denied
+        `read_url_content`, `agy` has been measured both declining honestly
+        *and* answering with invented page contents, from the same policy
+        and the same shape of prompt — so whether the reader is told cannot
+        be left to the model's prose. This app ran the gate, so it is the
+        one component that knows, and this is it saying so.
+
+        **At the first refusal, not at the end of the turn.** The earlier
+        version of this raised one notice when the ``result`` frame was
+        absorbed, which read well and failed twice: a consultation that
+        was stopped, timed out or crashed never emits that frame, so the
+        prose it had already streamed stayed on screen with nothing
+        against it; and a notice underneath a thousand words the reader
+        has already believed arrives after the damage. Raised here it
+        precedes everything the model writes after being refused.
+
+        **Still once per consultation**, because the sentence is about the
+        answer rather than about the call: a model refused three tools has
+        not learned three things. The later refusals are not silent — each
+        one's own card carries the reason inline, in place, in order,
+        which is where per-call attribution belongs — and the full list
+        reaches the model that asked, through :attr:`ungrounded_tools` and
+        the bridge.
+
+        **And so it names no tools.** It used to name the one that
+        provoked it, which is a list frozen at one entry while further
+        refused cards render beneath it — a reviewer read it as stale on
+        sight, and was right to: "reached for search_web" sitting above a
+        refused `read_url_content` reads as an inventory that has stopped
+        being kept. A notice raised once may either name nothing or
+        update, and naming nothing is the honest half of that choice here,
+        because the tool names are already on the cards and the sentence's
+        actual subject is the answer. What is left is a property of the
+        policy rather than a count of what has happened so far, so there
+        is no later frame that can falsify it.
+
+        It states only what this app did and can prove — which tool was
+        reached for, that this app refused it, and that nothing was
+        therefore retrieved. The conditional in the last clause is
+        deliberate: an answer that honestly says "I could not look" is not
+        a false one, and a notice that called it a confabulation would be
+        the same overclaiming it exists to correct.
+
+        **Scoped by ``agent_id``, so it lands in the consultation's own
+        tab.** The first version left it unscoped, to put it in the main
+        transcript beside the tool call that asked for the second opinion,
+        on the reasoning that the tab is opt-in. That said it twice in the
+        one place and not at all in the other: the answer handed back to
+        the asking model already opens with
+        :func:`~aic_dc.antigravity.bridge._grounding`'s header, and that
+        header is the first paragraph of the ``second_opinion`` result
+        card — which is a louder position in the main transcript than a
+        floating row beneath it, and is there whether or not this fires.
+        What the tab had was two refused cards and nothing saying what
+        they meant for the answer. This is that sentence, in the place
+        that lacked it.
+
+        A reader who opens neither is still told: the toast fires from the
+        same event, and the result card carries the header.
+        """
+        return [
+            Event(
+                "systemEvent",
+                {
+                    "subtype": "consultation_ungrounded",
+                    "data": {
+                        "agent_id": self._agent_id,
+                        # The call that provoked it, singular and fixed at
+                        # the moment it fired. A `tools` list here would be
+                        # the same frozen-inventory trap as naming them in
+                        # the sentence, one layer down where nothing
+                        # renders it and nobody would notice it going
+                        # stale. The whole list lives on
+                        # `ungrounded_tools`, which is read after the turn.
+                        "tool": next(iter(self._ungrounded), ""),
+                        "message": (
+                            "This consultation reached for a tool and got "
+                            "nothing back, and anything else it reaches for "
+                            "will come back the same way: a second opinion "
+                            "runs with no tools and no repository access. "
+                            "Each such call is shown on its own card, with "
+                            "whatever reason came back with it. Nothing was "
+                            "read or retrieved, so any file contents, page "
+                            "contents, search results or live values in what "
+                            "follows are the model's own rather than a "
+                            "source's."
+                        ),
+                    },
+                },
+            )
+        ]
+
     def _absorb_usage(self, payload: dict[str, Any]) -> None:
         usage = payload.get("usage")
         if not isinstance(usage, dict):
@@ -784,6 +1442,85 @@ class AgyTranslator:
         if self._response:
             return self._response
         return "\n\n".join(self._text[k] for k in sorted(self._text) if self._text[k])
+
+    def note_consultation(
+        self, allowed: Iterable[str], refusals: Any = None
+    ) -> None:
+        """Tell this pump it is a consultation, and what may run.
+
+        Called once, before the first frame, with the allowlist and the
+        refusal-token issuer from the consultation's own stamped
+        :class:`~aic_dc.agy.gate_server.StaticPolicy`. See
+        :attr:`_allowed`, :meth:`_is_barred` and :meth:`_is_our_refusal`.
+
+        It used to take the policy's refusal *mark* — a fixed string — and
+        match it in every error to decide whether a failure was this app's
+        doing. Two review rounds and one live probe took that apart: the
+        claim it made belongs in the error text the card already shows,
+        and requiring it made both the warning and the card's lifecycle
+        fail open on anything `agy` rejected before our hook ran. The
+        allowlist is the durable half — it is this app's own object, it
+        travels nowhere, and nothing can truncate it.
+
+        ``refusals`` is the mark's job back in a narrower form, and only
+        because the fixed string could not do it safely: it is written in
+        this repository, so a gate that failed open on a consultation
+        that then read this source would have sent the mark back as
+        *retrieved content* and had an escape recorded as a refusal. It
+        is the consultation's
+        :class:`~aic_dc.agy.gate_server.Refusals` — the object that
+        minted a single-use token for each denial — and it is taken by
+        duck type rather than imported, because the pump must not depend
+        on the gate to translate a frame.
+
+        Default ``None``, and an unstamped consultation can therefore
+        never conclude that anything was refused: every barred call
+        becomes breached or unverified. That is the safe direction — it
+        costs certainty, never honesty.
+        """
+        self._allowed = frozenset(allowed)
+        self._refusals = refusals
+
+    @property
+    def ungrounded_tools(self) -> tuple[str, ...]:
+        """Tools this consultation reached for and got nothing back from.
+
+        Read by :class:`~aic_dc.antigravity.bridge.ConsultantBridge` after
+        the turn, so the model that asked for the second opinion is told
+        which retrievals its answer is missing. Empty on the engine, and
+        empty for the consultation that never reached for anything —
+        which is most of them, and why the bridge says something
+        different, and shorter, in that case.
+
+        Named for the finding rather than for the cause: these are calls
+        that came back carrying this app's own refusal, so it is this app
+        and not the vendor that knows they returned no data. A call that
+        ended any other way is on :attr:`unverified_tools` instead. See
+        :meth:`_outcome`.
+        """
+        return tuple(self._ungrounded)
+
+    @property
+    def breached_tools(self) -> tuple[str, ...]:
+        """Tools that ran in a consultation that permits none.
+
+        Empty in every measured run, and the bridge's only reason to
+        retract the sentence it otherwise states unconditionally. See
+        :meth:`_breach_notice`.
+        """
+        return tuple(self._breached)
+
+    @property
+    def unverified_tools(self) -> tuple[str, ...]:
+        """Tools this consultation reached for to no established end.
+
+        Read by :class:`~aic_dc.antigravity.bridge.ConsultantBridge` after
+        the turn, alongside :attr:`ungrounded_tools`, and kept apart from
+        it because the sentence the bridge writes about the two is not
+        the same sentence: one says nothing came back, the other says
+        this app cannot say. See :meth:`_outcome`.
+        """
+        return tuple(self._unverified)
 
     def note_cancelled(self) -> None:
         """The user stopped this turn. AG-19.
@@ -838,7 +1575,10 @@ class AgyTranslator:
         transport exists — AG-R-4.
         """
         terminal_reason = terminal_reason_for(self._status)
-        return [
+        # Before the footer, because a card that never reported is a
+        # spinner the footer would close the turn underneath. See
+        # `settle_pending`.
+        return self.settle_pending() + [
             Event("turnUsage", {"turn_model_usage": self.turn_usage()}),
             Event(
                 "streamComplete",
@@ -1045,6 +1785,22 @@ def _diverted_copy(
     except OSError:  # noqa: BLE001 - a diagnostic, never a control path
         return None
     return None
+
+
+def _error_message(info: dict[str, Any]) -> str:
+    """Why a failed step failed, from `agy`'s two spellings of it.
+
+    Measured as a mapping — ``{"type": "TOOL_ERROR", "message": ...}`` —
+    but the SDK transport's translator treats its own error field as a
+    bare string, so neither shape is assumed here. Anything else stringifies
+    rather than raising: this runs while rendering a card, and a translator
+    that raised would fail the turn over the *decoration* of a call that
+    had already failed.
+    """
+    error = info.get("error")
+    if isinstance(error, dict):
+        return str(error.get("message") or error.get("type") or "")
+    return str(error) if error else ""
 
 
 def _duration_ms(seconds: Any) -> int:

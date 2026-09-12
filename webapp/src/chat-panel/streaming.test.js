@@ -1948,6 +1948,225 @@ describe('ChatPanel compaction toast', () => {
     expect(last.content).toContain('already written');
   });
 
+  it('says what a consultation cannot do before it says anything', async () => {
+    // The standing condition, raised once per consultation whether or not a
+    // tool is ever reached for — because the consultation that answers from
+    // its weights without trying is the one a reader cannot tell from a
+    // grounded answer. No toast: it is true every time, and a notification
+    // on every consultation is one the reader learns to dismiss.
+    const p = mountPanel();
+    await settle(p);
+    const toasts = toastsOf(p);
+    pushEvent('system-event', {
+      requestId: 'r1',
+      data: {
+        subtype: 'consultation_posture',
+        data: {
+          message:
+            'A second opinion runs with no tools and no repository access: '
+            + 'it answers from the question and the context it was given.',
+        },
+      },
+    });
+    await settle(p);
+
+    const last = p.messages[p.messages.length - 1];
+    expect(last.system_event).toBe(true);
+    expect(last.content).toContain('no repository access');
+    expect(toasts).toEqual([]);
+  });
+
+  it('says a consultation came back from a tool with nothing', async () => {
+    // AG-R-22. The gate denied `read_url_content` and the model answered as
+    // though it had read the page — measured, and stochastic, which is why
+    // the app says this rather than trusting the answer to. The message is
+    // composed backend-side by the pump that ran the gate; this end renders
+    // it and warns rather than erroring, because a refusal is the design
+    // working.
+    const p = mountPanel();
+    await settle(p);
+    const toasts = toastsOf(p);
+    pushEvent('system-event', {
+      requestId: 'r1',
+      data: {
+        subtype: 'consultation_ungrounded',
+        data: {
+          tool: 'read_url_content',
+          message:
+            'This consultation reached for a tool and got nothing back: a '
+            + 'second opinion runs with no tools and no repository access.',
+        },
+      },
+    });
+    await settle(p);
+
+    const last = p.messages[p.messages.length - 1];
+    expect(last.system_event).toBe(true);
+    expect(last.content).toContain('got nothing back');
+    expect(toasts).toEqual([['🚫 The consultation had no tools', 'warning']]);
+  });
+
+  it('shouts when a tool ran inside a consultation that permits none', async () => {
+    // The inverse of the notice above, and the one that should never fire:
+    // a barred tool that returned output rather than an error *ran*. The
+    // tool card beside it renders `agy`'s own success truthfully, which is
+    // why this has to be louder than the card — and why it is not folded
+    // into `engine_error`, which would prefix it with "the engine reported"
+    // and let the next error of that subtype collapse it away.
+    const p = mountPanel();
+    await settle(p);
+    const toasts = toastsOf(p);
+    pushEvent('system-event', {
+      requestId: 'r1',
+      data: {
+        subtype: 'consultation_breach',
+        data: {
+          message:
+            'read_url_content is not permitted in a second opinion, and it '
+            + 'returned output rather than an error — so it ran.',
+        },
+      },
+    });
+    await settle(p);
+
+    const last = p.messages[p.messages.length - 1];
+    expect(last.system_event).toBe(true);
+    expect(last.content).toContain('so it ran');
+    expect(last.content).not.toContain('The engine reported an error');
+    expect(toasts).toEqual([['⚠️ A consultation escaped its gate', 'error']]);
+  });
+
+  it('keeps every breach rather than collapsing them into the last', async () => {
+    // `collapse` would let a second alarm — or any later error card of the
+    // same subtype — replace the row saying containment failed.
+    const p = mountPanel();
+    await settle(p);
+    for (const tool of ['view_file', 'read_url_content']) {
+      pushEvent('system-event', {
+        requestId: 'r1',
+        data: {
+          subtype: 'consultation_breach',
+          data: { message: `${tool} ran and returned output.` },
+        },
+      });
+    }
+    await settle(p);
+    const rows = p.messages.filter(
+      (m) => m.system_subtype === 'consultation_breach',
+    );
+    expect(rows).toHaveLength(2);
+  });
+
+  it('warns without claiming when a call went unaccounted for', async () => {
+    // The third thing a barred call can end as. `consultation_ungrounded`
+    // says nothing was read, which is a fact about a refusal and a
+    // fabrication about a call killed between the request and the result —
+    // so the two cannot share a row, and this one's severity is a warning
+    // because nothing is known to have gone wrong. What is missing is the
+    // certainty, not the containment.
+    const p = mountPanel();
+    await settle(p);
+    const toasts = toastsOf(p);
+    pushEvent('system-event', {
+      requestId: 'r1',
+      data: {
+        subtype: 'consultation_unverified',
+        data: {
+          tool: 'view_file',
+          message:
+            'This consultation reached for a tool and then ended without '
+            + 'saying what came back from it.',
+        },
+      },
+    });
+    await settle(p);
+
+    const last = p.messages[p.messages.length - 1];
+    expect(last.system_event).toBe(true);
+    expect(last.content).toContain('without saying what came back');
+    expect(toasts).toEqual([
+      ['❔ A consultation call went unaccounted for', 'warning'],
+    ]);
+  });
+
+  it('keeps one unaccounted row per consultation', async () => {
+    // No `collapse`, for the reason the refusal row has none: these are one
+    // per consultation, so there is never a second to supersede, and setting
+    // it would let a later consultation erase the first's row while its
+    // answer is still in the transcript above.
+    const p = mountPanel();
+    await settle(p);
+    for (const tool of ['view_file', 'read_url_content']) {
+      pushEvent('system-event', {
+        requestId: 'r1',
+        data: {
+          subtype: 'consultation_unverified',
+          data: { tool, message: `${tool} ended without reporting.` },
+        },
+      });
+    }
+    await settle(p);
+    const rows = p.messages.filter(
+      (m) => m.system_subtype === 'consultation_unverified',
+    );
+    expect(rows).toHaveLength(2);
+  });
+
+  it('still says something when an unaccounted notice carries no message', async () => {
+    const p = mountPanel();
+    await settle(p);
+    pushEvent('system-event', {
+      requestId: 'r1',
+      data: { subtype: 'consultation_unverified', data: { tool: '' } },
+    });
+    await settle(p);
+    expect(p.messages[p.messages.length - 1].content).toContain(
+      'without saying what came back from it',
+    );
+  });
+
+  it('still says something when the notice carries no message', async () => {
+    // Forward compatibility with our own backend: a pump that stops sending
+    // prose must not silently stop telling the reader anything, which is the
+    // AG-R-22 failure mode one level up.
+    const p = mountPanel();
+    await settle(p);
+    pushEvent('system-event', {
+      requestId: 'r1',
+      data: { subtype: 'consultation_ungrounded', data: { tool: '' } },
+    });
+    await settle(p);
+    expect(p.messages[p.messages.length - 1].content).toContain(
+      'no tools and no repository access',
+    );
+  });
+
+  it('keeps one card per consultation rather than superseding the last', async () => {
+    // Deliberately not `collapse`. Two consultations in one turn are two
+    // facts about two answers, and the second refusal replacing the first
+    // would erase the record of an answer still sitting in the transcript
+    // above it. Each is raised once, at the end of its own consultation, so
+    // there is no per-frame stacking to guard against.
+    const p = mountPanel();
+    await settle(p);
+    for (const tool of ['read_url_content', 'search_web']) {
+      pushEvent('system-event', {
+        requestId: 'r1',
+        data: {
+          subtype: 'consultation_ungrounded',
+          data: { tool, message: `Nothing came back from ${tool}.` },
+        },
+      });
+    }
+    await settle(p);
+    const cards = p.messages.filter(
+      (m) => m.system_subtype === 'consultation_ungrounded',
+    );
+    expect(cards).toHaveLength(2);
+    expect(cards[0].content).toContain('read_url_content');
+    expect(cards[1].content).toContain('search_web');
+  });
+
   it('renders a harness notice as the harness, not as the assistant', async () => {
     // `steps.py` routes SYSTEM_MESSAGE here rather than into a text block so
     // it is not read as the model's prose — which only works if it is

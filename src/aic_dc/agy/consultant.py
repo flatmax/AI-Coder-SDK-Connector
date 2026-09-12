@@ -220,6 +220,86 @@ SECOND_OPINION_POLICY = StaticPolicy.of(CONTROL_TOOLS, _NO_TOOLS_REASON)
 IMAGE_POLICY = StaticPolicy.of({"generate_image", *CONTROL_TOOLS}, _IMAGE_ONLY_REASON)
 
 
+def _no_tools_or_fail(policy: StaticPolicy) -> StaticPolicy:
+    """Refuse to launch a second opinion under a policy that permits a tool.
+
+    The header the asking model receives says, in this app's voice, that
+    the consultation ran with no tools and no repository access — and
+    that sentence is true of :data:`SECOND_OPINION_POLICY` only because
+    its one entry, ``finish``, retrieves nothing. Nothing in the type
+    system says so. A future edit adding a read tool "just for
+    consultations" would leave the header asserting something false, in
+    the app's own voice, with every test still green: there is no
+    refusal to notice and no breach to raise, because the call would be
+    *permitted*.
+
+    A raise rather than an ``assert``, which is not pedantry: ``assert``
+    is stripped from the bytecode under ``python -O``, so an invariant
+    written that way is absent from exactly the builds that run
+    unattended.
+    """
+    extra = set(policy.allowed) - set(CONTROL_TOOLS)
+    if extra:
+        raise ConsultationError(
+            "A second opinion cannot be launched: its policy permits "
+            + ", ".join(sorted(extra))
+            + ". The answer is handed back under a header saying nothing "
+            "was read or fetched, and that sentence is only true while "
+            "the allowlist holds no tool that can retrieve anything."
+        )
+    return policy
+
+
+def _empty_answer_reason(translator: Any) -> str:
+    """Why a consultation produced no prose, told with its tool calls in it.
+
+    **The two surfaces have to say the same thing, and on this path they
+    did not.** P28's malformed-call arm spent the whole turn on a tool
+    call the vendor rejected and wrote nothing: the tab correctly showed
+    ``consultation_unverified``, and the asking model was handed *"Antigravity
+    returned an empty answer"* — a sentence that reads as a transport
+    hiccup and invites a retry. The one surface an agent is actually
+    blocked on was the surface that lost the containment event.
+
+    It matters beyond tidiness because a call with no output is not a
+    call with no effect: an unverified ``read_url_content`` can carry
+    data out in a URL whether or not a page comes back, and an unverified
+    ``run_command`` can write to the disk without printing. The prose
+    being empty says nothing about either.
+    """
+    escaped = tuple(getattr(translator, "breached_tools", ()) or ())
+    unknown = tuple(getattr(translator, "unverified_tools", ()) or ())
+    opening = (
+        "Antigravity returned an empty answer. The consultation ran and "
+        "produced no prose, which usually means the model spent the turn "
+        "reaching for tools it does not have here."
+    )
+    if escaped:
+        return (
+            f"{opening} It is not only that: {_listed(escaped)} ran despite "
+            f"the policy that permits no tools, so this consultation had a "
+            f"containment failure as well as an empty answer. Tell the user."
+        )
+    if unknown:
+        return (
+            f"{opening} And {_listed(unknown)} ended in a way this app "
+            f"cannot account for — neither a refusal it can recognise as "
+            f"its own nor a reported result — so do not treat the empty "
+            f"answer as evidence that nothing happened."
+        )
+    return opening
+
+
+def _listed(names: Iterable[str]) -> str:
+    """``a``, ``a and b``, ``a, b and c`` — tool names for a sentence."""
+    items = [str(name) for name in names if str(name)]
+    if not items:
+        return "a tool it did not name"
+    if len(items) == 1:
+        return items[0]
+    return f"{', '.join(items[:-1])} and {items[-1]}"
+
+
 class AgyConsultant:
     """One-shot ``agy`` calls, from inside a Claude Code turn.
 
@@ -410,18 +490,14 @@ class AgyConsultant:
         with roots.ephemeral(self._config_dir) as config_root:
             translator, _ = await self._run(
                 prompt,
-                policy=SECOND_OPINION_POLICY,
+                policy=_no_tools_or_fail(SECOND_OPINION_POLICY),
                 observer=observer,
                 timeout=self._timeout,
                 config_root=config_root,
             )
         answer = translator.response_text().strip()
         if not answer:
-            raise ConsultationError(
-                "Antigravity returned an empty answer. The consultation ran "
-                "and produced no prose, which usually means the model spent "
-                "the turn reaching for tools it does not have here."
-            )
+            raise ConsultationError(_empty_answer_reason(translator))
         return answer
 
     async def generate_image(
@@ -621,6 +697,26 @@ class AgyConsultant:
         translator = (
             getattr(observer, "translator", None) or self.make_translator("")
         )
+        # **Here rather than in `make_translator`, because this is the only
+        # place the policy and the translator are both in scope.** It is
+        # what lets the pump say what a failed call cost the answer
+        # without reading `agy`'s error prose: a tool that is not on this
+        # list cannot have run, so a failed call of one retrieved nothing,
+        # and a card for it is finished whatever state word arrives
+        # afterwards (AG-R-22).
+        #
+        # The policy's `MARK` used to be passed with it, to separate calls
+        # *this app* refused from ones that failed before reaching the
+        # gate. It was the wrong instrument for both jobs it was given —
+        # see `AgyTranslator._is_barred`. It came back for the narrower of
+        # the two, and came back *stamped*: the mark is a fixed string
+        # that this repository's own files contain, so recognising a
+        # refusal by it is a content test that a gate failure plus a read
+        # of this source would pass. `stamped()` mints a token for this
+        # consultation alone and puts it at the head of every refusal the
+        # gate sends, which is the same test made unforgeable.
+        policy = policy.stamped()
+        translator.note_consultation(policy.allowed, policy.refusals)
         #: One call per frame, whoever is or is not watching. An observer
         #: translates *and* pushes; a bare translator only translates.
         feed = observer if observer is not None else translator.translate

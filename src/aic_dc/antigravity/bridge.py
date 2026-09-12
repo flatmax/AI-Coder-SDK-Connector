@@ -46,6 +46,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import secrets
 from typing import Any
 
 from aic_dc.antigravity.consultant import Consultant, ConsultationError
@@ -108,6 +109,190 @@ DRAIN_SECONDS = 5.0
 def _text(body: str) -> dict[str, Any]:
     """One text block, the shape every handler returns."""
     return {"content": [{"type": "text", "text": body}]}
+
+
+def _grounding(observer: Any) -> str:
+    """What the consultation could not do, for the model that asked.
+
+    **Two sentences, and the first is unconditional.** This used to be
+    empty whenever nothing had been refused, on the reasoning that a
+    consultation asked to reason about a diff reaches for no tools and
+    needs no disclaimer. That reasoning had the case backwards. The model
+    that tries to read a file and is stopped is the *safe* one — it
+    learns it has no tools, usually says so, and this fires. The
+    dangerous one is the model that never tries: asked what a config file
+    sets a timeout to, it answers from its weights, no tool call is made,
+    nothing is refused, and the old header stayed silent — leaving the
+    agent that asked to suppose the answer came from the repository it
+    can itself see. A posture is a static property of how the consultant
+    was launched, so it is stated whether or not anything happened to
+    demonstrate it.
+
+    The second sentence is added only when the model *tried* to retrieve
+    and came back with nothing — the case where the prose beneath may
+    describe a page nobody fetched (AG-R-22). Note what it reports:
+    retrievals that failed, not refusals this app issued. Which component
+    said no is this app's business; that the answer is missing what it
+    reached for is the asking model's.
+
+    **The tab is not enough on its own.** The reader of that tab is a
+    person who may not be watching; the consumer of this string is the
+    agent that asked, is blocked on it, and is about to act. Told in this
+    module's own voice rather than folded into the answer, for the same
+    reason ``second_opinion`` returns the answer verbatim: the consultant
+    said what it said, and this is the app speaking beside it.
+
+    **Above the answer, and outside it.** This began as a tagged block
+    appended after the reply, and the reply is passed through verbatim —
+    so nothing stopped the consultant from writing that same tag itself,
+    saying it had been refused nothing, and leaving the asking model with
+    two contradictory blocks and no way to tell which was ours. Reading
+    order fixed half of that: whatever appears below is subordinate to
+    the framing above it. The other half is :func:`_fence`, which puts
+    the answer inside markers this sentence is outside of — so "not from
+    the consultant" is a structural claim rather than an assurance.
+
+    **And the unconditional sentence is retractable, because it is a
+    claim rather than a disclaimer.** "Nothing below was read" is stated
+    as fact, in this app's own voice, to a model that will act on it. One
+    observation can make it false: a tool the consultation was not
+    permitted to use that came back with output rather than an error,
+    which means it ran. That is reported in the tab in a row of its own;
+    here it replaces the posture outright, because a paragraph that
+    asserted the isolation held and then mentioned that it had not would
+    be read by exactly the wrong half of its audience.
+
+    **And a third thing can be true, which is that this app does not
+    know.** A barred call can end carrying neither the gate's refusal nor
+    any output — rejected upstream, or killed mid-flight with the answer
+    already streamed. The first version of this wrote such a call into
+    the same sentence as a refusal, "and got nothing back", which is the
+    app manufacturing a certainty out of an absence of evidence: the one
+    failure it is in this paragraph to prevent, committed by the
+    paragraph. It gets its own sentence, and the sentence says
+    *unverified rather than absent* — weaker than the refusal's claim,
+    stronger than the breach's retraction, and the only one of the three
+    that is true of a subprocess this app watched die.
+
+    ``getattr`` rather than an attribute, because the SDK transport's
+    translator has no such notion and the bridge is not allowed to know
+    which transport it holds.
+    """
+    translator = getattr(observer, "translator", None)
+    reached = getattr(translator, "ungrounded_tools", ())
+    escaped = getattr(translator, "breached_tools", ())
+    unknown = getattr(translator, "unverified_tools", ())
+    if escaped:
+        return (
+            f"Before the answer, from AIC⚡DC and not from the consultant: "
+            f"a second opinion is launched with no tools and no repository "
+            f"access, and for this one that did not hold — {_named(escaped)} "
+            f"ran. So the usual assurance is withdrawn: "
+            f"the answer below may contain material that was actually read "
+            f"or fetched, by a process that was not supposed to be able to. "
+            f"Treat it as unverified either way, and tell the user.\n\n"
+        )
+    # Two forms of the same posture, and which one is used is the whole
+    # of the fix a seventh round asked for. The first *concludes*:
+    # launched without tools, therefore nothing below was retrieved. The
+    # second states only the launch. A live run (P27, arm J) composed the
+    # first one and then appended the unverified sentence under it, so
+    # the paragraph the asking model received asserted that nothing had
+    # been read and then, one sentence later, said it could not establish
+    # that — a contradiction in this app's own voice, in the one
+    # paragraph whose entire job is to be the part that can be trusted. A
+    # reader resolves a contradiction by picking a side, and the side
+    # with the flatter grammar wins.
+    certain = (
+        "Before the answer, from AIC⚡DC and not from the consultant: a "
+        "second opinion runs with no tools and no repository access, so "
+        "nothing below was read, fetched or looked up. Treat any file "
+        "contents, page contents, search results or live values in it as "
+        "the consultant's own rather than a source's."
+    )
+    qualified = (
+        "Before the answer, from AIC⚡DC and not from the consultant: a "
+        "second opinion is launched with no tools and no repository "
+        "access — it is given no way to read a file, fetch a page or run "
+        "a command, and that is how this one was started."
+    )
+    if not reached and not unknown:
+        return f"{certain}\n\n"
+    sentences = [certain if not unknown else qualified]
+    if reached:
+        sentences.append(
+            f"This one reached for {_named(reached)}, and got nothing back."
+        )
+    if unknown:
+        sentences.append(
+            f"It {'also ' if reached else ''}reached for {_named(unknown)}, "
+            f"and ended without reporting what came back from "
+            f"{'those' if len(tuple(unknown)) > 1 else 'that'}, so whether "
+            f"anything was retrieved is not something this app can "
+            f"establish. Treat any file contents, page contents, search "
+            f"results or live values in the answer as unverified rather "
+            f"than as absent."
+        )
+    return " ".join(sentences) + "\n\n"
+
+
+def _named(tools: Any) -> str:
+    """A list of tool names as a sentence, not as a list.
+
+    "a, b and c" rather than "a, b, c": this is read by a model, and the
+    live run that produced two refusals read "reached for search_web,
+    read_url_content and was refused", which is a list that has lost its
+    last comma rather than prose.
+    """
+    names = tuple(tools)
+    if len(names) == 1:
+        return str(names[0])
+    return f"{', '.join(str(n) for n in names[:-1])} and {names[-1]}"
+
+
+def _fence(answer: str) -> str:
+    """The consultant's answer, quoted inside markers it cannot forge.
+
+    Everything this module says about a consultation — that a tool was
+    refused, that the answer is evidence rather than a verdict — is prose
+    sitting next to more prose written by a model that was asked to
+    reason about text an agent supplied. Without a boundary, the answer
+    can close with a line in AIC⚡DC's voice and the reading model has no
+    way to tell which of the two is the app.
+
+    A per-call nonce is what makes the boundary hold rather than merely
+    exist. The consultant never sees this string — it is generated after
+    its answer is already in hand — so it cannot open a second fence, and
+    a marker *inside* the quote is by construction the consultant's own
+    words. A fixed delimiter would be guessable from this source file.
+
+    :func:`secrets.token_hex` rather than :mod:`random`, because the
+    guarantee is "not predictable by a model that has read this code",
+    which is what a cryptographic source gives and a seeded PRNG does
+    not. Four bytes: enough that guessing is hopeless, short enough that
+    the markers stay readable in the tool card a person is looking at.
+
+    **One sentence of explanation, not three.** The first version spelled
+    out that a marker appearing *inside* the quote was therefore the
+    consultant's own — true, and an invitation to spend the answer's
+    reading on forgery that has not happened. The nonce makes the
+    boundary hold whether or not the reader is told how; what the reader
+    needs is which side of it this module is speaking from.
+
+    **Brackets rather than an XML tag**, which a reviewer preferred as
+    the more familiar shape. A consultation is asked about code, and its
+    answers routinely contain markup, JSX and tag-shaped prose; a
+    delimiter drawn from the same alphabet as the payload is the one kind
+    a reader has to disambiguate. ``⟦aic-dc:…⟧`` cannot occur by
+    accident, and the nonce means it cannot occur on purpose either.
+    """
+    mark = secrets.token_hex(4)
+    return (
+        f"The consultant's answer is quoted below between ⟦aic-dc:{mark}⟧ "
+        "markers; the suffix is unique to this call and the consultant "
+        "never saw it, so anything outside them is AIC⚡DC speaking.\n\n"
+        f"⟦aic-dc:{mark}⟧\n{answer}\n⟦/aic-dc:{mark}⟧"
+    )
 
 
 class _Observer:
@@ -232,6 +417,99 @@ class ConsultantBridge:
             {self._schedule(Event("subagentEvent", payload), request_id)},
             f"the tab's {'terminal' if fields.get('terminal') else 'opening'} row",
         )
+
+    async def _push_posture(self, agent_id: str) -> None:
+        """What this consultation cannot do, said before it does anything.
+
+        The tab's counterpart to the first sentence of :func:`_grounding`,
+        and it exists for the same reason on the surface that reason was
+        first applied to only the other one. A consultation that reaches
+        for a page and is refused raises a notice; a consultation that
+        reaches for nothing raises none — and *that* is the dangerous
+        shape, because it is what a model does when it answers from its
+        weights. Measured: a consultation asked to review a patch spent
+        45 events and 1844 output tokens on confident prose without
+        calling a tool, and the tab rendered it with nothing to say that
+        the process it came from could not see the repository the reader
+        is looking at.
+
+        Raised here rather than from the pump, because the pump sees only
+        frames: a consultation that dies before its first frame would
+        render as a tab with an answer-shaped silence in it. This is the
+        one place that runs for every consultation that has a tab at all,
+        and it runs before the consultant is even started.
+
+        A statement of posture, not of an event, so it carries no toast:
+        the warning that deserves interrupting a user is the one where a
+        retrieval was attempted and lost, which is
+        ``consultation_ungrounded``'s.
+        """
+        request_id = self._turn()
+        if self._emit is None or request_id is None:
+            return
+        event = Event(
+            "systemEvent",
+            {
+                "subtype": "consultation_posture",
+                "data": {
+                    "agent_id": agent_id,
+                    "message": (
+                        "A second opinion runs with no tools and no "
+                        "repository access: it answers from the question "
+                        "and the context it was given, and cannot read a "
+                        "file, fetch a page or run a command. Anything "
+                        "below about file contents, page contents, search "
+                        "results or live values is this model's own rather "
+                        "than a source's."
+                    ),
+                },
+            },
+        )
+        await self._drain(
+            agent_id,
+            {self._schedule(event, request_id)},
+            "its opening posture",
+        )
+
+    async def _flush_pending(
+        self, agent_id: str, translator: Any, pending: set[Any]
+    ) -> None:
+        """Close any tool card the consultation left open.
+
+        A card is drawn the moment ``agy`` names the call and settled when
+        the call reports. A consultation that timed out, crashed, hit a
+        token ceiling or was stopped between those two frames left a
+        spinner on the tab under a finished answer, which reads as a
+        retrieval still running — and a reader waiting for it to resolve
+        is waiting on something already over. A review round raised it;
+        the translator does the settling and this is what runs it on the
+        path a consultation actually takes.
+
+        **Here rather than only in the pump's footer**, because a
+        consultation never reaches that footer:
+        ``AgyConsultant._run`` iterates the frames itself and this
+        manager is what ends the tab. Placed before the drain so the
+        results are among the things drained, and before the terminal row
+        so they are not stranded behind it.
+
+        ``getattr``, for the reason the rest of this class uses one: the
+        SDK transport's translator has no such notion and the bridge is
+        not allowed to know which one it holds. Failure here is swallowed
+        — a tidy-up that raised inside a ``finally`` would replace the
+        consultation's own exception with its own, which is the worst
+        possible trade for a spinner.
+        """
+        settle = getattr(translator, "settle_pending", None)
+        if self._emit is None or self._turn() is None or not callable(settle):
+            return
+        request_id = self._turn()
+        try:
+            events = settle()
+        except Exception:  # noqa: BLE001 - never above the real failure
+            logger.exception("Could not settle the consultation's open cards")
+            return
+        for event in events:
+            pending.add(self._schedule(event, request_id))
 
     def _observer(
         self,
@@ -482,6 +760,7 @@ class ConsultantBridge:
             return
 
         await self._announce(agent_id, label)
+        await self._push_posture(agent_id)
         status = "failed"
         heartbeat = asyncio.ensure_future(self._heartbeat(agent_id, progress))
         try:
@@ -510,6 +789,10 @@ class ConsultantBridge:
                 await self._seed_tab(agent_id, translator)
         finally:
             heartbeat.cancel()
+            # Before the drain and before the terminal row, because both
+            # of those close the tab over whatever is still on it. See
+            # `_flush_pending`.
+            await self._flush_pending(agent_id, translator, pending)
             # Drain what *this* consultation scheduled before saying its
             # tab is done, or the terminal event can arrive ahead of the
             # text it is meant to be terminating. Bounded: see
@@ -682,7 +965,7 @@ class ConsultantBridge:
         return _text(
             "A second opinion from Google Antigravity (a different model, "
             "reasoning independently — treat it as evidence, not as a "
-            f"verdict):\n\n{answer}"
+            f"verdict).\n\n{_grounding(observer)}{_fence(answer)}"
         )
 
     async def generate_image(
