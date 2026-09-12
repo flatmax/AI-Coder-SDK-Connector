@@ -7412,3 +7412,45 @@ under neither. Nothing local can do better, and [AG-R-28](risks.md#ag-r-28) says
 otherwise.
 
 **26 tests across five files; 5,261 Python passed, 4,534 webapp passed.**
+
+## The sentence that had nowhere left to be said (2026-09-12)
+
+Making the inline card the default consultation surface is, in the renderer, an exception in
+one predicate: `subagentBlocksExpanded` returns `true` for `task_type === 'consultation'`
+where it returns `false` for everything else. The reason the rest of this took four rounds is
+that the tab being demoted was carrying something the inline card had no way to say.
+
+The posture — *a second opinion runs with no tools and no repository access* — reached the
+reader as a system event routed into the consultation's tab, and deliberately raised no
+toast, on the reasoning that one notification per consultation is one the reader learns to
+dismiss. Both halves of that are right and together they meant the posture had exactly one
+channel. Demote the tab and it has none.
+
+A review proposed the resolution: the posture is not an event, it is an invariant property of
+`second_opinion`, and it belongs to the container rather than to the stream. The file had
+already called it "the standing condition" in its own comment and had still modelled it as an
+arrival. The same review then found the flaw in the naive version of its own proposal — framing
+derived from container identity alone would assert containment directly above the row saying
+containment failed, which is the contradiction `_grounding` had already been rewritten once to
+remove from the model's copy of the same claim. So the banner reads a severity-monotonic store
+instead, and a retraction cannot be overwritten by the assurance it retracted.
+
+Three of the review's arguments were refuted, each by reading something it could not. That
+"detachment non-destructive" implied an unbuilt tear-off gesture: it is a named Invariant
+about observer lifecycle. That `renderToolBody` should render metadata instead of the answer
+for `second_opinion`: `_SUBAGENT_TOOLS` is `{"Task", "Agent"}`, so the card and its result are
+the *only* rendering of a consultation that survives a reload, and the duplication it wanted
+removed is the fallback path. And its headline finding — that cold reload "launders a
+containment breach into a clean, successful consultation" — which assumed the tool result was
+neutral prose. It is not: `_grounding` runs inside the returned value and replaces the posture
+outright on a breach. The proof was sitting in the exchange itself, since every answer the
+reviewer sent arrived under a paragraph composed by that function, one of them reporting a
+tool it had reached for and not been given.
+
+What survives from that last argument is [AG-R-29](risks.md#ag-r-29), and it is worth having:
+the retraction is durable but is the *second* paragraph, and a breach still returns a result
+with no `isError`. Both are invisible to the model, which reads the whole string, and both are
+visible to a human skimming a restored session — which is the audience the notice row used to
+serve and no longer can.
+
+**10 tests across two files; 4,544 webapp passed.**

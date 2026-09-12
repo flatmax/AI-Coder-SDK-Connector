@@ -54,6 +54,7 @@ import {
   drainChunks,
   freezeBlocks,
   markAwaitingPermission,
+  noteConsultationPosture,
   resetTurnBlocks,
   stageChunk,
   subagentRowFor,
@@ -888,6 +889,15 @@ export function onSystemEvent(panel, event) {
   // Main rather than being dropped, because an unsaid warning is worse than
   // one in the wrong place.
   const agentId = typeof data?.data?.agent_id === 'string' ? data.data.agent_id : '';
+
+  // A consultation notice is also the container's standing condition, so it
+  // is recorded before it is placed. Recorded *as well as*, not instead of:
+  // the row still goes where it went, because the tab is still the full view
+  // and a banner on the inline card is not a reason to stop saying it there.
+  // The banner is what reaches a reader who never opens the tab, which under
+  // inline-as-default is most of them (AG-29).
+  noteConsultationPosture(panel, agentId, subtype, notice);
+
   const scoped = agentId ? findSubagentTab(panel, agentId) : null;
   const messages = scoped ? scoped.tab.messages : panel.messages;
 

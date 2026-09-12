@@ -284,10 +284,19 @@ roughly 40% of the estimate**. A costing exercise that only ever adds is not mea
    `tool_use_id` of the call it was serving and the row therefore floated to the end of the turn. A
    `PreToolUse` hook now stages that id and the handler claims it back by matching every identifying
    argument — [AG-28](../plan-ag/decisions.md#ag-28), with the residual at
-   [AG-R-28](../plan-ag/risks.md#ag-r-28). What remains of step 3 is the surface itself: stop creating a
-   strip tab eagerly and render the stream expanded inline; make the full view a projection of retained
-   blocks rather than a disk read, which a consultation has nothing to answer; and key the consultant's
-   live conversation by consultation id so two in flight can be stopped independently.
+   [AG-R-28](../plan-ag/risks.md#ag-r-28). **The inline surface itself is built, 2026-09-12**: a
+   consultation's stream now renders expanded by default, where every other subagent's stays collapsed,
+   because the rule being broken was written against a delegated turn whose blocks and result are
+   different artefacts and a consultation's stream *is* its answer. The part that took the review four
+   rounds was the posture sentence, which reached the reader only through the tab being demoted and
+   deliberately raises no toast; it became **framing on the container**, read from a severity-monotonic
+   store so that a retraction cannot be overwritten by the assurance it retracted —
+   [AG-29](../plan-ag/decisions.md#ag-29), with [AG-R-29](../plan-ag/risks.md#ag-r-29) on the two places
+   a breach is still quiet for a human skimming a restored session. What remains of step 3: stop
+   creating the strip tab eagerly, now unblocked because the notices no longer need a mounted tab to
+   have somewhere to be; make the full view a projection of retained blocks rather than a disk read,
+   which a consultation has nothing to answer; and key the consultant's live conversation by
+   consultation id so two in flight can be stopped independently.
 4. **Provision `agy`'s MCP root as a build step.** It has no MCP servers configured today, so this is
    construction, not configuration — the correction that turned a claimed half-day into a build task.
    **The mechanism has since left this layer**: `agy mcp add` documents `--type http` with repeatable
@@ -331,9 +340,12 @@ in what the call costs — one is a single consultation, the other risks the log
   the grant is not, and it is the difference between a retry and an interactive re-login. Not worth a
   deliberate experiment — losing the login to find out is the whole failure — so it stays open until it
   is observed or documented.
-- **`interrupt=True` and `max_turns=1` behaviour** are reasoned from the SDK source and the CLI flag,
-  not observed. Both are cheap to settle with one live consultation each, and step 2 should settle them
-  before shipping rather than after.
+- ~~**`interrupt=True` and `max_turns=1` behaviour**~~ **Closed by measurement, 2026-09-12.** Both were
+  reasoned from the SDK source and the CLI flag rather than observed, and this entry asked step 2 to
+  settle them before shipping. It did: the isolation probes in
+  [AG-25](../plan-ag/decisions.md#ag-25) ran a live consultation each way — with an adversarial system
+  prompt and with none at all — and both returned `terminal='completed'` with `turns=1`, which retires
+  the pair. See [`decisions.md` § `tools=[]` does not make Claude refuse](../plan-ag/decisions.md#ag-25).
 - ~~**Whether the two-features split earns two code paths or one path with two configurations.**~~
   **Closed, 2026-09-11 — and the question's own vocabulary was the wrong half of it.** The answer is
   *one execution pump with two coordinators*, which is neither of the two options as posed; "one path

@@ -65,7 +65,11 @@ import {
   toolLabel,
 } from './block-render.js';
 import { STYLES } from './styles.js';
-import { applyToolResult, makeTurnBlocks } from './blocks.js';
+import {
+  applyToolResult,
+  makeTurnBlocks,
+  noteConsultationPosture,
+} from './blocks.js';
 
 // ---------------------------------------------------------------------------
 // Harness
@@ -1773,6 +1777,124 @@ describe('renderSubagentRow', () => {
     toggleSubagentBlocks(panel, row({ key: 'task-1' }));
     expect(subagentBlocksExpanded(panel, row({ key: 'task-1' }))).toBe(true);
     expect(subagentBlocksExpanded(panel, row({ key: 'task-2' }))).toBe(false);
+  });
+
+  describe('a consultation, whose inline card is the default surface', () => {
+    const consult = (over = {}) => row({
+      key: 'consult-1',
+      task_id: 'consult-1',
+      agent_id: 'consult-1',
+      description: 'Second opinion',
+      task_type: 'consultation',
+      subagent_type: null,
+      ...over,
+    });
+
+    it('draws its stream without being asked, unlike a delegated subagent', () => {
+      // The duplication argument that collapses a `Task` row does not hold
+      // here: a consultation's nested stream *is* the answer, and the
+      // `second_opinion` card beside it stays collapsed under `blockExpanded`,
+      // so expanding this leaves exactly one copy on screen rather than two.
+      const panel = stubPanel();
+      const host = draw(renderSubagentRow(
+        panel,
+        consult(),
+        [textBlock({ block_id: 'a:b0', content: 'The answer is ORCHID.' })],
+        [], false,
+      ));
+      expect(host.querySelector('.subagent-blocks')).toBeTruthy();
+      expect(text(host.querySelector('.subagent-blocks-toggle'))).toBe('▾ transcript');
+    });
+
+    it('leaves a delegated subagent collapsed on the same code path', () => {
+      expect(subagentBlocksExpanded(stubPanel(), consult())).toBe(true);
+      expect(subagentBlocksExpanded(stubPanel(), row())).toBe(false);
+    });
+
+    it('lets an explicit collapse win and stay won', () => {
+      // Against `=== true` this was the bug: a user who closed a consultation
+      // stored `false`, which read as "unset", which returned the default —
+      // a disclosure that reopened itself on the next repaint.
+      const panel = stubPanel();
+      const one = consult();
+      toggleSubagentBlocks(panel, one);
+      expect(subagentBlocksExpanded(panel, one)).toBe(false);
+      const host = draw(renderSubagentRow(
+        panel, one, [textBlock({ block_id: 'a:b0', content: 'ORCHID.' })], [], false,
+      ));
+      expect(host.querySelector('.subagent-blocks')).toBeNull();
+    });
+
+    it('frames the container with the posture before any notice arrives', () => {
+      // The container exists before the event does. A banner that appeared a
+      // beat late would read as something having gone wrong, and the
+      // unretracted posture is the only state a consultation can be in
+      // before anything has been observed about it.
+      const host = draw(renderSubagentRow(stubPanel(), consult(), [], [], false));
+      const posture = host.querySelector('.consultation-posture');
+      expect(text(posture)).toBe(
+        'A second opinion runs with no tools and no repository access.',
+      );
+      expect(posture.className).toContain('info');
+    });
+
+    it('says nothing of the kind over a delegated subagent', () => {
+      const host = draw(renderSubagentRow(stubPanel(), row(), [], [], false));
+      expect(host.querySelector('.consultation-posture')).toBeNull();
+    });
+
+    it('shows the retraction instead of the assurance it withdrew', () => {
+      // Not both. `_grounding` replaces the posture outright on a breach for
+      // the model's copy of this claim, because a paragraph asserting the
+      // isolation held and then mentioning that it had not is read by exactly
+      // the wrong half of its audience. The banner must not rebuild that.
+      const panel = stubPanel();
+      noteConsultationPosture(panel, 'consult-1', 'consultation_posture', {
+        text: 'A second opinion runs with no tools and no repository access.',
+        severity: 'info',
+      });
+      noteConsultationPosture(panel, 'consult-1', 'consultation_breach', {
+        text: 'A tool ran inside a second opinion that permits none.',
+        severity: 'error',
+      });
+      const host = draw(renderSubagentRow(panel, consult(), [], [], false));
+      const posture = host.querySelector('.consultation-posture');
+      expect(text(posture)).toBe(
+        'A tool ran inside a second opinion that permits none.',
+      );
+      expect(posture.className).toContain('error');
+    });
+
+    it('does not let a late posture overwrite the breach it retracted', () => {
+      const panel = stubPanel();
+      noteConsultationPosture(panel, 'consult-1', 'consultation_breach', {
+        text: 'The consultation gate did not hold.',
+        severity: 'error',
+      });
+      noteConsultationPosture(panel, 'consult-1', 'consultation_posture', {
+        text: 'A second opinion runs with no tools and no repository access.',
+        severity: 'info',
+      });
+      const host = draw(renderSubagentRow(panel, consult(), [], [], false));
+      expect(text(host.querySelector('.consultation-posture')))
+        .toBe('The consultation gate did not hold.');
+    });
+
+    it('keeps one consultation’s posture out of the next one’s banner', () => {
+      const panel = stubPanel();
+      noteConsultationPosture(panel, 'consult-1', 'consultation_breach', {
+        text: 'The consultation gate did not hold.',
+        severity: 'error',
+      });
+      const host = draw(
+        renderSubagentRow(panel, consult({ agent_id: 'consult-2' }), [], [], false),
+      );
+      const posture = host.querySelector('.consultation-posture');
+      expect(text(posture)).toBe(
+        'A second opinion runs with no tools and no repository access.',
+      );
+      expect(posture.className).toContain('info');
+    });
   });
 
   it('renders the summary as the markdown the subagent wrote', () => {

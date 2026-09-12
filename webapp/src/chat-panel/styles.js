@@ -2893,6 +2893,31 @@ export const STYLES = css`
   .subagent-stop:hover {
     background: rgba(248, 81, 73, 0.12);
   }
+  /* A consultation's standing condition, framing the container rather
+   * than sitting in it as a row. Quieter than the prose it frames while
+   * the claim holds, and loud when the claim has been retracted — the
+   * severity comes from the notice, so a breach is not styled like the
+   * assurance it withdrew. Left border rather than a filled block: it is
+   * a margin note about the answer, not a step in it. */
+  .consultation-posture {
+    margin: 0 0.5rem 0.35rem 1.4rem;
+    padding: 0.3rem 0.5rem;
+    border-left: 2px solid var(--border, #30363d);
+    border-radius: 0 3px 3px 0;
+    font-size: 0.75rem;
+    line-height: 1.45;
+    color: var(--text-secondary, #8b949e);
+    background: var(--bg-subtle, rgba(110, 118, 129, 0.08));
+    word-break: break-word;
+  }
+  .consultation-posture.warning {
+    border-left-color: var(--warning, #d29922);
+    color: var(--warning, #d29922);
+  }
+  .consultation-posture.error {
+    border-left-color: var(--error, #f85149);
+    color: var(--error, #f85149);
+  }
   .subagent-summary {
     padding: 0 0.5rem 0.35rem 1.4rem;
     font-size: 0.78125rem;

@@ -17,6 +17,7 @@ import {
   subagentLedState,
   subagentLedTooltip,
 } from './subagent-tabs.js';
+import { consultationPosture } from './blocks.js';
 import {
   mountPanel,
   publishFakeRpc,
@@ -831,6 +832,36 @@ describe('a system event that names a subagent lands in its tab', () => {
       'This consultation reached for a tool and got nothing …',
     ]);
     expect(p.messages.length).toBe(mainBefore);
+  });
+
+  it('records a consultation notice as the container’s standing condition', async () => {
+    // As well as placing the row, not instead of it. The tab is still the
+    // full view; the store is what lets the inline card carry the same claim
+    // to a reader who never opens one (AG-29).
+    const p = mountPanel();
+    const { reqId, tab } = await withSubagent(p);
+    pushEvent('system-event', ungrounded(reqId));
+    await settle(p);
+    expect(contentsOf(tab.messages)).toEqual([
+      'This consultation reached for a tool and got nothing …',
+    ]);
+    expect(consultationPosture(p, 'agent-1')).toMatchObject({
+      text: 'This consultation reached for a tool and got nothing …',
+      severity: 'warning',
+    });
+  });
+
+  it('does not record a session-wide event against any consultation', async () => {
+    // No `agent_id`, so nothing to key it by — and a conversation reset is
+    // not a statement about what some consultation was permitted to do.
+    const p = mountPanel();
+    await withSubagent(p);
+    pushEvent('system-event', {
+      requestId: null,
+      data: { subtype: 'conversation_reset', data: {} },
+    });
+    await settle(p);
+    expect(consultationPosture(p, 'agent-1')).toBeNull();
   });
 
   it('still toasts, because the tab is opt-in', async () => {

@@ -1889,7 +1889,13 @@ which also records the two ways the *test suite* reached into the developer's ho
 
 <a id="ag-22"></a>
 
-## AG-22 — Claude reaches `agy` over authenticated HTTP MCP, and the token carries the workspace **(measured 2026-09-11, unbuilt)**
+## AG-22 — Claude reaches `agy` over authenticated HTTP MCP, and the token carries the workspace **(measured 2026-09-11, built 2026-09-12)**
+
+**Built 2026-09-12**, by [AG-26](#ag-26)'s listener and [AG-27](#ag-27)'s wiring: `mcp_config_file`,
+`write_mcp_config` and `clear_mcp_config` in `src/aic_dc/agy/roots.py`, written per spawn from
+`_offer_consultant` in `src/aic_dc/agy/service.py`. The header said `unbuilt` for a day after it was
+not — corrected here, because this file is what a consultation is given as the plan of record, and a
+stale `unbuilt` invites rebuilding something that exists.
 
 **[AG-1](#ag-1) requires both directions and only one of them exists: `claude` can be master and has
 no consultant path at all.** Closing that is a transport question, and it went through
@@ -2065,7 +2071,11 @@ The strict-FIFO consequence is enforced by construction rather than by a test: t
 the only operations on it are `append` and `popleft`. There is nowhere for a coalescer or a priority to
 live, which is the point.
 
-## AG-24 — The consultation transport, measured end to end **(measured 2026-09-12, unbuilt)**
+## AG-24 — The consultation transport, measured end to end **(measured 2026-09-12; the transport it decided was built the same day)**
+
+**The transport these measurements decided was built on 2026-09-12** — see [AG-26](#ag-26) and
+[AG-27](#ag-27). This entry stays a measurement record rather than a build record, which is why its
+header no longer says `unbuilt`: nothing here is outstanding work.
 
 [AG-22](#ag-22) chose authenticated HTTP MCP from a `--help` text and two probes. Choosing the mechanism
 was the easy half. This entry is what five rounds of
@@ -2159,7 +2169,10 @@ bisected against five candidates, with `.gemini/settings.json`, `.gemini/config/
 hooks file this host installs is at `.gemini/config/hooks.json`. Two vendor config files, two
 directories, and the natural assumption that they share one is wrong.
 
-## AG-25 — The Claude consultant's isolation is two independent mechanisms, because one of them is undocumented **(measured 2026-09-12, unbuilt)**
+## AG-25 — The Claude consultant's isolation is two independent mechanisms, because one of them is undocumented **(measured and built 2026-09-12)**
+
+**Built 2026-09-12** as `src/aic_dc/claude_code/consultant.py`, whose module docstring carries both
+mechanisms and the measurement behind each.
 
 Step 2 of [`blank-sheet-architecture.md`](../7-future/blank-sheet-architecture.md) is a Claude
 consultant built on `claude_agent_sdk.query()`. The consultation contract is
@@ -2861,3 +2874,100 @@ three converged on all three points.
 
 One residual is left standing: two calls byte-identical in every anchor argument, in parallel, in one
 turn, render unanchored. Nothing local can do better, and it is recorded as [AG-R-28](risks.md#ag-r-28).
+
+## AG-29 — The consultation's posture frames its container instead of arriving as an event **(measured and built 2026-09-12)**
+
+Migration step 3 asks for the inline card to be the default consultation surface. The
+rendering half is a two-line change; what took four rounds of review to settle is where the
+*posture* goes — the sentence saying a second opinion runs with no tools and no repository
+access — because the tab it currently lives in stops being the place anyone looks.
+
+### A consultation is the one subagent whose stream is worth expanding
+
+`subagentBlocksExpanded` collapsed every subagent's nested blocks, for a reason recorded in
+its own docstring: a delegated turn drew its transcript inline *and* in a tab, and read as
+though it had happened twice. That argument does not survive contact with a consultation.
+A `Task` subagent's nested blocks are its tool calls and its result is a terse summary, so
+the two are different artefacts and drawing both is a genuine repeat. A consultation has no
+tool calls — the gate permits none — so its nested stream **is** the answer, and the only
+thing collapsing it saves the reader is the thing they asked for.
+
+The review predicted this would double-render the prose, since the `second_opinion` tool
+card also holds the answer. Measured, it does not: `blockExpanded` returns `true` only for
+`error`/`denied` status or an edit-shaped block, so a `second_opinion` card is collapsed and
+its body sits behind `renderToolBody`, which is gated on that. Expanding the *row* leaves
+exactly one copy on screen. The expansion check moved from `=== true` to
+`typeof === 'boolean'` at the same time, because against `=== true` a user who collapsed a
+consultation stored `false`, which read as "unset", which returned the default — a
+disclosure that reopened itself.
+
+### The posture is a standing condition, so it is framing and not a row
+
+`streaming.js` already had half of this worked out. Its handler calls the posture "the
+standing condition, raised once at the head of every consultation", and declines to toast it
+because "this is true of every consultation, and a toast on each one is a notification the
+reader learns to dismiss". Having concluded it is a standing condition, it still modelled it
+as an arrival: a `systemEvent` routed by `agent_id` into a tab.
+
+Under inline-as-default that leaves the posture with **no channel at all** — no tab the
+reader opens, and deliberately no toast. So it becomes framing on the container, rendered
+above the answer and outside it, which is the same structural argument `_grounding` makes
+for the model's copy of the claim in `src/aic_dc/antigravity/bridge.py`: whatever appears
+below is subordinate to the framing above it.
+
+### Framing that cannot retract is worse than no framing
+
+This is the part the review earned. A banner authored from container identity alone would
+proclaim that containment is in effect directly above a `consultation_breach` row saying it
+failed — rebuilding, in the browser, the exact contradiction `_grounding` was rewritten to
+eliminate on the wire. Its comment on that rewrite: *"the paragraph the asking model
+received asserted that nothing had been read and then, one sentence later, said it could not
+establish that … A reader resolves a contradiction by picking a side, and the side with the
+flatter grammar wins."*
+
+So the banner reads a store, `noteConsultationPosture` in `blocks.js`, keyed on `agent_id`
+and **monotonic in severity** across the four notices — `posture` < `ungrounded` <
+`unverified` < `breach`. Monotonic rather than last-write-wins because the posture arrives
+*first*, at the head of every consultation, and nothing orders a replayed posture against an
+earlier breach across a reconnect; ranking means a retraction cannot be overwritten by the
+assurance it retracted. The store holds each notice's own sentence rather than deriving one
+from the subtype, because `consultation_unverified` retracts differently from
+`consultation_breach` — the app does not *know* what happened, and flattening that into
+"containment failed" manufactures the certainty that branch exists to refuse.
+
+The notices still go where they went. The store records them *as well as*, not instead of:
+the tab is still the full view, and a banner on the inline card is not a reason to stop
+saying it there.
+
+### What the review moved, and what measurement moved back
+
+Adopted: the posture as declarative container framing rather than as an event or a stream
+block, which dissolved a choice between two bad options — a duplicated notice row, or a
+`block.type === 'host_notice'` invented to carry engine-authored supervision inside a stream
+that means *what the model produced*. Also adopted: that the framing must retract.
+
+Refuted on the specification's own text: that "detachment non-destructive" implied an
+unbuilt tear-off gesture and that eagerly creating the tab was avoiding it. The clause is a
+named Invariant about the *observer* lifecycle — closing a surface unsubscribes an observer
+and never aborts the Invocation — and is satisfied by any number of surfaces.
+
+Refuted on measurement: its suggestion that `renderToolBody` special-case `second_opinion`
+and render metadata in place of the answer. `_SUBAGENT_TOOLS` is `{"Task", "Agent"}`, so a
+consultation read back off disk restores **no row, no nested blocks and no notices** — the
+card and its result are the entire historical rendering. Suppressing the result by tool
+identity would make a reloaded consultation unreadable. The duplication is not a wart; it is
+the fallback path, and the collapse defaults are the right place to resolve it.
+
+Refuted on measurement again, and this was the review's "central collision": that cold
+reload launders a breach into a clean successful consultation, since the notice rows do not
+survive. The retraction is not in the rows. `_grounding` is called *inside* the returned
+tool result (`bridge.py:1197`), and on a breach it replaces the posture outright rather than
+appending to it. The durable channel and the ephemeral one address two audiences — the model
+reads the result, the human reads the row — and the argument assumed only the second existed.
+What survives from it is [AG-R-29](risks.md#ag-r-29): the retraction is durable but is not
+the result's *first* paragraph, and a breach does not set `isError`.
+
+Declined as out of scope rather than wrong: the review's general "invocation state" tier, a
+store-driven condition banner for every persistent agent property. There is one retractable
+claim in this system, it has an authoritative composer on the Python side, and the banner is
+a projection of that verdict rather than a second implementation of it that can drift.

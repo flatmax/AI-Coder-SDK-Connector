@@ -2728,3 +2728,40 @@ There is one adjacent path that is *not* new here. `observe()` reads the turn id
 consultation outliving its turn emits blocks tagged with the new turn, which the renderer's fallback would
 spill into the main transcript. That was raised during AG-28's review as a regression and is not one: it
 behaves identically with the minted scope and predates the anchor entirely.
+
+## AG-R-29 — A breached consultation reads as successful to someone skimming a cold transcript
+
+[AG-29](decisions.md#ag-29) established that a containment breach *is* durable across a
+reload, against a review that argued it was not: `_grounding` composes the retraction inside
+the value `second_opinion` returns, so it is in the transcript on disk rather than only in a
+notice row that cold reload never rebuilds. The model that asked is therefore told, every
+time, in the one artefact that survives.
+
+Two narrower versions of the argument survive the measurement, and both are about the
+**human** reading a restored session rather than the model reading the result.
+
+**The retraction is the second paragraph.** The returned value is assembled as
+`"A second opinion from Google Antigravity (a different model, reasoning independently — treat
+it as evidence, not as a verdict).\n\n" + _grounding(observer) + _fence(answer)`. A surface
+that previews a tool result by its opening line — a collapsed card, a search hit, a snippet —
+shows the reassuring boilerplate and puts the withdrawal of the assurance below the fold.
+The ordering is defensible for the model, which receives the whole string; it is exactly
+backwards for anything that truncates.
+
+**A breach returns a successful tool result.** `_text` returns `{"content": [...]}` and sets
+no `isError`, so the card for a consultation whose gate failed renders with the same neutral
+completed styling as one that held. `_grounding`'s own docstring says the row in the tab
+"has to be louder than the card" precisely because "the card beside it renders `agy`'s own
+success, truthfully" — and on a restored turn that row is gone, leaving only the card it was
+meant to be louder than.
+
+Neither is a containment failure and neither misleads the asking model. Both are the same
+shape of defect: the app knows something went wrong and says so in prose, in a place a
+skimming reader does not have to look. The fix is small and is listed as unbuilt work —
+hoist the retraction above the boilerplate when `escaped` or `unknown` is non-empty, and set
+`isError` on a breach so the collapsed card carries a warning badge without an expand click.
+
+Not a risk, though it was raised as one: that the live banner would proclaim containment over
+a breach row. That is closed by construction in AG-29 — the banner reads a severity-monotonic
+store rather than the container's identity, so a retraction cannot be overwritten by the
+assurance it retracted.

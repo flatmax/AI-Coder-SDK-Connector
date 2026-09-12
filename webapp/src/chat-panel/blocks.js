@@ -433,6 +433,79 @@ export function subagentRowFor(turn, payload) {
 }
 
 // ---------------------------------------------------------------
+// Consultation posture
+// ---------------------------------------------------------------
+
+/**
+ * What a consultation is permitted to do, as a standing condition rather
+ * than as an event.
+ *
+ * The posture — "no tools and no repository access" — is true of every
+ * consultation before the model has said anything, and the browser has always
+ * treated it as an arrival: a `consultation_posture` system event, routed by
+ * `agent_id` into the consultation's tab. That worked while the tab was the
+ * surface people read. It does not survive inline-as-default (AG-29), where a
+ * reader who never opens a tab would be shown an answer with no statement of
+ * what produced it — and there is no fallback channel, because this notice
+ * deliberately raises no toast (one per consultation is a notification the
+ * reader learns to dismiss).
+ *
+ * So the posture becomes framing on the container, read from here. Which
+ * means it has to be able to **retract**, and that is the whole reason this
+ * is a store and not a constant. `_grounding` in src/aic_dc/antigravity/
+ * bridge.py already does exactly this for the model's copy: on a breach it
+ * replaces the assurance outright rather than appending to it, because "a
+ * paragraph that asserted the isolation held and then mentioned that it had
+ * not would be read by exactly the wrong half of its audience". A banner
+ * authored from container identity alone would rebuild that bug in the
+ * browser, proclaiming containment directly above the row saying it failed.
+ *
+ * Four states, not two. `consultation_unverified` retracts differently from
+ * `consultation_breach`: the app does not *know* what happened, and flattening
+ * that into "containment failed" manufactures the certainty the unverified
+ * branch exists to refuse. Each notice carries its own sentence, so this
+ * stores the sentence rather than deriving one from the subtype.
+ */
+const POSTURE_RANK = {
+  consultation_posture: 0,
+  consultation_ungrounded: 1,
+  consultation_unverified: 2,
+  consultation_breach: 3,
+};
+
+/**
+ * Record one consultation notice as the container's standing condition.
+ *
+ * Monotonic in severity, and that is load-bearing rather than tidy. The
+ * posture event arrives *first*, at the head of every consultation, so a
+ * last-write-wins store would be correct until an incident and correct
+ * again after it. But `consultation_ungrounded` is raised once at the first
+ * refusal and further refused calls render beneath it, and nothing orders a
+ * late posture against an early breach across a reconnect replay. Ranking
+ * means a retraction cannot be overwritten by the assurance it retracted.
+ */
+export function noteConsultationPosture(panel, agentId, subtype, notice) {
+  if (!panel || !agentId || !notice?.text) return false;
+  const rank = POSTURE_RANK[subtype];
+  if (rank === undefined) return false;
+  if (!panel._consultationPosture) panel._consultationPosture = new Map();
+  const held = panel._consultationPosture.get(agentId);
+  if (held && held.rank >= rank) return false;
+  panel._consultationPosture.set(agentId, {
+    rank,
+    text: notice.text,
+    severity: notice.severity || 'info',
+  });
+  return true;
+}
+
+/** The standing condition for one consultation, or null if none was said. */
+export function consultationPosture(panel, agentId) {
+  if (!panel || !agentId) return null;
+  return panel._consultationPosture?.get(agentId) || null;
+}
+
+// ---------------------------------------------------------------
 // Reconnect replay
 // ---------------------------------------------------------------
 

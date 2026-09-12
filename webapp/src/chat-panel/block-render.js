@@ -29,7 +29,13 @@ import { renderMarkdown } from '../markdown.js';
 import { toRepoPath } from '../repo-path.js';
 import { costLabel, modelUsageLines, taskUsage } from '../turn-cost.js';
 
-import { collectToolPaths, isTodoWrite, latestTodos, toolStatus } from './blocks.js';
+import {
+  collectToolPaths,
+  consultationPosture,
+  isTodoWrite,
+  latestTodos,
+  toolStatus,
+} from './blocks.js';
 import { revealHealth } from './health-banner.js';
 
 // ---------------------------------------------------------------
@@ -175,13 +181,32 @@ function subagentBlocksKey(row) {
  * inline made a delegated turn read as though it had happened twice
  * (specs5/5-webapp/chat.md § Subagent Activity).
  *
- * No auto-expand branch, deliberately, and in particular not one for a live
- * subagent: the head already carries the running status and the tool the
- * subagent is in, which is the part worth watching from the main transcript.
+ * No auto-expand branch for a delegated subagent, deliberately, and in
+ * particular not one for a live one: the head already carries the running
+ * status and the tool it is in, which is the part worth watching from the
+ * main transcript.
+ *
+ * A **consultation** is the exception, and it is expanded by default because
+ * the duplication argument above does not hold for it. A `Task` subagent's
+ * nested blocks are its tool calls and its result is a terse summary, so the
+ * two are different things and drawing both is a repeat. For a consultation
+ * the nested stream *is* the answer — there are no tool calls, the gate
+ * permits none — and the one thing collapsing it saves the reader is the
+ * answer they asked for. So this is the default surface (AG-29), and the
+ * `second_opinion` card beside it stays collapsed under `blockExpanded`,
+ * which leaves exactly one copy on screen.
+ *
+ * The check is `typeof === 'boolean'` rather than `=== true` so that an
+ * explicit collapse is a value this can read back. Against `=== true` a user
+ * who closed a consultation would store `false`, be told `false !== true` is
+ * just "unset", and get the default back — a disclosure that reopens itself.
  */
 export function subagentBlocksExpanded(panel, row) {
   const key = subagentBlocksKey(row);
-  return key ? panel?._blockExpansion?.get(key) === true : false;
+  if (!key) return false;
+  const explicit = panel?._blockExpansion?.get(key);
+  if (typeof explicit === 'boolean') return explicit;
+  return row?.task_type === 'consultation';
 }
 
 /** Flip a subagent's nested cards and repaint. */
@@ -1138,6 +1163,38 @@ function openSubagentTranscript(panel, row) {
 }
 
 /**
+ * The consultation's standing condition, as framing on its container.
+ *
+ * Above the answer and outside it, matching `_grounding`'s reasoning on the
+ * model's copy of the same claim: whatever appears below is subordinate to
+ * the framing above it, so "this is the app speaking, not the consultant" is
+ * a structural statement rather than an assurance the consultant could have
+ * written itself.
+ *
+ * Only for consultations. A delegated subagent has tools and a repository and
+ * nothing to declare, and a banner over every `Task` row would be exactly the
+ * dismissible furniture that the posture notice already declines to be when
+ * it withholds its toast.
+ *
+ * Falls back to the sentence rather than rendering nothing when no notice has
+ * arrived, because the missing case is a live consultation in its first
+ * moments — the container exists before the event does, and a banner that
+ * appears a beat late reads as something having gone wrong. The fallback is
+ * the unretracted posture, which is the only state a consultation can be in
+ * before anything has been observed about it.
+ */
+function renderConsultationPosture(panel, row) {
+  if (row?.task_type !== 'consultation') return nothing;
+  const held = consultationPosture(panel, row.agent_id || row.key);
+  const severity = held?.severity || 'info';
+  const text = held?.text
+    || 'A second opinion runs with no tools and no repository access.';
+  return html`
+    <div class="consultation-posture ${severity}" role="note">${text}</div>
+  `;
+}
+
+/**
  * A subagent's row, with its tool cards indented beneath it.
  *
  * The row spins until its status is terminal. `terminal` latches from either
@@ -1237,6 +1294,7 @@ export function renderSubagentRow(panel, row, blocks, candidates, settled) {
             `
           : nothing}
       </div>
+      ${renderConsultationPosture(panel, row)}
       ${row.summary
         ? html`<div class="subagent-summary md-content">
             ${unsafeHTML(renderMarkdown(row.summary))}
