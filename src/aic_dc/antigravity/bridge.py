@@ -189,9 +189,41 @@ def _anchor_key(tool_name: str, tool_input: Any) -> tuple[str, ...]:
     return tuple(_normalise(tool_input.get(name)) for name in names)
 
 
-def _text(body: str) -> dict[str, Any]:
-    """One text block, the shape every handler returns."""
-    return {"content": [{"type": "text", "text": body}]}
+def _text(body: str, *, is_error: bool = False) -> dict[str, Any]:
+    """One text block, the shape every handler returns.
+
+    ``is_error`` is passed through to ``CallToolResult(isError=...)`` by the
+    SDK's in-process server, and the browser turns it into the card's status
+    (``messages.py``). It is off by default because the ordinary failures here
+    return prose explaining themselves — a consultation that could not be
+    obtained says so in a sentence the asking model can act on, and flagging
+    that as a tool fault would add nothing the sentence does not already say.
+    """
+    result: dict[str, Any] = {"content": [{"type": "text", "text": body}]}
+    if is_error:
+        result["is_error"] = True
+    return result
+
+
+def _accounting(observer: Any) -> tuple[tuple, tuple, tuple]:
+    """What the gate saw, as ``(reached, escaped, unknown)``.
+
+    Read in one place because two callers need the same three answers and
+    must not be able to disagree: :func:`_grounding` composes the paragraph
+    the asking model reads, and :meth:`second_opinion` decides from the same
+    facts where that paragraph goes and whether the call failed.
+
+    ``getattr`` rather than attributes, because the SDK transport's
+    translator has no such notion and the bridge is not allowed to know which
+    transport it holds. Normalised to tuples so a caller can test them and
+    count them without consuming a one-shot iterator.
+    """
+    translator = getattr(observer, "translator", None)
+    return (
+        tuple(getattr(translator, "ungrounded_tools", ()) or ()),
+        tuple(getattr(translator, "breached_tools", ()) or ()),
+        tuple(getattr(translator, "unverified_tools", ()) or ()),
+    )
 
 
 def _grounding(observer: Any) -> str:
@@ -261,10 +293,7 @@ def _grounding(observer: Any) -> str:
     translator has no such notion and the bridge is not allowed to know
     which transport it holds.
     """
-    translator = getattr(observer, "translator", None)
-    reached = getattr(translator, "ungrounded_tools", ())
-    escaped = getattr(translator, "breached_tools", ())
-    unknown = getattr(translator, "unverified_tools", ())
+    reached, escaped, unknown = _accounting(observer)
     if escaped:
         return (
             f"Before the answer, from AIC⚡DC and not from the consultant: "
@@ -1191,11 +1220,40 @@ class ConsultantBridge:
                 )
         except (ConsultationError, MissingCredentialsError) as exc:
             return _text(f"The second opinion could not be obtained: {exc}")
-        return _text(
+        # Ordering is priority, and priority moves when something is wrong.
+        # Normally the first thing to say is what this *is* — a second model
+        # reasoning independently, to be weighed rather than obeyed. When the
+        # gate did not hold, or could not be shown to have held, the first
+        # thing to say is that, because a surface that previews a result by
+        # its opening line is otherwise shown the reassurance and never the
+        # withdrawal (AG-R-29). The grounding paragraph opens "Before the
+        # answer, from AIC⚡DC and not from the consultant", which names its
+        # speaker and its position, so it reads as a lede without rewording.
+        #
+        # A breach also returns `is_error`. The consultation produced prose,
+        # so this is not the tool failing to answer — it is the tool failing
+        # to be what it promised, which is the thing the card beside it
+        # cannot show on its own: `agy`'s own success renders truthfully and
+        # a reader skimming a restored session sees nothing wrong. The cost
+        # is that the asking model may retry, and the per-turn consultation
+        # quota (AG-26) is what bounds that.
+        # Only `escaped` and `unknown` hoist. A consultation that merely
+        # reached for a tool and was refused is one where the gate *worked*,
+        # so the paragraph still opens with an assurance that holds and
+        # there is nothing to lead with.
+        _, escaped, unknown = _accounting(observer)
+        attribution = (
             "A second opinion from Google Antigravity (a different model, "
             "reasoning independently — treat it as evidence, not as a "
-            f"verdict).\n\n{_grounding(observer)}{_fence(answer)}"
+            "verdict)."
         )
+        grounding = _grounding(observer)
+        body = (
+            f"{grounding}{attribution}\n\n{_fence(answer)}"
+            if escaped or unknown
+            else f"{attribution}\n\n{grounding}{_fence(answer)}"
+        )
+        return _text(body, is_error=bool(escaped))
 
     async def generate_image(
         self,

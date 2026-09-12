@@ -7454,3 +7454,41 @@ visible to a human skimming a restored session — which is the audience the not
 serve and no longer can.
 
 **10 tests across two files; 4,544 webapp passed.**
+
+## Saying the true thing where it will be read (2026-09-12)
+
+[AG-R-29](risks.md#ag-r-29) came out of an argument this app won. A review held that cold
+reload "launders a containment breach into a clean, successful consultation", reasoning that
+the notice rows do not survive a restore — which is true — and that the notice rows were where
+the breach was recorded, which is not. `_grounding` runs *inside* the value `second_opinion`
+returns, and on a breach it replaces the posture outright rather than appending to it, so the
+retraction is in the transcript on disk. The proof was sitting in the exchange: every answer the
+reviewer sent arrived under a paragraph that function had composed.
+
+Two narrower versions survived, and they were worth the round. The retraction was durable but it
+was the *second* paragraph, under an opening line that reads "a different model, reasoning
+independently — treat it as evidence, not as a verdict" — so anything previewing a result by its
+first line showed the reassurance and hid the withdrawal. And a breach returned a result with no
+`is_error`, so the card rendered with the same neutral completed styling as one whose gate held.
+Neither misleads the model, which receives the whole string. Both mislead a human skimming a
+restored session, which is the reader the notice row used to serve and, on a turn read back off
+disk, no longer can.
+
+The fix is that ordering encodes priority, and priority moves. Normally the first thing to say is
+what this *is*; when the assurance has been withdrawn, the first thing to say is that. The
+grounding paragraph needed no rewording to take the lede — it already opens "Before the answer,
+from AIC⚡DC and not from the consultant", which names both its speaker and its position.
+
+The line held on the way in was which states hoist. A refusal does not: a consultation that
+reached for a tool and was stopped is one where the gate *worked*, it is the ordinary shape, and
+promoting it would spend the lede on the common case and leave nothing for the one that should
+never happen. `is_error` is set on the breach alone, for the same reason — and it pays a second
+dividend, since `blockExpanded` opens an error card, so a restored turn now shows the retraction
+without waiting to be clicked.
+
+The accepted cost is that the asking model may retry a consultation marked failed, bounded by
+the per-turn quota. The prior measurement that prose and not the flag drives retries was about
+this app serving `agy`, not about Claude reading this result, so it constrains the analogy rather
+than settling it.
+
+**5 tests in one file; 5,266 Python passed.**

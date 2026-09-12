@@ -2729,7 +2729,7 @@ consultation outliving its turn emits blocks tagged with the new turn, which the
 spill into the main transcript. That was raised during AG-28's review as a regression and is not one: it
 behaves identically with the minted scope and predates the anchor entirely.
 
-## AG-R-29 — A breached consultation reads as successful to someone skimming a cold transcript
+## AG-R-29 — A breached consultation reads as successful to someone skimming a cold transcript **(closed 2026-09-12)**
 
 [AG-29](decisions.md#ag-29) established that a containment breach *is* durable across a
 reload, against a review that argued it was not: `_grounding` composes the retraction inside
@@ -2765,3 +2765,33 @@ Not a risk, though it was raised as one: that the live banner would proclaim con
 a breach row. That is closed by construction in AG-29 — the banner reads a severity-monotonic
 store rather than the container's identity, so a retraction cannot be overwritten by the
 assurance it retracted.
+
+### Closed, 2026-09-12
+
+Both halves are built. **Ordering is priority, and priority moves when something is wrong**: the
+grounding paragraph is hoisted above the "A second opinion from Google Antigravity …"
+attribution when `escaped` or `unknown` is non-empty, so a truncating surface leads with the
+withdrawal. It needed no rewording to do the job — it already opens *"Before the answer, from
+AIC⚡DC and not from the consultant"*, which names its speaker and its position. The attribution
+moves rather than goes away: the model still has to be told this is a second opinion and not a
+verdict.
+
+`reached` alone deliberately does **not** hoist, and that is the line worth holding. A
+consultation that reached for a tool and was refused is one where the gate *worked* — it is the
+ordinary shape and it happens constantly — so the paragraph still opens with an assurance that
+holds. Promoting it would spend the lede on the common case and leave nothing for the one that
+matters.
+
+`is_error` is set on a breach and on nothing else. Not because the tool failed to answer — it
+answered, and the answer is still passed through verbatim below — but because it failed to *be
+what it promised*, which is the one thing the card beside it cannot show, since `agy`'s own
+success renders truthfully. The browser turns that into the card's `error` status, and
+`blockExpanded` returns `true` for an error card, so a breached consultation on a restored turn
+now opens showing the retraction rather than waiting to be clicked.
+
+**The accepted cost:** an `is_error` result may make the asking model retry the consultation.
+That is bounded by the per-turn quota ([AG-26](decisions.md#ag-26)), and it is on a path the
+notice's own comment calls "the only notice in this file that should never fire". A prior
+measurement (E1, `consult_listener.py`) found that it is the *prose* and not the flag that
+decides whether `agy` retries; that was about this app serving `agy`, not about Claude reading
+this result, so it constrains the analogy rather than settling it.

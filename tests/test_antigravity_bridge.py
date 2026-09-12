@@ -441,6 +441,103 @@ class TestTheAskingAgentIsToldWhatWasRefused:
         assert "unverified rather than as absent" not in text
 
     @pytest.mark.asyncio
+    async def test_a_breach_leads_the_result_instead_of_following_it(self):
+        """AG-R-29. Ordering is priority, and priority moves when the
+        assurance has been withdrawn.
+
+        The retraction was durable already — it travels inside the value
+        this returns, which is what a restored session renders, and that
+        is why the review's "cold reload launders a breach" was refuted.
+        What it was *not* is first. A surface that previews a tool result
+        by its opening line showed "a different model, reasoning
+        independently — treat it as evidence", which is the reassurance,
+        and put the withdrawal below the fold. A human skimming a restored
+        session is exactly the reader the tab's row used to serve and, on a
+        turn read back off disk, no longer can.
+        """
+        fake = self.Refusing(escaped=("read_url_content",), answer="6.19.")
+        text = body(await ConsultantBridge(fake).second_opinion("Which?"))
+        assert text.index("that did not hold") < text.index(
+            "reasoning independently"
+        ), "the withdrawal leads; the attribution follows it"
+        assert text.startswith("Before the answer"), (
+            "the grounding paragraph names its speaker and its position, so "
+            "it reads as a lede without being reworded for the job"
+        )
+        assert "reasoning independently" in text, (
+            "the attribution moves, it does not go away — the model still "
+            "has to be told this is a second opinion and not a verdict"
+        )
+
+    @pytest.mark.asyncio
+    async def test_an_unwatched_call_leads_too_because_it_also_retracts(self):
+        """``unverified`` withdraws the certainty rather than the
+        containment, and a preview that leads with the assurance is wrong
+        by the same amount either way."""
+        fake = self.Refusing(unknown=("view_file",), answer="6.19.")
+        text = body(await ConsultantBridge(fake).second_opinion("Which?"))
+        assert text.startswith("Before the answer")
+        assert text.index("is not something this app can establish") < text.index(
+            "reasoning independently"
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_refusal_alone_does_not_disturb_the_ordering(self):
+        """The gate *worked*, so the paragraph still opens with an
+        assurance that holds and there is nothing to lead with.
+
+        This is the case the hoist must not capture. A consultation that
+        reached for a tool and was refused is the safe one — it is the
+        ordinary shape, it happens constantly, and promoting it would make
+        the lede meaningless for the case that needs it.
+        """
+        fake = self.Refusing(denied=("search_web",), answer="6.19.")
+        text = body(await ConsultantBridge(fake).second_opinion("Which?"))
+        assert text.startswith("A second opinion from Google Antigravity")
+        assert text.index("reasoning independently") < text.index(
+            "got nothing back"
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_clean_consultation_keeps_the_attribution_first(self):
+        fake = self.Refusing(answer="6.19.")
+        text = body(await ConsultantBridge(fake).second_opinion("Which?"))
+        assert text.startswith("A second opinion from Google Antigravity")
+        assert "nothing below was read" in text
+
+    @pytest.mark.asyncio
+    async def test_only_a_breach_marks_the_call_as_failed(self):
+        """``is_error`` is what gives the card its status, and the status
+        is what a reader sees without expanding anything.
+
+        Not because the tool failed to answer — it answered, and the answer
+        is passed through verbatim below. Because it failed to *be what it
+        promised*, which is the one thing the card cannot show on its own:
+        `agy`'s own success renders truthfully beside it.
+
+        The three quieter states are deliberately not errors. A refusal is
+        the gate working; an unwatched call is missing certainty, not
+        missing containment; and a clean consultation has nothing to say.
+        Marking any of them would spend the badge on the ordinary case and
+        leave nothing for the one that should never happen.
+        """
+        answer = "6.19."
+        cases = {
+            "breach": (dict(escaped=("read_url_content",)), True),
+            "refusal": (dict(denied=("search_web",)), False),
+            "unwatched": (dict(unknown=("view_file",)), False),
+            "clean": ({}, False),
+        }
+        for name, (kw, expected) in cases.items():
+            result = await ConsultantBridge(
+                self.Refusing(answer=answer, **kw)
+            ).second_opinion("Which?")
+            assert result.get("is_error", False) is expected, name
+            assert quoted(result) == answer, (
+                f"{name}: the answer is passed through either way"
+            )
+
+    @pytest.mark.asyncio
     async def test_a_transport_with_no_such_notion_is_not_an_error(self):
         """The SDK translator has no ``ungrounded_tools`` and never will.
 
