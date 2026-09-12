@@ -2064,3 +2064,413 @@ close frame goes out under a two-second `wait_for`, and the transport is aborted
 The strict-FIFO consequence is enforced by construction rather than by a test: the queue is a `deque` and
 the only operations on it are `append` and `popleft`. There is nowhere for a coalescer or a priority to
 live, which is the point.
+
+## AG-24 — The consultation transport, measured end to end **(measured 2026-09-12, unbuilt)**
+
+[AG-22](#ag-22) chose authenticated HTTP MCP from a `--help` text and two probes. Choosing the mechanism
+was the easy half. This entry is what five rounds of
+[`.claude/skills/consult-agy`](../../.claude/skills/consult-agy/SKILL.md) and a scratch server on
+`127.0.0.1` established about how that mechanism actually behaves — including three facts that decide
+build details, and two that refute things a reviewer and this maintainer both believed.
+
+### Measured
+
+| Question | Result |
+|---|---|
+| Which MCP dialect does `agy` speak? | **Streamable HTTP.** SSE is offered by the config but the client drives the HTTP app |
+| Does the bearer header survive? | **Yes**, intact, on every request including the initialise handshake |
+| Config key | **`serverUrl`**, not `url`, alongside a `headers` object, in `$HOME/.gemini/config/mcp_config.json` |
+| Protocol negotiation | Falls back `2026-07-28` → `2025-11-25` on a 400 |
+| **MCP client timeout** | **Exactly 3m0s.** 60s succeeded (1m12s wall); 180s failed at 3m11s with `MCP tool call to server "probehttp" timed out after 3m0s: context deadline exceeded` |
+| What `agy` does at the deadline | POSTs a cancellation notification, which the server 202s. **The scratch server ignored it and the tool ran to completion** |
+| Consultation latency, `claude_agent_sdk.query()` | **2.6–20.3s** across five runs, longest on a 2700-character answer |
+
+**The timeout is the number the design turns on.** A reviewer called an unmeasured client timeout *"your
+most dangerous critical path risk"* and predicted 10s or 30s, which would have collapsed the synchronous
+`second_opinion` contract into an asynchronous polling architecture MCP supports poorly. At 3m0s against
+a 20s consultation the contract holds with roughly five times headroom once `agy`'s own turn overhead
+(~11s, measured as the delta between a 60s sleep and its 1m12s wall time) is counted. No polling design
+is needed. The reviewer was right to refuse to defer the probe and wrong about what it would find, and
+neither of us could have known which without running it.
+
+**The cancellation notification is load-bearing and easy to miss.** `agy` does the correct thing at its
+deadline; the scratch server did not, and logged `done after 180.0s` where it should have logged
+`CANCELLED`. Left that way, a timed-out consultation keeps a `query()` subprocess running and keeps
+spending the subscription on an answer nobody will read — the *same* failure this decision's parent
+rejected the `run_command` design for, reappearing on the transport that replaced it. Cancellation must
+reach the invocation's cancellation token. Two constraints on how, both from the reviewer and both
+accepted: it fires on the **explicit JSON-RPC notification only, never on a socket drop**, because a
+loopback reset or a recycled keep-alive is not an intentional cancellation and treating it as one
+rebuilds exactly the sink-detachment defect this project already fixed; and the original request must
+still complete with a valid JSON-RPC error rather than a dropped connection.
+
+### `agy` does not name MCP tools, and a gate that assumes it does enforces nothing
+
+The sharpest finding, because it is the shape of a defect this project has already shipped once. A live
+`PreToolUse` payload for an MCP call:
+
+```json
+{"conversationId": "bc8a510a-…", "modelName": "gemini-3.8-flash-high", "stepIdx": 4,
+ "toolCall": {"name": "call_mcp_tool",
+              "args": {"ServerName": "probehttp", "ToolName": "probe_ping",
+                       "Arguments": {"message": "TURN-ONE"}}}}
+```
+
+**Every MCP tool arrives as `call_mcp_tool`**, with the server and tool in the *arguments*, under keys
+capitalised the way the wire spells them. A quota or a policy written as `tool_name == "second_opinion"`
+matches nothing, falls through to the default branch, and enforces nothing — while a unit test that
+drives the handler with a synthetic `second_opinion` event passes. That is
+[AG-R-13](risks.md#ag-r-13)'s string-comparison failure reproduced on a new seam. The key is
+`(args.ServerName, args.ToolName)`, and a `call_mcp_tool` whose arguments do not parse must deny.
+
+**And every MCP call is two hook events, not one.** At `stepIdx: 2`, before the call, `agy` reads the
+tool's JSON schema off disk as a first-class `view_file` against
+`…/antigravity-cli/mcp/<server>/<tool>.json` — a path *outside the workspace*, under its private config
+root, and cached thereafter (turn two showed no schema read). Two consequences. A quota counting hook
+events rather than `call_mcp_tool` events would be exhausted by the schema read before the call it meant
+to govern ever ran. And `tools.py` classifies `view_file` as `read` with no path scoping, so this works
+today by accident: the day a policy scopes reads to the workspace, MCP discovery breaks, and it breaks
+as *"the model didn't call the tool"* rather than as a denial anybody can see. The schema directory
+belongs on an explicit allowed-read list, admitted by policy rather than by omission.
+
+### Two beliefs refuted, kept because the refutation is the useful part
+
+- **`tools=[]` does not make Claude refuse.** The reviewer predicted the CLI's baked-in prompt would
+  leave the model answering *"I don't have access to tools to read the codebase"*, and required that our
+  system prompt **completely overwrite** the base prompt. Measured both ways: with an adversarial system
+  prompt, 20.3s, `terminal='completed'`, `turns=1`, 2739 characters of prose; with **no system prompt at
+  all** — the exact condition called unsafe — 15.1s, `completed`, `turns=1`, 2238 characters. One turn
+  each also retires the `max_turns=1` and `interrupt=True` questions left open in
+  [`blank-sheet-architecture.md`](../7-future/blank-sheet-architecture.md).
+- **A private `$HOME` does not cost `agy` its Google auth.** Already recorded in `roots.py`, restated
+  because a reviewer proposed it again: credentials live in the login keyring reached over the session
+  bus, so `DBUS_SESSION_BUS_ADDRESS` and `XDG_RUNTIME_DIR` in `PASSTHROUGH` are the load-bearing part.
+
+### Where the allow-rule lives, for anything that drives `agy` headlessly
+
+Not on the shipping path — this host spawns `agy` with `--dangerously-skip-permissions` precisely so its
+own hook is the only gate — but every probe and test harness needs it, and both halves are
+counter-intuitive. The grammar is **`mcp(<server>/<tool>)`** with `mcp(*)` as wildcard, extracted from
+the binary, whose own examples are `mcp(*)`, `mcp(chrome_devtools/*)` and
+`mcp(chrome_devtools/evaluate_script)`; `mcp(<server>)` alone is malformed and fails **silently**, with
+the same message as no rule at all. The file is **`$HOME/.gemini/antigravity-cli/settings.json`** —
+bisected against five candidates, with `.gemini/settings.json`, `.gemini/config/settings.json`,
+`.config/antigravity/settings.json` and `.antigravity/settings.json` all failing. Note the directory: the
+hooks file this host installs is at `.gemini/config/hooks.json`. Two vendor config files, two
+directories, and the natural assumption that they share one is wrong.
+
+## AG-25 — The Claude consultant's isolation is two independent mechanisms, because one of them is undocumented **(measured 2026-09-12, unbuilt)**
+
+Step 2 of [`blank-sheet-architecture.md`](../7-future/blank-sheet-architecture.md) is a Claude
+consultant built on `claude_agent_sdk.query()`. The consultation contract is
+[AG-16](#ag-16)'s: one shot, no history, no tools, prose out. On the SDK the tool half is a single
+option — and the interesting question turned out not to be tools at all, but what the consultant *reads*.
+
+### `tools=[]`, not `allowed_tools=[]`
+
+`allowed_tools=[]` is a **literal no-op**: `subprocess_cli.py:597` guards the flag with
+`if effective_allowed_tools:`, so an empty list emits no flag and the CLI keeps its defaults. `tools`
+is the option with the empty-list contract — `if self._options.tools is not None:` at line 582 emits
+`--tools ""` — and the SDK's own docstring says so: *"`[]` (empty list) — Disable all built-in tools…
+To restrict which tools the model may call without being prompted, use `allowed_tools` instead."* A
+consultant written with the wrong one of these is ungated and nothing says so.
+
+### The reading half, and why one flag is not enough
+
+`setting_sources=[]` is the documented control for filesystem settings — the docstring is explicit that
+`None` *"loads all sources (matches CLI defaults)"* and that `"project"` is what loads `CLAUDE.md`. So
+the default is the dangerous one, and the fix is one field rather than the sterile temp directory a
+reviewer prescribed. Measured against a planted repository — a nonce in `CLAUDE.md`, an instruction to
+open every reply with a nonsense word, a distinctive branch, a modified file and an untracked file — the
+consultant answered exactly `NO GIT CONTEXT`, quoted nothing, and never used the nonsense word.
+
+**We are using the sterile directory anyway, and the reason is the point.** The reviewer's stated reasons
+were both refuted: a real repository costs 8 `git` invocations against an empty directory's 3, and on
+this repository (1860 commits, 611 tracked files) every one of them — `status --short`, `log --oneline
+-n 5`, the 7-day `log` over `.claude/skills` — measures **sub-10ms**, which is noise beside a 20s
+consultation. The real reason is that `setting_sources` is documented to govern *settings files and
+`CLAUDE.md`* and says **nothing** about the git environment block. That the block is suppressed too is
+emergent behaviour measured on one SDK version, undocumented and free to change in a patch release — and
+if it changes, the symptom is a consultant that quietly starts receiving this repository's state with
+nothing anywhere saying so. That is this directory's recurring defect, and the standing lesson is
+*assert on the artefact, not on the mechanism*. So: sterile `cwd` **and** `setting_sources=[]`, neither
+load-bearing alone.
+
+The sterile directory only works if it is topologically detached, which is the reviewer's correction and
+is accepted: it must not live inside the repository tree, or git walks up and finds `.git` regardless of
+`cwd`, and `GIT_DIR`/`GIT_WORK_TREE` must be stripped from the consultant's environment or they override
+`cwd` outright.
+
+### The identity that leaks, and the test that must not be believed
+
+The consultant is told the **user's email address** and today's date regardless of `setting_sources`; it
+volunteered as much unprompted (*"The only context I've received is your email address and today's
+date"*), and `git config --get user.email` is one of the calls made in the `cwd`, so a repository with a
+work identity in its local git config discloses that one.
+
+A reviewer held that this was removable — `GIT_CONFIG_GLOBAL=/dev/null` and `GIT_CONFIG_SYSTEM=/dev/null`
+*"eliminates git-derived identity disclosure"*. **Measured, and it is not.** A consultation run with a
+sterile `cwd`, both of those set, and `GIT_DIR`/`GIT_WORK_TREE` neutralised, asked what email address its
+context contained, answered:
+
+```
+flatmax@gmail.com
+```
+
+So the identity comes from the authenticated account profile, not from git, and no environment hygiene
+reaches it. It is recorded here as a property of the consultant rather than mitigated, because the honest
+version of this entry is the one that says which exposures remain.
+
+The environment hygiene is still worth doing, and two details of it were measured rather than assumed.
+`ClaudeAgentOptions.env` **merges over** the inherited environment — `subprocess_cli.py:809` builds
+`inherited_env` and then spreads `options.env` across it — so a variable cannot be deleted, only
+overridden; `GIT_DIR=""` is enough, because git reports `fatal: not a git repository: ''` rather than
+falling back to a search. And `GIT_CEILING_DIRECTORIES`, which the same reviewer prescribed as the stop
+for upward traversal, **does not stop it**: from a subdirectory with the ceiling set to that
+subdirectory, `git rev-parse --show-toplevel` still resolved the parent repository. The control that
+works is the sterile `cwd` being genuinely outside the tree.
+
+**The regression test must not ask the model.** A test that plants a nonce and asserts the consultant
+cannot repeat it uses a stochastic oracle as its assertion harness: if a future SDK reopens the channel
+but the model declines to quote the nonce for reasons of its own, the test passes while the channel is
+wide open — *the thing was broken and nothing said so*, arrived at by the route that was supposed to
+prevent it. The artefact is the **outbound request body**. Capture it and assert the nonce is absent
+from the bytes. That assertion is mechanical, has no temperature, and is also what settles whether
+`--tools ""` removes the tool declarations from the prompt or merely refuses their execution — a
+question a reviewer raised about the `agy` consultant, where the tool set is the binary's and the hook
+is genuinely the only layer, and then generalised to this one, where it is measurable rather than
+arguable.
+
+---
+
+## AG-26 — The consultation listener, as built **(measured and built 2026-09-12)**
+
+**The question.** [AG-22](#ag-22) chose the mechanism — a second HTTP listener in this process, a bearer
+token per `agy` spawn, a per-spawn `mcp_config.json` — because the `run_command` design it replaced had
+nowhere to put a credential. [AG-24](#ag-24) measured the transport. This entry is what survived contact
+with the implementation, and it is mostly a list of things that turned out to be the opposite of the
+obvious choice.
+
+**Built:** `src/aic_dc/claude_code/consult_listener.py`, `tests/test_consult_listener.py` (26 tests, all
+driven through a real MCP client against a real socket rather than by calling the handler in-process —
+every property worth having here is a property of the wire, and an in-process test would pass just as
+happily with the middleware detached).
+
+### The five things that were measured rather than chosen
+
+**Stateful, never stateless.** `stateless_http=True` issues no session id, so a cancellation arriving on
+its own POST has no session in which to find the in-flight request: measured, the notification is 202'd
+and dropped, the tool runs to completion, and *the original request is never answered at all*. Stateful
+routes it, fires the handler's cancel scope immediately, and completes the original request with
+`{"code":0,"message":"Request cancelled"}`.
+
+**A dropped socket is not a cancellation**, and that is what makes the above safe rather than fragile: in
+stateful mode the transport outlives any single POST, so a dropped connection leaves the consultation
+running. Only the explicit notification stops it.
+
+**Uvicorn steals the host's signals.** `Server.serve()` calls `signal.signal()` for SIGINT *and* SIGTERM
+whenever it is on the main thread, replacing this application's handlers for the listener's whole
+lifetime. A one-method `capture_signals` override suppresses it and the server still serves; the cost is
+that nothing but `aclose()` can stop it, which is correct for an embedded listener.
+
+**The port must exist before the config naming it is written.** Handing `port=0` to uvicorn makes the
+port unknowable until its startup has run, and the config is written at spawn time — the obvious ordering
+is a race whose losing side is a config file pointing at port 0. A pre-bound socket handed to
+`serve(sockets=[sock])` gives the port synchronously. Measured (P5): that listening socket does **not**
+leak into the `agy` child — `child fds=3, socket-like=0`, listener inode absent.
+
+**`access_log=False`, but not `log_config=None`.** The access handler streams to `ext://sys.stdout`, so at
+any level below `error` it puts a line per request on the host's stdout. Switched off explicitly rather
+than by relying on the log level, which a later debugging change would silently undo. The companion claim
+— that embedding uvicorn clobbers the host's logging — was **refuted**: `disable_existing_loggers=False`,
+and the app and root loggers are untouched.
+
+### The stop button did not stop anything, and the hooks cannot see it
+
+Measured hook timeline around a 45-second in-flight MCP call:
+
+```
+PreToolUse      view_file        +0.0s
+PostInvocation                   +0.0s
+PreToolUse      call_mcp_tool    +2.0s
+        <-- 45 seconds of complete hook silence -->
+PostInvocation                   +47.0s
+Stop                             +48.8s
+```
+
+AIC-DC's ⏹ is not a process kill: it latches a gate that refuses *subsequent* tool calls and answers
+`terminate` at the next `PostInvocation`. Around an in-flight MCP call no hook fires at all. Combined with
+the dropped-socket measurement above, and with `agy` sending its own cancellation only at its 3m0s
+deadline, the consequence is that **pressing stop during a consultation stopped nothing** — the stop was
+queued behind the very thing it was stopping, and the subscription kept being spent on an answer nobody
+would read. This is precisely the failure [AG-22](#ag-22) rejected the `run_command` design for, arriving
+on the transport that replaced it.
+
+The fix is in-process and does not touch the wire: `cancel_session(session_id)` stops the consultation
+directly. It goes through `ClaudeConsultant.cancel()` rather than round it, because `cancel()` flags
+itself before cancelling and so converts its own cancellation into a typed `ConsultationError` — and that
+distinction is the only way the handler can tell *"the user stopped this"* from *"something cancelled
+**me**"*. Those two must never be answered the same way, which is the next entry.
+
+### A cancellation must never be answered with a success
+
+The handler catches `ConsultationError` and answers with text, because a stopped consultation is a result
+the caller can read. It catches `asyncio.CancelledError` and **re-raises**, because reaching there means
+something cancelled the handler itself — `agy`'s own deadline notification, or ASGI teardown — and
+answering that with a cheerful 200 tells the caller its cancellation failed, while putting words in the
+consultant's mouth: to a model, a successful tool result reads as Claude's considered advice.
+
+Two things in that branch are non-obvious and both are measured:
+
+- **Nothing in it may `await`.** Once the enclosing cancel scope has fired, the next await point re-raises
+  before its body runs, so awaited tidy-up is tidy-up that silently does not happen. The first version
+  awaited `consultant.cancel()` there and the consultation was never stopped.
+- **The inner task must be cancelled explicitly.** It is scheduled with `ensure_future`, so cancelling the
+  handler does not touch it; left alone it runs on unreferenced, spending the subscription with no handle
+  anywhere able to stop it.
+
+The test for this drives the raw `notifications/cancelled` frame. `ClientSession(read_timeout_seconds=…)`
+was tried first and is a trap: **measured, it times out locally and sends nothing at all**, so a test
+built on it passes against a mechanism that never fired.
+
+### The budget is two, and it counts answers while a second counter counts attempts
+
+Two rather than one because one is not a budget but a structural refusal: it breaks the pattern a master
+legitimately has — consult on the approach, implement, consult on the diff — and forces the user to send
+a message they do not need purely to advance a counter. Both limits stop a looping model at the same
+place. It is a loop guard, not a cost cap, and calling it a budget would claim a protection it does not
+provide: one consultation carrying a large diff is dearer than three narrow ones.
+
+Keyed on a **host-pushed turn id**, never on the token, because an `agy` spawn is one process across many
+turns so every turn presents the same bearer; a budget keyed on the token alone is spent by turn one and
+gone for the life of the conversation. `end_turn` takes the turn id and clears only on a match — the host
+calls it from a `finally`, so a slow turn one can close after turn two has opened, and closing whatever
+happens to be current would leave turn two unable to consult with nothing anywhere saying why.
+
+A failed consultation is **refunded**: it is reached over the network, so a 429 or a dropped connection is
+an ordinary event, and charging a turn for a tool that never ran locks a master out for the rest of it.
+Refunding without limit would hand back the loop guard, since a model that retries an error *is* the
+loop — so attempts are counted separately and never refunded.
+
+The check-and-set holds a lock **per grant**, not per listener. `agy` was measured not to dispatch MCP
+tool calls in parallel — told to make two simultaneously, the second POST arrived at the instant the first
+returned — so nothing races today; the lock stays because that serialisation is emergent, undocumented,
+measured on one version, and its absence fails by silent double-spend.
+
+### Discovery is answered 404, on standards grounds
+
+`agy` probes `/.well-known/oauth-protected-resource` and `.../mcp` twice per spawn, unauthenticated, and
+tolerates the refusal. Unauthenticated is correct of it: RFC 9728 discovery happens *before* a client
+presents a credential, precisely so a token is not leaked to an endpoint that turns out not to want one.
+Answering a bearer challenge there is a category error — the probe is a REST GET, not a JSON-RPC call.
+Measured: 404 and 401 behave identically and neither adds delay. 404 is chosen because it says plainly
+that this server does not do OAuth discovery and the static configuration is the whole story.
+
+### The session table needs both a timeout and a sweep, and the tidy path is the one that leaks
+
+See [AG-R-25](risks.md#ag-r-25). An idle TTL was prescribed by review, dropped on one measurement, and
+then restored by two more — the reversal and its correction are recorded there rather than here, because
+what settles it is a leak rather than a decision.
+
+### What four probes overturned, after the listener was already built
+
+Rounds 9 and 10 of review put four rulings from the section above back under measurement. Three of them
+were wrong, and the fourth was right for a reason that was not the one given.
+
+**A subagent *is* distinguishable, and "unbuildable" was wrong.** [AG-R-24](risks.md#ag-r-24) required
+that a delegate not spend the master's quota, and the first cut recorded that clause as unbuildable: a
+bearer names a session, not which agent inside it is asking. Measured on a real `start_subagent`
+delegation, that is false. The delegate's `tools/call` reached the *same* MCP session id over the *same*
+bearer with the *same* HTTP headers — nothing at the transport distinguished it — but its `params._meta`
+carried `antigravity.google/parent_conversation_id` beside its own `conversation_id`, and the master's
+call carried no parent at all. `ctx.request_context.meta.model_extra` exposes it. The listener now
+refuses a delegate *before* the budget check, so it spends neither an answer nor an attempt, and the
+refusal tells it to report upward rather than retry. Absent metadata means *not* a subagent, deliberately:
+every other MCP client sends no `_meta`, and failing closed would refuse the master.
+
+**The discovery probe's transport is closed at the gate.** `agy` opens every spawn with a session-less
+`server/discover`, and forwarding it makes the SDK build a transport that nothing can ever delete — no
+client session exists to send the `DELETE`. Ten spawns left twenty resident transports. The gate now
+answers that one method 404 itself: measured, `agy` proceeds straight to `initialize` without complaint
+and one spawn leaves **one** transport where it used to leave two. Matched on the `mcp-method` HTTP header
+rather than the JSON body, because reading a request body inside `BaseHTTPMiddleware` and then calling
+through is a known way to wedge the downstream app. That makes the filter contingent on a header a future
+`agy` might stop sending, so the grant's session set doubles as a tripwire: one spawn opens one session,
+and a second one under the same bearer logs a warning naming the filter. Degrading silently back to a
+leak the idle timer covers in four hours is survivable; degrading silently and *saying nothing* is the
+failure this file keeps recording.
+
+**The sweep's blind spot is a latency cost, not a leak.** Review held that `sweep_terminated()` cannot
+reach a session whose child crashed, because an abandoned transport is never marked terminated. Measured
+across six sessions — three closed with `DELETE`, three simply walked away from, which is what `SIGKILL`
+looks like on the wire — the two halves turn out to be *exactly complementary*: the sweep collects
+precisely the set the idle timer never will, and the timer collects precisely the set the sweep never
+will. Resident count reached zero either way. So nothing leaks permanently, and what the proposed fix buys
+is up to four hours of latency rather than correctness. It was built anyway, because `revoke()` runs on
+every child exit clean or unclean and therefore covers both sets at once, and because a table that is
+flat for a measurable reason is worth more than one that is flat eventually.
+
+### `isError` answers one question, and it is not "will the model retry?"
+
+The first cut returned every refusal as a success, on the theory that a flagged result would provoke a
+retry loop. Measured (E1) with two real `agy` runs — same prompt, same refusal text, the flag the only
+variable — there were **one tool call in each arm**. Both models reported the refusal plainly and answered
+from their own reasoning. The steering prose is what prevents the retry; the flag does nothing to it. (The
+measurement's limit: one run per arm, one model. It shows the flag cost nothing here, not that no client
+anywhere retries on it — which is why the prose stays on every path.)
+
+That freed the flag to carry its actual meaning, and the intermediate position — policy plain, failures
+flagged — could not be stated without contradicting itself: a call arriving with no turn open was flagged
+while a call arriving with no budget left was not, though both are the same refusal from the same kind of
+precondition. `isError=False` asserts *this string is the second opinion you asked for*. Said of a policy
+notice, it puts the notice into the transcript as the consultant's advice, and anything downstream asking
+whether a second opinion was obtained would find one. So: **only a consultation that happened comes back
+unflagged.** A spent budget, a refused delegate, a missing turn, a forged bearer, a crash and a user stop
+are all flagged, and all still carry prose saying what to do instead.
+
+**The trap under that, which no review predicted.** A FastMCP handler annotated `-> str` that returns a
+`CallToolResult` has its text **destroyed**. FastMCP derives an `outputSchema` from the return annotation,
+the result fails to validate against it, and what reaches the model is `Error executing tool
+second_opinion: 1 validation error for second_opinionOutput …` — flagged correctly and saying nothing
+anyone can act on. Annotating the handler `-> CallToolResult` emits no `outputSchema` at all, measured,
+leaves the input schema untouched, and both paths arrive verbatim. Losing the output schema costs nothing
+here: the tool returns prose for a model to read, and there is no structured result to describe. (Review
+justified this by claiming `outputSchema` is not part of MCP, which is wrong — it entered the 2025-06-18
+revision and `agy` initialises at `2025-11-25`. The conclusion holds on the narrower ground.)
+
+### The 3m0s deadline is a wall, and progress notifications do not move it
+
+The consultant's internal timeout is a guess about another process's clock, so the question was whether it
+had to be one. `agy` sends a `progressToken` on every `tools/call`, and a client that treats progress as
+liveness would let a consultation run as long as it kept reporting — which would make the internal timeout
+a deadman's switch at some large value rather than a number chosen 30 seconds inside somebody else's.
+
+Measured, two arms, the tool sleeping 280s either way. The armed arm reported progress every 10 seconds:
+17 notifications went out, and `agy` cancelled at **exactly 180.0s** into the call with
+`{"reason":"context deadline exceeded","requestId":4}`. The silent control cancelled at **exactly 180.0s**
+with the same frame. Progress is not liveness. The deadline is a per-call wall measured from `tools/call`,
+and there is no design that avoids it.
+
+Two consequences settle the number. First, when the deadline fires, what reaches the model is *`agy`'s*
+sentence — `MCP tool call to server "probehttp" timed out after 3m0s: context deadline exceeded` — and
+never a sentence this host wrote. An internal timeout strictly inside 180s is the only way the model is
+told what to do instead of being told a tool broke. Second, the failure is handled either way: `agy`
+reported it accurately, finished the turn `SUCCESS`, and did **not** retry, while on this side the
+cancellation notification reaches the handler, refunds the answer, and cancels the consultant. So the
+margin is not protecting against a runaway; it is buying the right to say something.
+
+Two further arguments against shaving it, both from review and both worth recording because the first one
+is not about prose at all. A response still being flushed at 179.9s meets `agy`'s context cancellation
+mid-write — a half-closed socket and an unfinished chunked frame, rather than a clean JSON-RPC 200 — so
+the margin is also what guarantees the refusal arrives *well-formed*. And the two clocks are not
+comparable: `agy`'s deadline is a Go runtime timer on an OS thread, ours is an `asyncio` timer in a
+process that also serialises frames and does file I/O, so a host under load can fire a 175s timer at 181s
+and lose the race it was written to win. Against that, what the slack costs is close to nothing: a healthy
+consultation returns in tens of seconds, and one still running at 150s is stalled rather than thorough.
+**150s stands** — against a wall measured at 180.0s twice, in both arms, with no variance. Review put the
+floor at 165s; there is no reason to go looking for it.
+
+The first run of this probe measured nothing, and is recorded because of how it failed: the harness gave
+up 45 seconds after the last stdout frame and killed `agy`, whose teardown cancelled the in-flight call
+with `{"reason":"context canceled"}`. Both arms reported a cancellation at 45.0s, identically, and read as
+a result. A cancellation frame is not evidence of a deadline until its `reason` has been looked at.

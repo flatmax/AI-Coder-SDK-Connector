@@ -1970,3 +1970,182 @@ obvious enough to build unasked.
 **Tripwire.** A test that fails a consultation deliberately and asserts something readable survives,
 with the path named in the log. Assert on the **artefact** — that a named directory exists and holds the
 conversation's files — never that a branch was taken.
+
+## AG-R-24 — Every turn-boundary signal `agy` offers is the wrong one, and the plausible wrong choice fails open
+
+[AG-24](decisions.md#ag-24) settles that a consultation from an `agy` master arrives as `call_mcp_tool`
+and must be counted by its arguments. This is the other half: **what a "turn" is**, for a quota of one
+consultation per turn. Every candidate signal in `agy`'s hook payloads is misleading, and the one a
+careful reviewer picked is the one that silently permits unlimited consultations.
+
+**Measured 2026-09-12**, two turns in one conversation, dumping handlers on all three events:
+
+```
+PreToolUse      stepIdx=2                  view_file      (schema read)
+PostInvocation            invocationNum=0
+PreToolUse      stepIdx=4                  call_mcp_tool  msg=TURN-ONE
+PostInvocation            invocationNum=1
+PostInvocation            invocationNum=2
+Stop                                       executionNum=0
+PreToolUse      stepIdx=9                  call_mcp_tool  msg=TURN-TWO
+PostInvocation            invocationNum=0
+PostInvocation            invocationNum=1
+Stop                                       executionNum=0
+```
+
+- **`invocationNum` is not a turn counter and keying on it fails open.** It restarts at 0 each turn *and
+  increments repeatedly within one* — three times in turn one, twice in turn two, once after each model
+  step. A counter reset on `PostInvocation` is therefore reset several times per turn, and the defeating
+  sequence is the ordinary one: consult, `PostInvocation` arrives, counter resets, consult again. "One
+  per turn" becomes "one per model step", enforced by code that looks like it is enforcing something.
+- **`stepIdx` never rolls back, so a rollback fallback is dead code.** It is monotonic across the whole
+  *conversation*: turn one used 2 and 4, turn two opened at **9**. A fallback conditioned on
+  `stepIdx <= last_seen` can never fire, so the lock-out it exists to prevent is exactly what happens if
+  the primary signal is ever dropped — a quota that refuses every consultation for the life of the
+  conversation, and a feature that stops working after one use.
+- **`Stop` is the only one-per-turn signal**, firing once at the end of each turn with `executionNum: 0`.
+
+**The mitigation is to stop inferring.** The gate is this process's own in-process server, inside the
+session that dispatches the turn, so the turn identity is ours already and does not need to be
+reconstructed from vendor telemetry. Reset the counter where the prompt is dispatched. Every
+hook-derived key makes a security control depend on a vendor event arriving, and the failure of that
+delivery is invisible in both directions. `Stop` is worth keeping as a *corroborating* signal only if a
+disagreement is an assertion rather than a log line nobody reads: `dispatch_count == stop_count` in the
+integration suite, and a recorded desync — a `Stop` outside a turn, or a second `Stop` within one —
+surfaced in session diagnostics, because a second `Stop` before the next dispatch would mean `agy` had
+completed a turn this host never dispatched.
+
+Three further conditions, all from the reviewer and all accepted. The check-and-set must be **atomic**,
+because a model may emit parallel `call_mcp_tool` calls in one step and a non-atomic `if count < 1`
+approves both. **Subagents must not spend the master's quota** — `invoke_subagent` children get their own
+`conversationId` and can outlive the turn, so a consultation belongs to the master conversation or it is
+denied. *(Closed 2026-09-12, after first being recorded as unbuildable: see the measurement below.)* And a reactive wakeup — a background `run_command` completing and waking the agent with no new
+prompt — shares the dispatching turn's single consultation, which is the intended reading of a *user*-turn
+quota but should be a stated one rather than an accident.
+
+**Tripwire, and it must be a positive artefact.** `mock_server.call_count == 1` is an assertion on
+absence dressed as a count: it passes if the second call was never attempted, if routing broke, or if the
+process died. Prompt the master to consult twice in one turn and assert three things that only exist when
+the quota actually fired — a structured `QUOTA_DENIAL` record from the handler, exactly one request at the
+consultant server, and the denial string present in the *model's* transcript at the second
+`call_mcp_tool` step. `agy` returns a refused hook's reason into the transcript as
+`tool call denied by pre-tool hook: <reason>`, so that third assertion fails loudly whether the quota
+failed open or the model never made the second call.
+
+**Concurrency, measured rather than assumed (2026-09-12).** The quota is an atomic check-and-set under a
+per-grant lock, which counts correctly under concurrency but does not *serialise execution*: two calls
+arriving together would both pass and run two consultations side by side. Whether that is reachable is a
+property of `agy`'s planner, so it was measured instead of argued. Prompted explicitly to issue two
+`second_opinion` calls at once and not to wait for the first, `agy` **serialised them** — the second
+`tools/call` arrived 2.7 seconds *after* the first returned, and peak concurrency inside the handler was
+**1**. So the execution lock is not needed today. The limit is worth stating: one prompt, one model, one
+run, and nothing on this side depends on that ordering — the lock protects the counter, which is the part
+that would be wrong if a later `agy` did fan out.
+
+---
+
+## AG-R-25 — The MCP session table is reclaimed in exactly one place, and it is not the one that runs
+
+**Measured 2026-09-12 against `mcp` 1.29.0.** Ten spawns of `agy`'s observed handshake — the rejected
+`server/discover`, then `initialize`, `notifications/initialized`, `tools/list`, `tools/call`, and a clean
+`DELETE /mcp` — left **twenty** transports resident in `StreamableHTTPSessionManager._server_instances`
+and reclaimed none of them:
+
+```
+spawn  1: discover_sid=yes after_discover=1  after_init=2  DELETE=200 after_delete=2
+spawn  2: discover_sid=yes after_discover=3  after_init=4  DELETE=200 after_delete=4
+     ...
+spawn 10: discover_sid=yes after_discover=19 after_init=20 DELETE=200 after_delete=20
+```
+
+Two separate leaks, and they need two separate fixes because **one is fixed by the idle timeout and the
+other is made permanent by it**:
+
+- **The rejected `server/discover` registers a transport.** `agy` opens one on every spawn, the SDK
+  answers 400, and no `DELETE` ever follows it — nothing is left that would ever close it.
+- **A cleanly terminated session is never removed.** The SDK pops a session in exactly one place, the
+  idle-scope path, and its other cleanup is guarded by `not http_transport.is_terminated`. An explicit
+  `DELETE` sets that flag, so the guard skips the very sessions that were closed properly. Measured
+  directly: after a TTL fired, `discover(400) transports still resident: 0/3`, `DELETEd sessions still
+  resident: 3/3`, with `is_terminated=True` on each. **The tidy path is the leaking one.**
+
+**The mitigation is both halves.** `session_idle_timeout` is set on the session manager — FastMCP has no
+settings key for it, so it is assigned after `streamable_http_app()` and before any traffic, since the
+deadline is read when a session is created — and `sweep_terminated()` drops terminated entries at the
+spawn boundaries, which is where the leak is generated, so the table stays flat across a long-lived host
+without anything having to wake up.
+
+### The reversal, recorded because the correction came from measurement on both sides
+
+A reviewer prescribed an idle TTL. It was then **dropped entirely** on the strength of one measurement —
+`agy` never rebuilds a session the server has forgotten, reporting `failed to connect (session ID: …):
+session not found` and giving up — with the reasoning that any TTL shorter than a conversation is a bug
+generator and any TTL longer is inert. The reviewer called that an over-correction, on the grounds that
+eviction being fatal had been shown while sessions surviving long idleness had not.
+
+Both halves were then measured. **P1**: one `agy` process, a turn, a 900-second gap with no traffic
+whatsoever, then a second turn — the same session id was reused, with no re-initialize and both TCP
+connections held open throughout. So idleness is survived, and a TTL of minutes would be a bug generator.
+**P8**, above: with no TTL nothing is ever reclaimed, so a TTL is not inert.
+
+The over-correction was real, and the specific error is worth naming: the TTL was being judged as a
+*correctness* mechanism, which the eviction measurement does refute, when it is a *garbage collection*
+mechanism, which only the leak measurement could settle. Four hours is past any gap a live conversation
+plausibly has and still reclaims an abandoned one the same day.
+
+**The residual cost is stated rather than hidden.** A conversation left idle longer than the TTL loses its
+consultant for the rest of its life, because of the eviction measurement above — `agy` will not rebuild
+the session. The failure is loud (`session not found` reaches the user), and the remedy is restarting the
+engine, but it is a real degradation and not a theoretical one.
+
+**The subagent clause, closed on a measurement that reversed a ruling (2026-09-12).** When the listener
+was built, this clause was recorded as unbuildable and the quota shipped at ◑: the gate sees one bearer
+per `agy` spawn, and a bearer names a session, not which agent inside it is asking. Measured on a real
+`start_subagent` delegation, that is false in the only place it matters. The delegate's `tools/call`
+reached the **same** MCP session id, over the **same** bearer, with the **same** HTTP headers — nothing at
+the transport told them apart — but `params._meta` did:
+
+```
+master's own call:  {"antigravity.google/artifacts_dir":            ".../brain/51e16a25-…",
+                     "antigravity.google/conversation_id":          "51e16a25-…",
+                     "progressToken":                               "d95f27e9-…:4"}
+subagent's call:    {"antigravity.google/artifacts_dir":            ".../brain/dfa77e15-…",
+                     "antigravity.google/conversation_id":          "dfa77e15-…",
+                     "antigravity.google/parent_conversation_id":   "51e16a25-…",
+                     "progressToken":                               "146bb0ad-…:2"}
+```
+
+`parent_conversation_id` appears on the delegate's call and nowhere else, and
+`ctx.request_context.meta.model_extra` exposes exactly those namespaced keys. The listener refuses a
+delegate **before** the budget check, so it spends neither an answer nor an attempt — which matters more
+than tidiness, because `agy` can dispatch delegates concurrently, and delegates that could spend would
+exhaust the master's two before the master reached the synthesis the budget was reserved for. The refusal
+is instructional: report upward that no second opinion was available, so the agent that delegated can seek
+one. Absent metadata means *not* a subagent, deliberately — every non-`agy` MCP client sends no `_meta`,
+and failing closed would refuse the master.
+
+---
+
+**A second reclamation path, and what the sweep structurally cannot reach (2026-09-12).** Review held that
+`sweep_terminated()` has a blind spot: a child that dies without closing its session leaves
+`is_terminated=False`, and the sweep only collects `True`. Measured across six sessions — three closed
+with `DELETE`, three simply walked away from, which is what `SIGKILL` looks like on the wire:
+
+```
+immediately:   resident 6;  DELETEd -> True,True,True ; walked-away -> False,False,False
+after sweep:   swept 3;     DELETEd -> gone           ; walked-away -> False,False,False   (resident 3)
+after the TTL: DELETEd gone ; walked-away gone ; resident 0 ; _session_owners 0
+```
+
+The blind spot is real in the narrow sense, and the two halves are **exactly complementary**: the sweep
+collects precisely the set the TTL never will, and the TTL collects precisely the set the sweep never
+will. Nothing leaks permanently, so what the proposed fix buys is up to four hours of latency rather than
+correctness — the reviewer's diagnosis was right and their reason was not. It was built regardless:
+`revoke()` runs on every child exit, clean or unclean, and now terminates and forgets every session id the
+gate recorded under that bearer, whatever the flags say. `terminate()` is idempotent, so the two halves
+may overlap.
+
+Both tables it reclaims from — `_server_instances` and `_session_owners` — are private to the SDK, so a
+rename in a later release would turn eviction into a silent no-op. The listener checks for both at startup
+and logs by name if either is missing, because the failure this file keeps recording is not a leak, it is
+a leak that says nothing.

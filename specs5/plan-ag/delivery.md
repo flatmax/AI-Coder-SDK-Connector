@@ -6436,3 +6436,270 @@ lesson [`risks.md`](risks.md) § *The second way it failed open* records. It has
 `install.py`'s `hook_runs()` executes the hook command before writing it. A consultation cannot see the
 tree, so it re-derives good advice that has already been taken, and the only defence against banking
 that as new work is to check every recommendation against the source before accepting it.
+
+## Five rounds, and the two rulings that measurement reversed (2026-09-12)
+
+Migration step 2 — a Claude consultant, closing the half of [AG-1](decisions.md#ag-1) that never
+existed — went through five rounds of
+[`.claude/skills/consult-agy`](../../.claude/skills/consult-agy/SKILL.md) before a line was written.
+The reviewer declared convergence at round four. **Two of its rulings were false, and both were found
+by probing an invariant it had reasoned about rather than measured.** That is the whole argument for
+the protocol's fourth step, and it is worth recording in the order it happened.
+
+### What the rounds actually settled
+
+The reviewer's most useful contribution was a refusal. It called an unmeasured MCP client timeout
+*"your most dangerous critical path risk"*, predicted 10s or 30s, and demanded a probe before a line
+of step 4 was written — because at that value the synchronous `second_opinion` contract collapses into
+an asynchronous polling architecture MCP supports poorly. Probed: **exactly 3m0s**, against a
+consultation measured at 2.6–20.3s. The contract holds. It was right to refuse to defer the probe and
+wrong about what it would find, and there was no way to know which without running it.
+
+Its other objections went four ways. **Refuted:** that `tools=[]` leaves the CLI's base prompt
+commanding file inspection so the model would refuse rather than answer — measured with *no system
+prompt at all*, the condition it called unsafe, and the model answered in full prose in one turn.
+**Half-refuted:** that `cwd=repo_root` costs latency and leaks paths — it costs five extra `git`
+invocations, all sub-10ms on a 1860-commit tree, and a consultant inside a planted repository answered
+`NO GIT CONTEXT` about its own branch. **Accepted:** that the verification harness must be
+out-of-process rather than Claude-consulting-Claude. **Adopted over our own proposal:** a structural
+one-per-turn quota instead of a `max_budget_usd` guard that may guard nothing, since subscription
+billing reports no cost.
+
+### The sterile directory is right for a reason the reviewer never gave
+
+Both of its arguments for it were measured away, and it is being built anyway.
+`setting_sources` is documented to govern settings files and `CLAUDE.md`; it says **nothing** about
+the git environment block. That the block is suppressed too is emergent behaviour on one SDK version,
+undocumented, free to change in a patch release — and if it changes, the symptom is a consultant
+quietly receiving this repository's state with nothing saying so. That is this directory's recurring
+defect, and the standing lesson is *assert on the artefact, not on the mechanism*. So both mechanisms
+ship, neither load-bearing alone. Conceding a conclusion while rejecting its reasons is not a tie: the
+reason is what a future reader needs to know whether the decision still holds.
+
+Its own prescriptions for that directory then failed the same way. `GIT_CEILING_DIRECTORIES` **does
+not stop upward traversal** — with the ceiling set to a subdirectory, `git rev-parse --show-toplevel`
+still resolved the parent. And `GIT_CONFIG_GLOBAL=/dev/null` does **not** eliminate the account email
+it claimed it would: a consultation with a sterile `cwd`, both config variables at `/dev/null` and
+`GIT_DIR` neutralised, asked what email it had been given and answered `flatmax@gmail.com`. That
+identity comes from the authenticated profile, not from git, and no environment hygiene reaches it.
+[AG-25](decisions.md#ag-25) records it as an exposure that remains rather than one that was closed.
+
+### The ruling that failed open, and the fallback that was dead code
+
+The reviewer keyed the quota on `(conversationId, invocationNum)` from the `PostInvocation` hook, with
+a *"self-healing"* fallback that reset when `stepIdx` rolled back. Two turns in one conversation, with
+dumping handlers on all three events, killed both halves at once. `stepIdx` is monotonic across the
+**conversation** — turn one used 2 and 4, turn two opened at **9** — so the rollback condition can
+never be true and the fallback is unreachable code protecting against the lock-out it was written to
+prevent. And `invocationNum` is not a turn counter at all: it restarts at 0 each turn *and increments
+within one*, three times in turn one. A counter reset on `PostInvocation` is reset after every model
+step, so "one consultation per turn" silently becomes "one per step". The primary mechanism does not
+fail to self-heal; it **enforces nothing**, in code that reads as though it does.
+
+The fix abandons the framing rather than patching it. The gate is this process's own in-process server
+inside the session that dispatches the turn, so the turn identity is ours already and needs no
+reconstruction from vendor telemetry. [AG-R-24](risks.md#ag-r-24) carries the rest, including the three
+conditions the reviewer supplied that survived: an atomic check-and-set, because a model can emit
+parallel calls in one step; subagents denied rather than spending the master's quota; and a positive
+denial artefact in the transcript instead of `call_count == 1`, which is an assertion on absence
+dressed as a count.
+
+### The probe that changed how the gate must be written
+
+`agy` does not surface MCP tools as first-class names. Every one arrives as `call_mcp_tool` with the
+server and tool in the *arguments* — so a gate written as `tool_name == "second_opinion"` matches
+nothing, falls through to its default, and enforces nothing, while a unit test driving the handler with
+a synthetic event passes. That is [AG-R-13](risks.md#ag-r-13)'s string comparison on a new seam, and
+neither the reviewer's three guesses at the name nor ours was right. The same payload showed that every
+MCP call is **two** hook events, the first a `view_file` of the tool's schema outside the workspace,
+which today is permitted only because `view_file` has no path scoping.
+
+### Built, and the mutation that made the test worth having
+
+`claude_code/consultant.py` and fourteen tests. The isolation test asserts on the **captured outbound
+request body** — `ANTHROPIC_BASE_URL` is honoured, so a loopback server sees the exact bytes that would
+have gone to the API, and answers `400` so nothing is spent. The first version answered `500` and the
+CLI retried with backoff until the test hung.
+
+Mutation is what made it real, and it caught a defect in the test rather than in the code. Swapping
+`tools=[]` for `allowed_tools=[]` and `setting_sources=[]` for `None` made the leak assertion fail with
+the `CLAUDE.md` nonce in the payload — but the *tools* assertion still passed. One consultation makes
+three API calls, all carrying the prompt, and only the later two declare tools; the assertion was
+anchored on the first, which declares none no matter what. Asserting across every captured request
+instead needs no theory about which request is which, and under the same mutation it now fails with 58
+tools going out. A test that cannot fail is worth nothing, and the only way to know which kind you have
+written is to break the thing it watches.
+
+## The listener, and the two ways a cancellation can be silently absorbed (2026-09-12)
+
+Migration step 4. `claude_code/consult_listener.py` is an authenticated HTTP MCP server on
+`127.0.0.1:0` that publishes exactly one tool, `second_opinion`, to exactly one caller: the `agy`
+subprocess holding the bearer token minted for its session. It is [AG-22](decisions.md#ag-22), and it
+is the far half of [AG-1](decisions.md#ag-1) — the direction that has never existed, where an `agy`
+master reaches `claude` as a consultant. Twenty-six tests, every one of them through a real MCP client
+against a real socket, because a listener tested by calling its handler function directly is a listener
+whose transport is untested and whose transport is the entire point. Recorded as
+[AG-26](decisions.md#ag-26); its worst finding is [AG-R-25](risks.md#ag-r-25).
+
+### Five properties that were measured rather than chosen
+
+The module docstring lists them, and the reason it lists them is that each one reads like a design
+preference and none of them is.
+
+**Stateful, not stateless.** P1 ran one `agy` process through turn 1, a **900-second idle gap with zero
+traffic**, and then turn 2. It reused session id `1987df11` for the second turn with no re-initialize,
+both TCP connections established the whole way through. M12 had already established the other side: a
+session `agy` has forgotten is never rebuilt, it is reported as `session not found`. So the client
+holds a session id indefinitely and cannot recover one, which bounds any expiry from both directions
+and makes `stateless_http=False` a measurement rather than a preference.
+
+**The `Context` parameter is stripped from the generated tool schema.** Checked, because a host
+parameter that leaked into the schema would invite the model to fill it in.
+
+**The pre-bound listening socket does not leak into the child.** P5: `child fds=3 socket-like=0`, the
+listener's inode absent from the `agy` process. The socket is bound before the server starts so the
+port is known in time to write the config, which puts an open listening fd in the parent at the moment
+of the spawn; it does not survive into the child.
+
+**A cancellation notification cancels the handler body and the original request still answers.** P7b
+sent an explicit `notifications/cancelled` and the in-flight call completed with
+`{"jsonrpc":"2.0","id":42,"error":{"code":0,"message":"Request cancelled"}}` — which is what
+[AG-24](decisions.md#ag-24) required and what settled the re-raise design below.
+
+**Discovery is a 404, not a 401.** `agy` probes `/.well-known/oauth-protected-resource` and
+`/.well-known/oauth-protected-resource/mcp` on every connect. A 401 with no `WWW-Authenticate` invites
+an OAuth flow that does not exist here; the gate answers anything outside `/mcp` with a plain 404 and
+the client proceeds on its bearer.
+
+### The hole in the stop, and the fix that had to be in-process
+
+`agy`'s own deadline is 3m0s. The user's ⏹ is immediate. Between them sits a consultation that can burn
+tokens for minutes with nobody watching — the same runaway-spend failure that got the `run_command`
+design rejected, rebuilt on the transport that replaced it. So the stop had to reach the consultation,
+not merely the master, and the route is in-process: the listener holds the live `Consultant` object and
+calls its `cancel()`, which is the only path that produces the honest
+`ConsultationError("The consultation was stopped.")` instead of an ambiguous task cancellation.
+
+The rule that fell out of it: **a cancellation must never be answered with a success.** The handler
+re-raises `CancelledError` rather than converting it to prose, because prose is a successful tool result
+and the model would treat a stop as an answer.
+
+### The two ways a cancellation gets silently absorbed, and both were in the first cut
+
+**One: a cancelled branch that awaits does nothing at all.** The first version of the `except
+asyncio.CancelledError` branch called `await _stop(flight)` and took the grant lock to refund. Once a
+cancel scope has fired, the next `await` re-raises immediately — before the body runs. The cleanup and
+the refund never happened, and nothing said so. That branch is now entirely synchronous, with a comment
+saying why nothing in it may await, because the next person to add a line there will want to await
+something.
+
+**Two: the obvious way to test it never reaches the wire.** The reviewer proposed driving the test with
+`ClientSession.call_tool(read_timeout_seconds=...)`. Measured: it times out **locally and sends
+nothing at all** — no `notifications/cancelled` frame, no request on the socket. The handler body was
+only cancelled later, at session teardown, which meant the test was asserting on a mechanism that had
+never fired. It now POSTs the raw cancellation frame, which is what `agy` actually sends at its
+deadline. This is the recurring shape in this directory once more: the thing was broken and nothing
+said so, and the test agreed with it.
+
+### The table that is reclaimed in exactly one place, and it is not the one that runs
+
+P8 was meant to check a reviewer's claim about session lifetime. It found something worse, and
+something they had not predicted. Ten spawns produced **twenty resident transports and zero
+reclamations**. Two independent leaks:
+
+- `agy` POSTs `server/discover` before `initialize`. The SDK rejects it with a 400 **after** registering
+  a transport, and nothing ever deletes that one — no client session exists to send a `DELETE`.
+- A cleanly `DELETE`d session is *also* never removed, because the SDK's only non-idle cleanup path is
+  guarded by `not is_terminated`.
+
+P8c isolated it after a TTL fired: `discover(400) still resident: 0/3`, `DELETEd still resident: 3/3`,
+all three with `is_terminated=True`. **The tidy path is the leaking one.** The well-behaved client that
+closes its session is the one whose entry is immortal; the malformed probe that never got a session is
+collected by the idle sweep.
+
+This reversed a ruling of ours, and the error is worth naming because it is a category error rather
+than a slip. Having watched P1 hold a session across a 900-second silence, the idle TTL had been judged
+*wrong* and removed — a session that outlives its timeout would be unrecoverable, so the timeout looked
+like a correctness hazard. It is not a correctness mechanism, it is a garbage collector, and the two
+leaks above are what removing it costs. The mitigation is both halves: the TTL restored at four hours,
+comfortably beyond any observed gap, plus an explicit `sweep_terminated()` at spawn boundaries that
+drops terminated entries from both the instance table and the owner map. Neither alone is sufficient;
+that is the whole of [AG-R-25](risks.md#ag-r-25).
+
+### The budget is two, and the reason it is not one
+
+[AG-R-24](risks.md#ag-r-24) specified one consultation per turn. It ships at two, and the argument is
+this app's own practice: a single second opinion is an essay, and the standing instruction in this
+repository is to converge over rounds. One is a quota that forbids the thing the feature is for.
+
+Three details around it, each of which was a way to get it wrong:
+
+- The lock is **per grant**, not per listener. A shared lock makes two unrelated sessions serialise
+  against each other for no reason.
+- A failure **refunds** the spend, but a *separate* attempt counter does not refund, and it is what
+  actually bounds the work. Refund-on-failure alone is an unbounded retry loop for any consultation
+  that reliably fails.
+- Spending the budget returns **prose instructing the model to proceed with its own reasoning**, not an
+  error. A model handed "denied" retries; a model told "this is a per-turn limit, not a failure" stops.
+
+### What is built, and what is emphatically not
+
+The listener, its gate, its budget, its cancellation, its session hygiene, and 26 tests — the whole
+suite at 5,123 green. What is *not* built is the wiring: minting at spawn, writing `mcp_config.json`
+into [AG-21](decisions.md#ag-21)'s private root, `begin_turn`/`end_turn` at the turn-push site,
+`cancel_session` from the ⏹ path, and `revoke` plus `sweep_terminated` on subprocess exit. Until that
+exists nothing can call this, so [AG-1](decisions.md#ag-1)'s asymmetry is closed on paper and nowhere
+else. It is its own row in the unbuilt list rather than a footnote on a struck-through one, because a
+tested server that no client reaches is exactly the kind of work that reads as finished.
+
+One clause of the quota is unbuilt and will not be built by this mechanism: AG-R-24 required denying
+subagents rather than letting them spend the master's quota. A bearer token names a session. It does
+not name which agent inside that session is asking, and the listener has no other signal — so a
+subagent spends the master's two. That is why the row is ◑.
+
+*(Reversed the same day by measurement — see the next section. The claim was wrong, and it is left
+standing here rather than edited away because what it got wrong was not the conclusion but the habit:
+it reasoned from what a bearer token means instead of looking at what arrived on the wire.)*
+
+## Four probes, three reversals, and a deadline that could not be designed around (2026-09-12)
+
+The listener above shipped with a paragraph saying one clause of the quota "will not be built by this
+mechanism", and with three other rulings stated as firmly. Review named a probe for each. All four ran,
+and three came back the other way.
+
+The one that matters most reversed the paragraph: **a subagent is distinguishable after all**. The
+argument for unbuildable was tight — a bearer token names a session, not which agent inside it is asking —
+and it was checkable, which is the only reason it did not survive. On a real `start_subagent` delegation
+the delegate's call arrived on the same session id, over the same bearer, with the same HTTP headers, and
+carried `antigravity.google/parent_conversation_id` in `params._meta` where the master's carried no parent
+at all. The clause is now built, refusing a delegate before the budget check so it spends neither an
+answer nor an attempt, and the quota's row is ✅ rather than ◑.
+
+**`isError` was being used to predict behaviour rather than to describe a result.** Every refusal came
+back as a success, on the theory that flagging one would provoke a retry loop. Two real `agy` runs with
+the flag as the only variable produced one tool call in each arm. So the theory was empty and the flag was
+free — and once it was free, the position it had been propping up could not be stated without
+contradicting itself, since a call with no turn open was flagged while a call with no budget left was not.
+The rule now is one sentence: only a consultation that happened comes back unflagged.
+
+Under that sat a trap nobody predicted and no test would have caught, because the mechanism was working
+and only the payload was wrong. A FastMCP handler annotated `-> str` that returns a `CallToolResult` has
+its **text replaced** by a pydantic validation error — flagged correctly, and saying nothing anyone can
+act on. It was found by reading the bytes on the wire rather than by asserting on the flag, which is the
+same lesson this project keeps paying for: assert on the artefact, not the mechanism.
+
+The last question was whether the consultant's 150-second internal timeout had to be a guess about
+`agy`'s clock at all. `agy` sends a `progressToken` on every call, and if it treated progress as liveness
+the right design would not have been a tighter guess — it would have been streaming progress and demoting
+the timeout to a deadman's switch. Measured: seventeen progress notifications went out at ten-second
+intervals and `agy` cancelled at **exactly 180.0s** with `context deadline exceeded`. Progress is not
+liveness, and there is no design that avoids the wall. What settles the margin is not runaway risk —
+that path is handled, and `agy` reports the timeout accurately without retrying — but authorship: when the
+deadline fires, the model is told by `agy` that a tool broke, and the only way it is told what to do
+instead is if this host's own timeout fired first.
+
+That probe is also worth keeping for its first run, which measured nothing and looked conclusive. The
+harness gave up forty-five seconds after the last frame and killed `agy`, whose teardown cancelled the
+in-flight call; both arms reported a cancellation at 45.0s, identically, and the identical timing was the
+only thing that gave it away. A cancellation frame is not evidence of a deadline until its `reason` has
+been read.
