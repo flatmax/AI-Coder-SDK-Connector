@@ -2795,3 +2795,59 @@ notice's own comment calls "the only notice in this file that should never fire"
 measurement (E1, `consult_listener.py`) found that it is the *prose* and not the flag that
 decides whether `agy` retries; that was about this app serving `agy`, not about Claude reading
 this result, so it constrains the analogy rather than settling it.
+
+## AG-R-30 — A background subagent's tab shows the tail of its work and calls it the whole
+
+Found while building [AG-30](decisions.md#ag-30), in the code that change routes *around*
+rather than through. It is a defect in the delegated-subagent path and a consultation never
+reaches it, so this is a record rather than a fix.
+
+`loadSubagentFeedIfEmpty` (`webapp/src/chat-panel/tabs.js`) fills a settled subagent tab from
+its on-disk transcript, and declines when the tab already mirrored blocks:
+
+```js
+if ((tab.turnBlocks?.blocks?.length || 0) > 0) return false;
+```
+
+Its stated reason is sound and its gate is not. The doc comment says *"A tab with mirrored
+blocks already has the better view: live records the transcript on disk has not caught up
+with"* — a claim about **staleness**, and a true one, because disk lags a running subagent.
+But the function opens with `if (!sub.settled) return false;`, so it only ever executes
+against tabs where the subagent has finished and the lag is over. The rationale describes a
+state the guard never runs in.
+
+**The reachable sequence**, from three properties that are each individually deliberate:
+
+1. A background subagent still running at turn end is **not settled** — `settleLiveSubagentTabs`
+   skips any task the engine names in `background_tasks`, and the doc calls settling them
+   "this bug's most visible face". So the fallback, which requires `settled`, cannot fire in
+   the turn that spawned it.
+2. Subagent tabs are **dropped at every send** (`clearSubagentTabs`), so that turn's tab and
+   its blocks do not survive into the next turn.
+3. Tab creation is **not limited to `started`**: *"Called for every `subagentEvent`, not just
+   `started` … If that first event is already terminal the tab is created and settled in the
+   same call."*
+
+So the subagent's terminal event arrives during a later turn, creating a **fresh** tab and
+settling it in the same call. That tab mirrored only the blocks that landed in the later
+turn — the earlier ones went to a tab that no longer exists. It is settled, its block count is
+non-zero, the guard aborts the read, and the user is shown the end of the subagent's work with
+the beginning missing.
+
+**Head-truncation, not tail.** This is the more dangerous half. A record cut off at the end
+leaves visible seams — an unclosed thought, a tool call with no result — and reads as
+"something stopped". A record missing its beginning starts mid-thought under a completed
+status, so the user sees actions taken with no sight of the instructions or reasoning that
+produced them, and nothing on the surface says anything is absent.
+
+**Why it is not fixed here.** The honest fix is not deleting the guard: re-enabling the disk
+read for settled tabs that hold partial blocks means reconciling two orderings of the same
+work, and it runs straight into the specification's own open *Known gap*
+(`specs5/5-webapp/subagent-browser.md` § Tab Lifetime), which says the rest of a background
+subagent's output "lands mis-attributed rather than dropped" and that fixing it properly
+"means routing each message to the translator that owns it rather than to whichever turn is
+current, which is a change to the turn model rather than an addition to it". That is the work
+this belongs to, and folding it into a consultation-rendering change would make one commit out
+of two, with the harder half the one carrying no tests.
+
+Listed as unbuilt work in [README.md](README.md).

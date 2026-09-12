@@ -821,6 +821,23 @@ class TestTheConsultationGetsATab:
         assert row["tool_use_id"] == row["agent_id"] == row["task_id"]
 
     @pytest.mark.asyncio
+    async def test_the_row_says_it_has_nothing_on_disk(self):
+        """The comment beside ``agent_id``, as a field the browser can read.
+
+        Every reader of ``agent_id`` is a transcript *fetch*, and the fact
+        that there is nothing to fetch was written down only in a comment.
+        A comment is not readable from a tab strip, so each of those
+        readers had to infer a storage property from a UI task type —
+        which is how a future consultant-shaped tool with no transcript
+        ends up reading disk and reporting a missing session against a
+        subagent that behaved correctly.
+        """
+        bridge, seen = self.bridge_with_emit()
+        await bridge.second_opinion("Well?")
+        for row in self.events(seen, "subagentEvent"):
+            assert row.payload["has_transcript"] is False
+
+    @pytest.mark.asyncio
     async def test_the_tab_says_what_the_consultation_cannot_do(self):
         """And says it whether or not anything is ever refused.
 

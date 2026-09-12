@@ -177,6 +177,21 @@ describe('when the fallback stays out of the way', () => {
     expect(read).not.toHaveBeenCalled();
   });
 
+  it('cannot read a row that says it has no transcript', async () => {
+    const read = vi.fn().mockResolvedValue(TRANSCRIPT);
+    publishFakeRpc({ 'ClaudeCodeService.get_subagent_transcript': read });
+    const p = mountPanel();
+    await settle(p);
+    // A consultation. Its `agent_id` is minted, so this read would not come
+    // back empty — it would come back "this subagent has no readable
+    // transcript", which is an error about a record nothing ever wrote,
+    // reported against a subagent that did exactly what it was asked.
+    seedSubagentTab(p, { has_transcript: false });
+
+    expect(await loadSubagentFeedIfEmpty(p, 'agent_abc')).toBe(false);
+    expect(read).not.toHaveBeenCalled();
+  });
+
   it('does not touch Main, or a transcript tab read off disk', async () => {
     const read = vi.fn().mockResolvedValue(TRANSCRIPT);
     publishFakeRpc({ 'ClaudeCodeService.get_subagent_transcript': read });

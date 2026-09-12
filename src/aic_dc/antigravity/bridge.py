@@ -644,6 +644,21 @@ class ConsultantBridge:
             # consultation inside the card that spawned it.
             "tool_use_id": scope,
             "description": label,
+            # The comment above `agent_id`, as a field. That comment is the
+            # only place the browser's most consequential fact about this row
+            # was written down, and a comment is not readable from a tab
+            # strip: every reader of `agent_id` is a *transcript fetch*, and
+            # each one had to infer "there is nothing to fetch" from the row's
+            # type. Inferring a storage property from a UI classification is
+            # how a future consultant-shaped tool with no transcript ends up
+            # reading disk and reporting a missing session.
+            #
+            # Absent means "has one". The server's persistence predicate
+            # enumerates two tool names (`_SUBAGENT_TOOLS` in
+            # claude_code/history.py) and every other producer of this event
+            # is on that side of it, so only the one producer that knows
+            # otherwise has to say anything, and nothing else changes.
+            "has_transcript": False,
             "task_type": "consultation",
             "subagent_type": "Antigravity",
             "status": "running",

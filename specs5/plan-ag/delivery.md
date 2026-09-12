@@ -7492,3 +7492,82 @@ this app serving `agy`, not about Claude reading this result, so it constrains t
 than settling it.
 
 **5 tests in one file; 5,266 Python passed.**
+
+### The button that said "it's over there"
+
+A consultation's row carries a button, and until today pressing it produced a toast: *"That
+subagent is still active in the tab strip."* True, unhelpful, and — this is the part that took
+measurement to see — not an edge case. A consultation's tab is created eagerly and keyed by the
+row's `agent_id`, so the branch that says "already open, nothing to do" is the branch every
+single click took. The disk read the button was ostensibly for had a rarer life: it ran only
+when the tab had been closed or swept, and then it read by a **minted** id and failed, because
+`_announce` mints that id precisely so it names nothing on disk.
+
+So the affordance had two states, and both of them were a refusal. One refused politely and one
+refused with an error about a missing session, for a consultation that had done nothing wrong.
+
+The fix reads almost too small to write down — go to the tab instead of describing where it is —
+but the reason it had not been made is worth keeping. The skip existed for a real invariant: a
+subagent must not end up with a live feed and an archived snapshot of the same work side by side,
+and the live tab is the better view. That argument is correct and it is an argument about
+*replacing*. Nobody had ever argued for not *going* there. The conclusion had outlived the
+premise, and it took reading the branch out loud to notice.
+
+### Asking the right question about a record
+
+Four rounds of review went into what the button should do when there is no tab, and the
+disagreement was never about the answer. It was about which question decides.
+
+The reviewer's proposal was capability: *do I have retained blocks?* It is the better-smelling
+rule — no type checks in the view layer, no hardcoded tool names, self-limiting when the blocks
+are gone. It is also wrong, and measurement said so in one line: a delegated subagent's blocks
+are mirrored by the same mechanism and carry the same stamp. `has_blocks` is true for both
+kinds. It answers *can I project*; it never answers *should I*.
+
+What decides is whether a transcript exists on disk — and that is a property of the storage
+subsystem, which lives on the server. The server already knew. It had written the answer down
+next to the minted id: *"A consultation has no transcript on disk (its blocks live in memory
+only), so this id names something that cannot be fetched."* That sentence had been sitting in a
+comment while three separate affordances in the browser inferred the same fact from a task type.
+The change sends it as a field. Absent means "has one", so nothing that never heard of it moves.
+
+### A conclusion that outlived its argument
+
+The first reason offered for "project consultations, read disk for subagents" was that the
+transcript is strictly richer than the blocks — the blocks being what surfaced into the parent
+turn, the transcript being everything. The reviewer agreed enthusiastically and built vivid
+consequences on top of it: the user sees two blocks, concludes the agent barely did anything.
+
+Then the specification was read, and it says the opposite in as many words: *"Nothing is lost —
+it lands mis-attributed rather than dropped, and the transcript on disk is complete either
+way."* The two sources differ in **attribution**, not content. The function cited as proof of a
+content gap is documented three lines above as handling an attribution gap. The evidence had
+been read for its existence and not for its stated reason.
+
+That mattered enough to spend a round on, because an agreement bought with bad evidence is
+worth nothing until it is re-bought. The conclusion survived, on a better footing: a
+consultation is awaited *inside* its tool call and cannot outlive its turn, so one turn's blocks
+are exhaustive; a delegated subagent can outlive its turn, by design, and its later output is
+attributed to whatever turn is current when it lands. The rule is now about a mechanism the spec
+states directly rather than about a guess at content — and the guess, had it shipped, would have
+been a comment asserting something false about a neighbouring subsystem.
+
+### What the detour found
+
+Chasing that correction turned up a bug in the code this change routes around. A background
+subagent is deliberately not settled at turn end; its tab is dropped at the next send; its
+terminal event then arrives in a later turn and creates a *fresh* tab holding only that turn's
+blocks. That tab is settled and non-empty, so the disk-read guard — `blocks.length > 0`, whose
+doc comment reasons correctly about a *live* tab in a function that only ever runs on settled
+ones — aborts. The user gets the end of the subagent's work presented as the whole of it.
+
+Head-truncation, which is the worse kind. A record cut off at the end leaves seams: an unclosed
+thought, a tool call with no result, something that reads as "this stopped". A record missing its
+beginning starts mid-sentence under a completed status, showing actions with no sight of the
+instructions that produced them, and nothing on the surface says anything is absent.
+
+It is recorded as [AG-R-30](risks.md#ag-r-30) with the reachable sequence and the three quotes
+that make it reachable, and it is not fixed here. The honest fix reconciles two orderings of the
+same work and runs straight into the spec's own open *Known gap*, which says the repair "is a
+change to the turn model rather than an addition to it". Folding that in would have made one
+commit out of two, and the harder half would have been the one with no tests.

@@ -1879,7 +1879,12 @@ export function renderViewSubagentsAffordance(panel, msg) {
   for (const row of rows) {
     const agentId = typeof row?.agent_id === 'string' ? row.agent_id : '';
     if (!agentId) continue;
-    agents.push({ agent_id: agentId, label: subagentLabel(row) });
+    agents.push({
+      agent_id: agentId,
+      label: subagentLabel(row),
+      has_transcript: row.has_transcript,
+      tool_use_id: row.tool_use_id,
+    });
   }
   if (agents.length === 0) return '';
   if (agents.every(({ agent_id: id }) => panel._tabs.has(id))) return '';

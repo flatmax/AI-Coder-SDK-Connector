@@ -1154,7 +1154,17 @@ function openSubagentTranscript(panel, row) {
   panel?.dispatchEvent(
     new CustomEvent('view-subagents-requested', {
       detail: {
-        agents: [{ agent_id: row.agent_id, label: subagentLabel(row) }],
+        agents: [{
+          agent_id: row.agent_id,
+          label: subagentLabel(row),
+          // What decides whether the handler reads disk or projects. Sent as
+          // the row has it — the row is where the server put it — so the
+          // handler never has to infer a storage property from a task type.
+          has_transcript: row.has_transcript,
+          // The join key for a projection: blocks produced inside this
+          // subagent carry the spawning call's id as their `agent_id`.
+          tool_use_id: row.tool_use_id,
+        }],
       },
       bubbles: true,
       composed: true,

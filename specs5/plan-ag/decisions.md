@@ -2971,3 +2971,88 @@ Declined as out of scope rather than wrong: the review's general "invocation sta
 store-driven condition banner for every persistent agent property. There is one retractable
 claim in this system, it has an authoritative composer on the Python side, and the banner is
 a projection of that verdict rather than a second implementation of it that can drift.
+
+## AG-30 — A consultation's full view is projected from the turn, and the row's button goes to the tab it names **(measured and built 2026-09-12)**
+
+Migration step 3's remaining half. The inline card is now the default consultation surface
+([AG-29](#ag-29)); this is what happens when the reader asks for the whole thing.
+
+Three affordances reach a consultation's `agent_id`, and every one of them is a *transcript
+fetch*. That id is minted on purpose — `_announce` in `src/aic_dc/antigravity/bridge.py` says
+so in a comment, that "a consultation has no transcript on disk (its blocks live in memory
+only), so this id names something that cannot be fetched". So all three were armed to read a
+record that was never written, and the visible result was worse than the invisible one: because
+the consultation's tab is created eagerly and keyed by that same minted id, the row's own
+button hit the already-open branch and emitted **"That subagent is still active in the tab
+strip"** — telling the reader the thing was somewhere else while declining to take them there.
+That was not the edge case. It was every click.
+
+### The fact crosses the wire instead of being inferred
+
+The browser now decides by `has_transcript`, a field the announcing bridge sets to `False` and
+nobody else sets at all. **Absence means "has one"**, so every existing producer keeps the disk
+path it has always had and only the one producer that knows otherwise speaks.
+
+This was the review's sharpest contribution and it went through two forms before it was right.
+Its first proposal was to dispatch on **capability** — "do I have retained blocks?" — on the
+grounds that a type check in the view layer is an abstraction leak. Measurement refuted it: a
+delegated subagent's blocks are mirrored by the same mechanism and carry the same stamp, so
+`has_blocks` is true for both kinds and has no discriminating power at all. It answers *can I
+project*, never *should I*. Its second form is the one built: the question that decides is
+"does a transcript exist on disk for this id", that is a property of the storage subsystem,
+and the storage subsystem is on the server. The comment beside `agent_id` was already the
+answer; it just was not readable from a tab strip.
+
+### The projection is one turn's blocks, and that is exhaustive here
+
+`_projectSubagentBlocks` filters the settled turn's retained blocks to those stamped with the
+spawning call's id, and mounts them as a single assistant message — the same shape
+`ensureFeedMessage` gives a live subagent tab, so the projection draws through the renderer the
+user already read the work in rather than through a second representation of records the
+renderer knows how to draw.
+
+**Why one turn is the whole record for a consultation, and would not be for a subagent.** A
+consultation is awaited *inside* its tool call; `_announce` refuses to emit at all without a
+live request id, with a comment that the property "is satisfied by construction here — a
+consultation only runs inside a Claude turn". It cannot outlive its turn and cannot scatter
+blocks across later ones. A delegated subagent can, by design, and when it does the rest of its
+output is translated against whichever turn is current when it lands. A projection from one
+turn would show part of that work as though it were all of it — which is exactly the shape of
+[AG-R-30](risks.md#ag-r-30), found in the adjacent code while measuring this.
+
+This reasoning replaced a wrong one. The first argument put to review was that the on-disk
+transcript is *strictly richer* than the retained blocks, offered with the existence of the
+disk-fallback function as proof. The specification says the opposite in as many words —
+"nothing is lost — it lands mis-attributed rather than dropped, and the transcript on disk is
+complete either way". The sources differ in **attribution**, not in content, and the fallback
+exists to handle the first. The conclusion survived; the premise did not, and the replacement
+is about a mechanism the spec states directly rather than about a guess at content.
+
+### Activating is not loading
+
+The already-open branch now sets `_activeTabId` instead of emitting the toast. Declining to
+*replace* a live tab with a disk snapshot was always right — it is the better view of the same
+work — but declining to replace it and declining to *go* there are different decisions, and
+only the first was ever argued for.
+
+It also bumps the historical generation, through `bumpHistoricalGeneration`, newly split out
+of `clearHistoricalTabs`. The two were one function and are two operations: epoch invalidation
+and a retention policy. Activating a tab must cancel a transcript read still in flight — that
+read ends by activating itself, and would otherwise land on top of the tab the user just asked
+for — but it must **not** evict anything, because the user asked to go to a tab, not to clear
+the strip. Fusing them would also mean that making eviction conditional one day silently
+removes race protection from a caller that never wanted the eviction.
+
+### What it refuses to do
+
+`loadSubagentFeedIfEmpty` now declines a row that says it has no transcript. That read would
+not come back empty; it would come back *"this subagent has no readable transcript"* — an error
+about a record nothing ever wrote, reported against a subagent that did exactly what it was
+asked.
+
+A projection that finds nothing says so as well, rather than mounting a blank tab. That is the
+restored-session case: `_SUBAGENT_TOOLS` excludes `second_opinion`, so a turn restored from
+disk keeps a consultation's tool card and nothing else. The review was right to insist this be
+checked rather than assumed closed by construction — "do not rely on server-side exclusion
+across the network boundary" — even though the row that would trigger it is itself not
+restored.

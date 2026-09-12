@@ -382,6 +382,12 @@ export function applySubagentEvent(turn, payload) {
     // ("Explore") respectively. Only the second is worth showing; see
     // `subagent_type` in `_task_event` (src/aic_dc/claude_code/messages.py).
     task_type: null,
+    // Whether this subagent has a transcript on disk. Absent means it does,
+    // so every producer that never says anything keeps today's behaviour and
+    // only the one that knows otherwise speaks — see `has_transcript` in
+    // `_announce` (src/aic_dc/antigravity/bridge.py). Read by the three
+    // places that would otherwise fetch a transcript by `agent_id`.
+    has_transcript: true,
     subagent_type: null,
     status: null,
     last_tool_name: null,
@@ -397,6 +403,11 @@ export function applySubagentEvent(turn, payload) {
     patched.description = payload.description;
   }
   if (payload.task_type) patched.task_type = payload.task_type;
+  // Not the `if (payload.x)` idiom the rest of this function uses: the only
+  // value this field is ever sent with is `false`, which that idiom drops.
+  if (typeof payload.has_transcript === 'boolean') {
+    patched.has_transcript = payload.has_transcript;
+  }
   if (payload.subagent_type) patched.subagent_type = payload.subagent_type;
   if (payload.status) patched.status = payload.status;
   if (payload.last_tool_name) patched.last_tool_name = payload.last_tool_name;
