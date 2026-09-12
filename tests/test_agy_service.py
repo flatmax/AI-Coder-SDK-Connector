@@ -29,7 +29,7 @@ from pathlib import Path
 
 import pytest
 
-from aic_dc.agy import install
+from aic_dc.agy import install, roots
 from aic_dc.agy.service import AgyService
 from aic_dc.antigravity.service import AntigravityService
 from aic_dc.capabilities import ANTIGRAVITY
@@ -405,48 +405,49 @@ class TestTheModelSurface:
         assert counter.read_text().count("x") == 1
 
 
+@pytest.fixture
+def wired(tmp_path, monkeypatch):
+    conv = "b1d377c5-ef66-4d58-a7ca-5aee75acc853"
+    fake = tmp_path / "fake_agy.py"
+    fake.write_text(
+        "import json,sys,os\n"
+        f'conv = "{conv}"\n'
+        "def emit(o):\n"
+        "    sys.stdout.write(json.dumps(o)+'\\n'); sys.stdout.flush()\n"
+        'emit({"event":"init","conversation_id":conv,'
+        '"init":{"cwd":os.getcwd(),"tools":[]}})\n'
+        "for line in sys.stdin:\n"
+        "    if not line.strip():\n"
+        "        continue\n"
+        '    emit({"event":"step_update","step_update":{"step_index":1,'
+        '"state":"DONE","step_type":"agent_response","text_delta":"done."}})\n'
+        '    emit({"event":"result","result":{"status":"SUCCESS",'
+        '"response":"done.","usage":{"total_tokens":7}}})\n',
+        encoding="utf-8",
+    )
+    launcher = tmp_path / "agy"
+    launcher.write_text(
+        f"#!/bin/sh\nexec {sys.executable} {fake}\n", encoding="utf-8"
+    )
+    launcher.chmod(0o755)
+
+    # Nothing global: AG-21 put the entry in the root the service
+    # spawns against, and the service writes it itself on connect.
+    # Pinned anyway so a regression that reaches for the user's own
+    # file lands in a temp path rather than in their home directory.
+    monkeypatch.setattr(install, "GLOBAL_HOOKS", tmp_path / "their-hooks.json")
+
+    events: list = []
+
+    async def callback(name, *args):
+        events.append((name, args))
+
+    svc = service(tmp_path, executable=str(launcher), event_callback=callback)
+    return svc, events
+
+
 class TestATurn:
     """One turn end to end against a fake ``agy``, with the gate installed."""
-
-    @pytest.fixture
-    def wired(self, tmp_path, monkeypatch):
-        conv = "b1d377c5-ef66-4d58-a7ca-5aee75acc853"
-        fake = tmp_path / "fake_agy.py"
-        fake.write_text(
-            "import json,sys,os\n"
-            f'conv = "{conv}"\n'
-            "def emit(o):\n"
-            "    sys.stdout.write(json.dumps(o)+'\\n'); sys.stdout.flush()\n"
-            'emit({"event":"init","conversation_id":conv,'
-            '"init":{"cwd":os.getcwd(),"tools":[]}})\n'
-            "for line in sys.stdin:\n"
-            "    if not line.strip():\n"
-            "        continue\n"
-            '    emit({"event":"step_update","step_update":{"step_index":1,'
-            '"state":"DONE","step_type":"agent_response","text_delta":"done."}})\n'
-            '    emit({"event":"result","result":{"status":"SUCCESS",'
-            '"response":"done.","usage":{"total_tokens":7}}})\n',
-            encoding="utf-8",
-        )
-        launcher = tmp_path / "agy"
-        launcher.write_text(
-            f"#!/bin/sh\nexec {sys.executable} {fake}\n", encoding="utf-8"
-        )
-        launcher.chmod(0o755)
-
-        # Nothing global: AG-21 put the entry in the root the service
-        # spawns against, and the service writes it itself on connect.
-        # Pinned anyway so a regression that reaches for the user's own
-        # file lands in a temp path rather than in their home directory.
-        monkeypatch.setattr(install, "GLOBAL_HOOKS", tmp_path / "their-hooks.json")
-
-        events: list = []
-
-        async def callback(name, *args):
-            events.append((name, args))
-
-        svc = service(tmp_path, executable=str(launcher), event_callback=callback)
-        return svc, events
 
     def test_the_reply_arrives_before_the_turn_finishes(self, wired):
         """The contract the SDK transport learned the hard way.
@@ -1132,3 +1133,217 @@ class TestStoppingOneSubagent:
         answer = asyncio.run(svc.stop_task(self.ANNOUNCED))
         assert answer == {"error": "restricted", "reason": "localhost_only"}
         assert gate.refused == {}
+
+
+class TestTheConsultantAgyCanReach:
+    """AG-22's wiring: the listener was built, and reachable by nothing.
+
+    What closes AG-1's asymmetry is not the listener, it is the file that
+    tells `agy` where the listener is. These tests are about that file and
+    about the token's lifetime, because both were chosen against failure
+    modes rather than inherited from a default.
+    """
+
+    def offer(self, tmp_path, monkeypatch, *, available=True, fail=False):
+        from aic_dc.claude_code import consult_listener as listener_module
+        from aic_dc.claude_code.consultant import ClaudeConsultant
+
+        monkeypatch.setattr(ClaudeConsultant, "available", lambda self: available)
+        if fail:
+            async def explode(self):
+                raise OSError("no socket for you")
+
+            monkeypatch.setattr(
+                listener_module.ConsultationListener, "start", explode
+            )
+        svc = service(tmp_path)
+        root = roots.master_root(svc._config_dir)
+        return svc, root
+
+    def test_the_config_names_the_listener_that_is_running(
+        self, tmp_path, monkeypatch
+    ):
+        """The whole point, asserted on the artefact ``agy`` actually reads.
+
+        ``serverUrl`` rather than ``url`` is measured — ``url`` is not read
+        — and the bearer has to be one the listener will honour, so the
+        token is checked against the grant table rather than for being
+        non-empty.
+        """
+        svc, root = self.offer(tmp_path, monkeypatch)
+
+        async def go():
+            await svc._offer_consultant(root)
+            try:
+                body = json.loads(
+                    roots.mcp_config_file(root).read_text(encoding="utf-8")
+                )
+                entry = body["mcpServers"]["aic-dc-claude"]
+                assert entry["serverUrl"] == (
+                    f"http://127.0.0.1:{svc._listener.port}/mcp"
+                )
+                token = entry["headers"]["Authorization"].removeprefix("Bearer ")
+                assert svc._listener.resolve(token) is not None
+                assert token == svc._consult_token
+            finally:
+                await svc._retire_consultant()
+
+        asyncio.run(go())
+
+    def test_no_claude_means_no_file_rather_than_a_dead_one(
+        self, tmp_path, monkeypatch
+    ):
+        """An install with no Claude CLI is a supported install.
+
+        A config file left behind would send `agy` dialling a port that
+        answers nothing, and the user would read an MCP error for a
+        feature that was never switched on.
+        """
+        svc, root = self.offer(tmp_path, monkeypatch, available=False)
+        roots.write_mcp_config(root, {"mcpServers": {"stale": {}}})
+
+        asyncio.run(svc._offer_consultant(root))
+        assert not roots.mcp_config_file(root).exists()
+        assert svc._listener is None
+
+    def test_a_listener_that_will_not_start_does_not_fail_the_session(
+        self, tmp_path, monkeypatch
+    ):
+        """An optional second opinion must not stop an engine.
+
+        And it must not leave a config file either: every failure path
+        leaves no file rather than a stale one.
+        """
+        svc, root = self.offer(tmp_path, monkeypatch, fail=True)
+        roots.write_mcp_config(root, {"mcpServers": {"stale": {}}})
+
+        asyncio.run(svc._offer_consultant(root))
+        assert not roots.mcp_config_file(root).exists()
+        assert svc._listener is None
+        assert svc._consult_token is None
+
+    def test_the_token_dies_with_the_child(self, tmp_path, monkeypatch):
+        """Lifetime bound to the subprocess and to nothing else."""
+        svc, root = self.offer(tmp_path, monkeypatch)
+
+        async def go():
+            await svc._offer_consultant(root)
+            listener = svc._listener
+            token = svc._consult_token
+            await svc._retire_consultant()
+            assert listener.resolve(token) is None
+            assert listener.port is None
+            assert svc._listener is None and svc._consult_token is None
+            assert not roots.mcp_config_file(root).exists()
+
+        asyncio.run(go())
+
+    def test_one_spawn_holds_one_token(self, tmp_path, monkeypatch):
+        """A second offer retires the first, so no token outlives its child."""
+        svc, root = self.offer(tmp_path, monkeypatch)
+
+        async def go():
+            await svc._offer_consultant(root)
+            first, first_token = svc._listener, svc._consult_token
+            await svc._offer_consultant(root)
+            try:
+                assert svc._consult_token != first_token
+                assert first.resolve(first_token) is None
+                assert svc._listener.resolve(svc._consult_token) is not None
+            finally:
+                await svc._retire_consultant()
+
+        asyncio.run(go())
+
+
+class _StubListener:
+    """Records the host's pushes without binding a socket."""
+
+    def __init__(self):
+        self.turns: list = []
+        self.cancelled: list = []
+
+    def begin_turn(self, token, turn_id):
+        self.turns.append(("begin", token, turn_id))
+
+    def end_turn(self, token, turn_id):
+        self.turns.append(("end", token, turn_id))
+
+    async def cancel_session(self, session_id):
+        self.cancelled.append(session_id)
+        return True
+
+    async def revoke(self, token):
+        pass
+
+    async def aclose(self):
+        pass
+
+
+class TestTheTurnDrivesTheBudget:
+    """The consultation budget is per turn, and nothing on the wire says so.
+
+    An MCP request carries no turn id, so the host's push at the moment it
+    writes the prompt is the only place that identity exists. Between turns
+    is a *closed* state: a consultation arriving after the host considers
+    the turn over must be refused rather than quietly spending the next
+    turn's budget before it opens.
+    """
+
+    @pytest.fixture
+    def stubbed(self, wired, monkeypatch):
+        svc, _events = wired
+        stub = _StubListener()
+
+        async def offer(config_root):
+            attach()
+
+        def attach():
+            svc._listener = stub
+            svc._consult_token = "tok"
+            svc._consult_spawn_id = "spawn"
+
+        # Attached now *and* re-attached on spawn: a test that starts no
+        # session still has a listener to push to, and one that does still
+        # goes through the real call site.
+        attach()
+        monkeypatch.setattr(svc, "_offer_consultant", offer)
+        return svc, stub
+
+    def test_a_turn_opens_and_closes_its_own_budget(self, stubbed):
+        svc, stub = stubbed
+
+        async def go():
+            await svc.chat_streaming("r1", "hello")
+            for task in list(svc._turn_tasks):
+                await task
+            await svc.shutdown()
+
+        asyncio.run(go())
+        assert stub.turns == [("begin", "tok", "r1"), ("end", "tok", "r1")]
+
+    def test_the_stop_button_reaches_a_consultation(self, stubbed):
+        """The gate cannot, and that is measured.
+
+        Around an MCP call the hook timeline is ``PreToolUse`` at the start
+        and nothing until ``PostInvocation`` when it returns, so the
+        starvation the stop performs is queued behind the very thing it is
+        stopping — for up to `agy`'s own three minutes.
+        """
+        svc, stub = stubbed
+        # The turn is placed here rather than run, because the fake `agy`
+        # finishes in milliseconds and a stop racing it would pass or fail
+        # on timing rather than on the branch under test.
+        svc._turns["r2"] = object()
+
+        assert asyncio.run(svc.cancel_streaming("r2")) == {
+            "status": "ok",
+            "request_id": "r2",
+        }
+        assert stub.cancelled == ["spawn"]
+
+    def test_a_stop_for_a_turn_that_is_over_reaches_nothing(self, stubbed):
+        """No live turn, no consultation to cancel."""
+        svc, stub = stubbed
+        assert asyncio.run(svc.cancel_streaming("gone"))["status"] == "not_running"
+        assert stub.cancelled == []

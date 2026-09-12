@@ -339,3 +339,83 @@ class TestItNeverWritesToTheUsersTree:
         # than called, because ``tests/conftest.py`` redirects the live
         # function precisely so that this suite never reads the real tree.
         assert "return Path.home()" in source
+
+
+class TestTheMcpConfig:
+    """AG-22's credential on disk.
+
+    ``mcp_config.json`` carries a bearer token that buys consultations on
+    the user's Claude subscription. The three properties asserted here are
+    the ones that were chosen deliberately rather than inherited from
+    whatever ``open()`` does by default.
+    """
+
+    def entry(self, port=45678, token="tok"):
+        return {
+            "mcpServers": {
+                "aic-dc-claude": {
+                    "serverUrl": f"http://127.0.0.1:{port}/mcp",
+                    "headers": {"Authorization": f"Bearer {token}"},
+                }
+            }
+        }
+
+    def test_it_lands_where_agy_reads_it(self, tmp_path):
+        """Beside ``hooks.json``, which is measured as the only loaded path."""
+        root = tmp_path / "root"
+        written = roots.write_mcp_config(root, self.entry())
+        assert written == root / ".gemini" / "config" / "mcp_config.json"
+        assert written.parent == roots.hooks_file(root).parent
+        import json
+
+        assert json.loads(written.read_text(encoding="utf-8")) == self.entry()
+
+    def test_the_credential_is_not_world_readable(self, tmp_path):
+        """``0600`` in a ``0700`` directory, both set rather than inherited.
+
+        A umask of ``0022`` is the common default, and under it every user
+        on a shared machine could read a token that spends this one's
+        subscription.
+        """
+        root = tmp_path / "root"
+        written = roots.write_mcp_config(root, self.entry())
+        assert oct(written.stat().st_mode & 0o777) == "0o600"
+        assert oct(written.parent.stat().st_mode & 0o777) == "0o700"
+
+    def test_a_second_write_replaces_the_first_and_leaves_no_litter(self, tmp_path):
+        """Unconditional at every spawn, because blanking on exit is a
+        promise a crash does not keep — and a stale entry names a port
+        nothing listens on with a token nothing honours."""
+        import json
+
+        root = tmp_path / "root"
+        roots.write_mcp_config(root, self.entry(port=1, token="old"))
+        written = roots.write_mcp_config(root, self.entry(port=2, token="new"))
+        body = json.loads(written.read_text(encoding="utf-8"))
+        assert "new" in body["mcpServers"]["aic-dc-claude"]["headers"]["Authorization"]
+        assert "old" not in written.read_text(encoding="utf-8")
+        # The temporary file the atomic write goes through is gone.
+        assert sorted(p.name for p in written.parent.iterdir()) == ["mcp_config.json"]
+
+    def test_no_half_written_file_is_ever_visible(self, tmp_path, monkeypatch):
+        """`agy` reads this during startup, so a truncated read is a
+        session that silently has no consultant."""
+        root = tmp_path / "root"
+        roots.write_mcp_config(root, self.entry(token="good"))
+        target = roots.mcp_config_file(root)
+
+        def explode(*args, **kwargs):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(roots.os, "replace", explode)
+        with pytest.raises(OSError):
+            roots.write_mcp_config(root, self.entry(token="bad"))
+        assert "good" in target.read_text(encoding="utf-8")
+        assert sorted(p.name for p in target.parent.iterdir()) == ["mcp_config.json"]
+
+    def test_clearing_removes_it_and_is_idempotent(self, tmp_path):
+        root = tmp_path / "root"
+        roots.write_mcp_config(root, self.entry())
+        assert roots.clear_mcp_config(root) is True
+        assert not roots.mcp_config_file(root).exists()
+        assert roots.clear_mcp_config(root) is False

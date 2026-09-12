@@ -24,17 +24,21 @@ would be retried with backoff and the test would hang, which it did once.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import subprocess
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 import pytest
 
 from aic_dc.claude_code.consultant import (
+    DEFAULT_TIMEOUT_SECONDS,
     SCRATCH_DIR,
+    STALE_AFTER_SECONDS,
     ClaudeConsultant,
     ConsultationError,
     isolation_env,
@@ -218,6 +222,175 @@ def capture_server(monkeypatch):
         server.shutdown()
 
 
+class _Hang(BaseHTTPRequestHandler):
+    """Reads the request and then never answers, until released.
+
+    The stop has to land on a consultation that is genuinely in flight, and
+    a server that replies promptly gives no window to land it in. Released
+    by the fixture so teardown is not the thing that hangs.
+    """
+
+    release = threading.Event()
+    arrived = threading.Event()
+
+    def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler's spelling
+        length = int(self.headers.get("Content-Length") or 0)
+        self.rfile.read(length)
+        type(self).arrived.set()
+        type(self).release.wait(30)
+        # The stop is expected to have killed the client by now, so the
+        # reply lands on a closed socket. That is the outcome under test,
+        # not an error in it.
+        with contextlib.suppress(OSError):
+            self.send_response(400)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"type":"error","error":{"message":"x"}}')
+
+    def log_message(self, *args: object) -> None:
+        return
+
+
+@pytest.fixture
+def hanging_server(monkeypatch):
+    _Hang.release = threading.Event()
+    _Hang.arrived = threading.Event()
+    server = HTTPServer(("127.0.0.1", 0), _Hang)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", f"http://127.0.0.1:{server.server_address[1]}")
+    try:
+        yield server
+    finally:
+        _Hang.release.set()
+        server.shutdown()
+
+
+def _leftovers(started: dict[int, str]) -> dict[int, str]:
+    """Anything under this process that a clean teardown would have removed.
+
+    Sampled *after* the stop rather than compared against the snapshot taken
+    before it, so a CLI that died and respawned — an SDK retry reading the
+    kill as an abnormal exit — is caught rather than passing because the
+    original pid is gone. Two predicates, because neither alone is enough:
+    a respawn is found by its command line, and a **zombie** of the original
+    is found by its pid, since an unreaped process has an empty ``cmdline``
+    and is invisible to any command-line filter. Zombies count as leftovers.
+    The process is dead and spending nothing, but a pid that lingers in
+    ``/proc`` means whoever owned it dropped the handle without waiting, and
+    in a long-lived host that leaks until the pid space runs out.
+    """
+    return {
+        pid: cmd
+        for pid, cmd in _descendants(os.getpid()).items()
+        if "claude" in cmd or pid in started
+    }
+
+
+def _descendants(root: int) -> dict[int, str]:
+    """Every live descendant of ``root``, by pid, with its command line."""
+    children: dict[int, list[int]] = {}
+    cmd: dict[int, str] = {}
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        pid = int(entry.name)
+        try:
+            stat = (entry / "stat").read_text()
+            ppid = int(stat.rsplit(")", 1)[1].split()[1])
+            cmd[pid] = (entry / "cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace")
+        except (OSError, IndexError, ValueError):
+            continue
+        children.setdefault(ppid, []).append(pid)
+    seen: dict[int, str] = {}
+    stack = list(children.get(root, []))
+    while stack:
+        pid = stack.pop()
+        if pid in seen:
+            continue
+        seen[pid] = cmd.get(pid, "")
+        stack.extend(children.get(pid, []))
+    return seen
+
+
+async def _until(predicate, timeout: float = 20.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        value = predicate()
+        if value:
+            return value
+        await asyncio.sleep(0.05)
+    return None
+
+
+@requires_cli
+@pytest.mark.skipif(not Path("/proc").is_dir(), reason="reads process state from /proc")
+class TestTheStopActuallyTearsDown:
+    """``cancel()`` returning ``True`` is not evidence that anything died.
+
+    It reports that a task was cancelled. The question this class answers is
+    the one a boolean cannot — whether the CLI subprocess the task owned is
+    *gone*, or still running unreferenced and spending the account holder's
+    subscription with nobody left to read the answer. Measured end to end
+    against the real ``agy`` binary the stop looked instant, but that number
+    is confounded: the permission gate stays latched after a stop, so the
+    master would have wound up at about the same time either way
+    ([AG-27](../specs5/plan-ag/decisions.md#ag-27)). So assert on artefacts.
+    The scratch directory is removed by ``sterile_cwd``'s ``finally``, which
+    runs only if the task actually unwound; the subprocess is either in
+    ``/proc`` or it is not.
+    """
+
+    async def test_cancel_removes_the_scratch_directory_and_the_subprocess(
+        self, tmp_path, hanging_server
+    ):
+        consultant = ClaudeConsultant(tmp_path / "config", timeout=120)
+        parent = tmp_path / "config" / SCRATCH_DIR
+        task = asyncio.create_task(consultant.second_opinion("Say the single word: ping."))
+        try:
+            # Not "the scratch directory exists" — that is true a moment
+            # before the subprocess is spawned, and a stop landing there
+            # would tear down nothing while passing cleanly. The stop has
+            # to land on a CLI that has reached the API and is waiting on
+            # an answer that never comes, which is what the server's
+            # `arrived` reports.
+            # Polled rather than `Event.wait`, which blocks the loop the
+            # consultation is running on — the first cut did exactly that
+            # and reported "the CLI never reached the capture server" after
+            # starving the task it was waiting for.
+            assert await _until(_Hang.arrived.is_set, timeout=60), (
+                "the CLI never reached the capture server"
+            )
+            started = await _until(
+                lambda: (
+                    {pid: c for pid, c in _descendants(os.getpid()).items() if "claude" in c}
+                    if parent.is_dir() and list(parent.iterdir())
+                    else None
+                )
+            )
+            assert started, "no CLI subprocess was running under the consultation"
+            scratch = next(iter(parent.iterdir()))
+
+            assert await consultant.cancel() is True
+            # Bounded, because the interesting failure is the one where
+            # `cancel()` reports success and the consultation runs on: an
+            # unbounded await would sit there until the server released and
+            # then fail with whatever the CLI said, which names the wrong
+            # thing.
+            assert await _until(task.done, timeout=30), (
+                "cancel() returned True and the consultation kept running"
+            )
+            with pytest.raises(ConsultationError, match="stopped"):
+                await task
+        finally:
+            if not task.done():
+                task.cancel()
+
+        assert not scratch.exists(), "the consultation's cwd outlived the stop"
+        assert await _until(lambda: not _leftovers(started)), (
+            f"a subprocess survived the stop: {_leftovers(started)}"
+        )
+
+
 @requires_cli
 class TestOutboundPayload:
     """What actually leaves the process, asserted on the bytes."""
@@ -324,14 +497,89 @@ class contextlib_suppress:
 
 
 class TestStartupSweep:
-    def test_construction_clears_what_a_killed_process_left(self, tmp_path):
-        """The sweep runs on construction, as the ``agy`` consultant's does.
+    """The predicate is liveness, and getting it wrong destroys work."""
 
-        Asserted on the artefact — a planted directory is gone — rather than
-        on ``sweep_scratch`` having been called, because the question is
-        whether the litter is collected, not whether a function ran.
+    def test_construction_clears_what_a_killed_process_left(self, tmp_path):
+        """Asserted on the artefact — a planted directory is gone.
+
+        Not on ``sweep_scratch`` having been called: the question is
+        whether the litter is collected, not whether a function ran. The
+        pid is one no process can hold.
         """
-        abandoned = tmp_path / SCRATCH_DIR / "c-killed"
+        abandoned = tmp_path / SCRATCH_DIR / "c-2147483646-killed"
         abandoned.mkdir(parents=True)
         ClaudeConsultant(tmp_path)
         assert not abandoned.exists()
+
+    def test_a_name_from_before_the_pid_was_stamped_is_still_collected(
+        self, tmp_path
+    ):
+        """It can only have come from an earlier run."""
+        legacy = tmp_path / SCRATCH_DIR / "c-oldstyle"
+        legacy.mkdir(parents=True)
+        ClaudeConsultant(tmp_path)
+        assert not legacy.exists()
+
+    def test_a_live_consultation_survives_the_next_construction(self, tmp_path):
+        """The bug this predicate replaces an age heuristic to avoid.
+
+        One instance of the consultant is constructed per consultation, so
+        an overlapping one used to delete the first's working directory out
+        from under a live subprocess.
+        """
+        ClaudeConsultant(tmp_path)
+        with sterile_cwd(tmp_path) as live:
+            ClaudeConsultant(tmp_path)
+            assert live.exists()
+        assert not live.exists()
+
+    def test_another_live_process_is_not_swept(self, tmp_path):
+        """``config_dir`` is shared, so a second AIC⚡DC is the real case.
+
+        A once-per-process latch would have fixed the overlap above and
+        left this one broken, which is why the fix is the operating
+        system's answer rather than a flag.
+        """
+        import subprocess
+        import sys
+
+        other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+        try:
+            theirs = tmp_path / SCRATCH_DIR / f"c-{other.pid}-live"
+            theirs.mkdir(parents=True)
+            assert sweep_scratch(tmp_path) == 0
+            assert theirs.exists()
+        finally:
+            other.kill()
+            other.wait()
+        # And once it is gone, it is litter like any other.
+        assert sweep_scratch(tmp_path) == 1
+
+    def test_an_hour_old_directory_goes_whatever_its_pid_claims(self, tmp_path):
+        """The case liveness alone reports live for as long as the machine is up.
+
+        A host killed mid-consultation whose pid is recycled onto a daemon
+        leaves a directory ``os.kill(pid, 0)`` answers for forever. The name
+        here carries **this** process's pid, which is as live as a pid gets,
+        so nothing but the age disjunct can collect it.
+        """
+        stale = tmp_path / SCRATCH_DIR / f"c-{os.getpid()}-recycled"
+        stale.mkdir(parents=True)
+        old_enough = time.time() - (STALE_AFTER_SECONDS + 60)
+        os.utime(stale, (old_enough, old_enough))
+        assert sweep_scratch(tmp_path) == 1
+        assert not stale.exists()
+
+    def test_a_live_consultation_is_not_aged_out(self, tmp_path):
+        """The margin is what makes the disjunct free rather than a second bug.
+
+        A consultation cannot reach an hour — 150s internally, 180.0s at
+        ``agy``'s wall — so a directory young enough to be live is never
+        old enough to be swept, and this asserts the two halves do not
+        overlap rather than that the constant has a particular value.
+        """
+        with sterile_cwd(tmp_path) as live:
+            age = time.time() - live.stat().st_mtime
+            assert age < DEFAULT_TIMEOUT_SECONDS < STALE_AFTER_SECONDS
+            assert sweep_scratch(tmp_path) == 0
+            assert live.exists()

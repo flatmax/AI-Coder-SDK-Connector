@@ -57,6 +57,8 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from aic_dc.agy import tools as agy_tools
+
 logger = logging.getLogger(__name__)
 
 #: Where the matching data rides on a rule dict. Namespaced because the rest
@@ -115,8 +117,27 @@ def path_match(absolute: Path | str, tool_name: str) -> dict[str, Any]:
     return {"kind": "path", "value": str(absolute), "tool_name": tool_name}
 
 
+def mcp_tool_match(server: str, tool: str) -> dict[str, Any]:
+    """Matching data for an MCP rule: one server, one tool, both exact.
+
+    **The target of a ``call_mcp_tool`` is not its name.** Every MCP call
+    on this transport arrives under that one name with the real target in
+    its arguments, so a rule keyed on the tool name would be a standing
+    grant to *every* MCP server the user ever configures — which is the
+    widening this module exists to refuse. ``(server, tool)`` is the exact
+    qualification, in the same way that a command is the exact
+    qualification of a ``run_command``.
+
+    Stored as one ``value`` rather than two fields so that :func:`rule_id`,
+    which hashes the match data, needs no special case, and so that a rule
+    written by a future version with a third component cannot be read by
+    this one as a two-component match.
+    """
+    return {"kind": "mcp_tool", "value": f"{server}/{tool}"}
+
+
 def _matches(entry: dict[str, Any], *, command: str | None, path: str | None,
-             tool_name: str) -> bool:
+             tool_name: str, mcp_tool: str | None = None) -> bool:
     """Whether one stored rule permits this call. Narrow on every path."""
     match = entry.get(MATCH_KEY)
     if not isinstance(match, dict):
@@ -143,6 +164,11 @@ def _matches(entry: dict[str, Any], *, command: str | None, path: str | None,
         if match.get("tool_name") != tool_name:
             return False
         return path == value
+    if kind == "mcp_tool":
+        # Not qualified by `tool_name`: the caller's tool name is always
+        # the multiplexer's, so checking it would add nothing, and a rule
+        # that carried one would be matching the wrong half of the call.
+        return mcp_tool is not None and mcp_tool == value
     return False
 
 
@@ -197,14 +223,25 @@ class RuleStore:
         return list(self._rules)
 
     def allows(
-        self, *, command: str | None, path: str | None, tool_name: str
+        self,
+        *,
+        command: str | None,
+        path: str | None,
+        tool_name: str,
+        mcp_tool: str | None = None,
     ) -> dict[str, Any] | None:
         """The rule permitting this call, or ``None`` to ask the user."""
         self._reload()
         for entry in self._rules:
             if entry.get("behavior", "allow") != "allow":
                 continue
-            if _matches(entry, command=command, path=path, tool_name=tool_name):
+            if _matches(
+                entry,
+                command=command,
+                path=path,
+                tool_name=tool_name,
+                mcp_tool=mcp_tool,
+            ):
                 return entry
         return None
 
@@ -361,6 +398,32 @@ def derive_rules(
 
     root = Path(repo_root)
     rules: list[dict[str, Any]] = []
+
+    # **Before the exec branch, because this tool is in it and has no
+    # command.** `call_mcp_tool` is classified `exec` — correctly, since
+    # what it dispatches is unknown to this host — and the exec branch
+    # reads `command`, which an MCP call does not carry. So until this
+    # existed the branch returned nothing, the dialog offered no standing
+    # rule, and "always allow" was not merely absent but unreachable: the
+    # user could approve a consultation every single time and never stop
+    # being asked.
+    if tool_name == agy_tools.MCP_TOOL:
+        target = agy_tools.mcp_target(tool_input)
+        if target is None:
+            # A payload whose target cannot be read still runs — the
+            # dialog is shown and the user decides — but nothing standing
+            # is offered for a call this code cannot name.
+            logger.info(
+                "No standing rule derived for %s: its ServerName/ToolName "
+                "could not be read, so there is no target to grant",
+                tool_name,
+            )
+            return rules
+        server, tool = target
+        rules.append(
+            _rule(tool_name, f"{server}/{tool}", mcp_tool_match(server, tool))
+        )
+        return rules
 
     if tool_class == "exec":
         command = tool_input.get("command")

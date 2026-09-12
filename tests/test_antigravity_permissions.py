@@ -896,3 +896,67 @@ class TestAcceptEditsStopsAtTheShell:
         )
         allowed, _reason = gate.pre_verdict("view_file", {"file_path": denied})
         assert allowed is False
+
+
+class TestAnMcpCallCanBeGranted:
+    """Hazard 4: until this worked, "always allow" was unreachable.
+
+    Every MCP call on the ``agy`` transport arrives as ``call_mcp_tool``,
+    which is classified ``exec`` and sits in ``ALWAYS_ASK``. The exec
+    branch of ``derive_rules`` reads ``command``; an MCP call carries none.
+    So the dialog offered no standing rule and the user could approve a
+    consultation every single time without ever being able to stop being
+    asked — a dead end with nothing saying so.
+    """
+
+    CALL = {
+        "ServerName": "aic-dc-claude",
+        "ToolName": "second_opinion",
+        "Arguments": {"question": "is this diff sound?", "context": ""},
+    }
+
+    def test_the_dialog_says_what_is_being_called(self, tmp_path):
+        """`call_mcp_tool` names a multiplexer, not a target."""
+        recorder = Recorder()
+        g = gate(tmp_path, recorder)
+
+        asyncio.run(ask(g, FakeCall("call_mcp_tool", self.CALL), {"action": "allow"}))
+        payload = recorder.requests()[0].payload
+        assert payload["server"] == "aic-dc-claude"
+        assert payload["summary"] == "call_mcp_tool: aic-dc-claude/second_opinion"
+        assert "is this diff sound?" in payload["description"]
+        # Not a shell command, and the dialog does not claim it is: the
+        # command block would otherwise render the whole input as one,
+        # having scanned it for shell hazards it cannot contain.
+        assert payload["command"] is None
+
+    def test_always_allow_stops_the_next_identical_call_asking(self, tmp_path):
+        recorder = Recorder()
+        g = gate(tmp_path, recorder)
+
+        asyncio.run(
+            ask(g, FakeCall("call_mcp_tool", self.CALL), {"action": "allow_always"})
+        )
+        assert [r["rule_content"] for r in g.rules.rules()] == [
+            "aic-dc-claude/second_opinion"
+        ]
+        # A *different* question on the same tool: the grant is the tool,
+        # not the argument, which is the whole point of the pair.
+        again = dict(self.CALL, Arguments={"question": "and this one?"})
+        assert g.pre_verdict("call_mcp_tool", again) == (True, "")
+
+    def test_the_grant_does_not_widen_to_other_mcp_tools(self, tmp_path):
+        """One named tool on one named server, and nothing else."""
+        g = gate(tmp_path, Recorder())
+        asyncio.run(
+            ask(g, FakeCall("call_mcp_tool", self.CALL), {"action": "allow_always"})
+        )
+        for other in (
+            dict(self.CALL, ToolName="generate_image"),
+            dict(self.CALL, ServerName="something-else"),
+            {"ServerName": "aic-dc-claude", "Arguments": {}},
+            {},
+        ):
+            assert g.pre_verdict("call_mcp_tool", other) is None, other
+        # Nor to the shell, which is the other tool in the `exec` class.
+        assert g.pre_verdict("run_command", {"CommandLine": "ls"}) is None

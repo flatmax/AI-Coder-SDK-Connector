@@ -2149,3 +2149,68 @@ Both tables it reclaims from — `_server_instances` and `_session_owners` — a
 rename in a later release would turn eviction into a silent no-op. The listener checks for both at startup
 and logs by name if either is missing, because the failure this file keeps recording is not a leak, it is
 a leak that says nothing.
+
+## AG-R-26 — The delegate refusal is policy against `agy`'s dispatcher, not a boundary against local code
+
+**Stated 2026-09-12, accepted rather than mitigated.**
+
+[AG-26](decisions.md#ag-26) refuses a subagent's consultation by reading
+`antigravity.google/parent_conversation_id` out of the `tools/call` `params._meta`. That works, it is
+measured, and it discharges [AG-R-24](#ag-r-24)'s clause. What it is **not** is a security boundary, and
+this entry exists because the difference is easy to lose: `_meta` is a field the caller fills in. Any
+process holding the bearer token can send a `tools/call` with `_meta` omitted and be treated as the master.
+The refusal is therefore *policy against a cooperating dispatcher* — it stops `agy` from spending the
+master's quota through a delegate, because `agy` labels its own delegates honestly — and nothing more.
+
+**The disposition is to leave it.** Not because the hole is small, but because there is no version of this
+that closes it: the only party who could attest to a call's origin is `agy`, `agy` is closed source, and a
+credential handed to a subprocess is a credential that subprocess's whole process tree holds. Every
+defence that could be built here — nonces, per-call signing, a second channel — is defeated by the same
+fact, so building one would buy the *appearance* of a boundary, which is worse than the documented
+absence.
+
+### The counter-argument that was offered for this, and the three ways it fails
+
+The first draft justified the disposition by claiming that a bearer holder gains strictly less than the
+capability they would have anyway, since anyone who can read `mcp_config.json` can already read
+`~/.claude` and run `claude -p` directly. Review dismantled that, and the corrections are recorded because
+each one is a fact about this system rather than a debating point.
+
+1. **The bearer reaches something `claude -p` cannot: the live master turn's budget.** A holder can spend
+   the two consultations belonging to a turn in flight, so the master's next call is refused and it
+   proceeds on its own reasoning without its second opinion. That is a sabotage channel into a *running*
+   conversation, and no amount of local `claude -p` access provides it.
+2. **In the `agy` child, the bearer is a net-new capability rather than a lesser one.** `roots.PASSTHROUGH`
+   is an allowlist and carries no Anthropic or Claude names, and `HOME` is set to the private root, so the
+   child does not inherit credentials for the thing the token reaches. It is the *only* route to Claude
+   that child has. (The claim is narrower than it looks: the gate auto-allows reads, so the child can still
+   `view_file` the user's real `~/.claude` by absolute path. That is a separate matter from the token, and
+   it is the read posture's to answer, not this one's.)
+3. **On an egress-filtered host the listener is an egress oracle.** A loopback port answering
+   authenticated requests, whose handler reaches the public internet, is a hole through a network policy
+   that was configured to have none — and a deployment that filters egress is exactly the deployment that
+   would care.
+
+None of the three changes the disposition. All three change what the disposition is *based on*: it stands
+because the attestation is unbuildable against a closed-source client, not because the capability granted
+is trivial. The honest summary is that anyone who can read the token file can consult Claude on the user's
+subscription and interfere with a running turn, and that the file's `0600` inside a `0700` directory is
+the whole of the protection.
+
+## AG-R-27 — A stop cannot un-send a request that is already on the wire
+
+**Accepted, bounded, and not worth building against.** [AG-27](decisions.md#ag-27) establishes that ⏹
+tears a consultation down: the task unwinds, the scratch directory goes, and the CLI subprocess is gone
+from `/proc` within six seconds. What that cannot do is recall the HTTP request the CLI already sent.
+
+The mechanism, agreed by both sides of the review: cancellation severs the TLS connection, and the API
+notices on its next write. During *prefill* — prompt ingestion, before the first output token — the
+server is computing and not writing, so a reset arriving in that window may not be observed until the
+turn is done, and the turn may be billed. There is no out-of-band cancel on `/v1/messages`; dropping the
+socket **is** the cancellation primitive, and no client-side machinery changes remote scheduling.
+
+The blast radius is one turn, because `max_turns=1` means there is no follow-up to dispatch even if the
+first one runs to completion unobserved. So the honest statement is that a stop is prompt against the
+*local* consultation — which is what a user pressing ⏹ is asking for, and what the subscription-drain
+worry was actually about — and best-effort against a single already-transmitted turn upstream. Recorded
+rather than mitigated, because the only thing that would shrink the window is not sending the request.

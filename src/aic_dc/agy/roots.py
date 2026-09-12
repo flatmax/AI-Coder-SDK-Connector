@@ -74,6 +74,8 @@ AG-R-21.
 
 from __future__ import annotations
 
+import contextlib
+import json
 import logging
 import os
 import shutil
@@ -189,6 +191,74 @@ def hooks_file(root: Path | str) -> Path:
     under ``.antigravity/`` is not read at v1.2.1.
     """
     return Path(root) / VENDOR_DIR / "config" / "hooks.json"
+
+
+def mcp_config_file(root: Path | str) -> Path:
+    """Where ``agy`` reads its MCP servers inside ``root``.
+
+    The sibling of :func:`hooks_file`, and measured in the same place:
+    ``$HOME/.gemini/config/mcp_config.json``. Since the root is this app's
+    own, nothing else writes this file and it can be rewritten from
+    scratch at every spawn.
+    """
+    return Path(root) / VENDOR_DIR / "config" / "mcp_config.json"
+
+
+def write_mcp_config(root: Path | str, config: Mapping[str, object]) -> Path:
+    """Write ``config`` as the root's MCP configuration. Returns the path.
+
+    **This file holds a bearer token**, so three things are deliberate.
+
+    It is written *atomically* — a temporary file in the same directory,
+    then :func:`os.replace` — because ``agy`` reads it during startup and a
+    truncated read is a session that silently has no consultant. Writing in
+    place would put a window of a few bytes between two spawns.
+
+    It is ``0600`` inside a ``0700`` directory, both set explicitly rather
+    than left to whatever ``umask`` the app was launched under. A umask of
+    ``0022`` is the common default and would make a credential
+    world-readable.
+
+    And it is written **unconditionally at every start**, overwriting
+    whatever a previous run left. The alternative — blanking the file on
+    exit — is a promise a crash does not keep, and a stale entry names a
+    port this process no longer listens on with a token it no longer
+    honours, which is a confusing failure rather than a safe one.
+    """
+    target = mcp_config_file(root)
+    parent = target.parent
+    parent.mkdir(parents=True, exist_ok=True)
+    with contextlib.suppress(OSError):
+        parent.chmod(0o700)
+    handle, temporary = tempfile.mkstemp(dir=parent, prefix=".mcp_config-")
+    try:
+        os.fchmod(handle, 0o600)
+        with os.fdopen(handle, "w", encoding="utf-8") as fh:
+            json.dump(config, fh, indent=2)
+        os.replace(temporary, target)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(temporary)
+        raise
+    return target
+
+
+def clear_mcp_config(root: Path | str) -> bool:
+    """Remove the root's MCP configuration. Returns whether there was one.
+
+    The other half of "written unconditionally": a spawn that offers no
+    consultant must leave no file behind claiming one, or ``agy`` spends
+    its startup dialling a port that answers nothing and the user reads an
+    MCP error for a feature that was never switched on.
+    """
+    try:
+        mcp_config_file(root).unlink()
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        logger.warning("Could not remove the MCP config in %s: %s", root, exc)
+        return False
+    return True
 
 
 def roots_dir(config_dir: Path | str) -> Path:

@@ -53,6 +53,23 @@ from __future__ import annotations
 #: but the shared ones are listed too: this is the readable answer to "what
 #: does ``agy`` call, and what is each of them", and leaving out the
 #: overlapping half would make it look like the overlap does not exist.
+#: The name every MCP tool arrives under. Measured: ``agy`` does not send
+#: ``mcp__server__tool`` the way the Claude CLI does — one hook payload,
+#: one tool name, with the real target in the arguments as
+#: ``{"ServerName": ..., "ToolName": ..., "Arguments": {...}}``.
+#:
+#: **This is a multiplexer, and that is why it needs its own rule kind.**
+#: It stands in the same relation to MCP that ``run_command`` stands in to
+#: the shell: one gated name dispatching an open set of targets. The rule
+#: store matches a shell call on its *command*, not on the name
+#: ``run_command``, and for the same reason it matches an MCP call on
+#: ``(ServerName, ToolName)`` rather than on the name ``call_mcp_tool`` —
+#: see ``rules.mcp_tool_match``. Without that, no MCP tool on any server
+#: could ever be granted a standing rule, because a rule on the
+#: multiplexer's own name would grant every server at once.
+MCP_TOOL = "call_mcp_tool"
+
+
 TOOL_CLASSES: dict[str, str] = {
     # Mutating — every one of these is also in MUTATING_TOOLS below.
     "replace_file_content": "write",
@@ -94,7 +111,7 @@ TOOL_CLASSES: dict[str, str] = {
     "send_command_input": "exec",
     # Arbitrary tool by proxy: whatever an MCP server exposes, which this
     # host cannot enumerate and must not assume is read-only.
-    "call_mcp_tool": "exec",
+    MCP_TOOL: "exec",
     # Delegation, for AG-5's stated reason — a child inherits the tool set,
     # so a gate that stops at the parent is bypassed by asking a child.
     # `invoke_subagent` was the only spelling this table knew; 1.2.0 has
@@ -205,12 +222,30 @@ MUTATING_TOOLS = frozenset(
         "execute_browser_javascript",
         "notebook_execution",
         "send_command_input",
-        "call_mcp_tool",
+        MCP_TOOL,
         "define_subagent",
         "manage_subagents",
         "browser_subagent",
     }
 )
+
+def mcp_target(args: dict[str, object]) -> tuple[str, str] | None:
+    """The ``(server, tool)`` one ``call_mcp_tool`` names, or ``None``.
+
+    ``None`` for anything that does not carry both as non-empty strings,
+    and every caller treats that as "no rule and no identity" rather than
+    as a wildcard. A payload this cannot read is a payload whose target is
+    unknown, and the one thing that must not follow from an unknown target
+    is a standing grant.
+    """
+    server = args.get("ServerName")
+    tool = args.get("ToolName")
+    if not isinstance(server, str) or not server.strip():
+        return None
+    if not isinstance(tool, str) or not tool.strip():
+        return None
+    return server.strip(), tool.strip()
+
 
 #: ``agy`` argument names → the field names the dialog's payload builders
 #: read. Identical in shape to the SDK's aliases, and mostly identical in

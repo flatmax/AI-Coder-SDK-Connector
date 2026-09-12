@@ -2474,3 +2474,275 @@ The first run of this probe measured nothing, and is recorded because of how it 
 up 45 seconds after the last stdout frame and killed `agy`, whose teardown cancelled the in-flight call
 with `{"reason":"context canceled"}`. Both arms reported a cancellation at 45.0s, identically, and read as
 a result. A cancellation frame is not evidence of a deadline until its `reason` has been looked at.
+
+## AG-27 — The offer of a consultant belongs to the spawn, and an MCP call is a multiplexer **(measured and built 2026-09-12)**
+
+**The question.** [AG-26](#ag-26) built the listener and [AG-24](#ag-24) measured the transport under it,
+but nothing in the running application had ever started one: the listener was constructed by probes and by
+tests, `agy` was spawned by `AgyService`, and the two had never met. This entry is the wiring, and it is
+the last piece of [AG-1](#ag-1)'s asymmetry — until today `agy` could be master *and* consultant while
+`claude` could only be master, not because anyone decided that but because the second half was never
+built.
+
+**Built:** `mcp_config_file`, `write_mcp_config` and `clear_mcp_config` in `src/aic_dc/agy/roots.py`;
+`_offer_consultant` and `_retire_consultant` in `src/aic_dc/agy/service.py`, called from `_ensure_session`
+and `_close_session`, with `begin_turn`/`end_turn` on the turn's `finally` and `cancel_session` on ⏹;
+`MCP_TOOL` and `mcp_target` in `src/aic_dc/agy/tools.py`; a `mcp_tool` match kind in
+`src/aic_dc/antigravity/rules.py` and its dialog rendering in `src/aic_dc/antigravity/permissions.py`.
+23 new tests across five files; 5,153 green.
+
+### The rule kind is `(ServerName, ToolName)`, because `call_mcp_tool` is a multiplexer
+
+A standing rule keyed on the tool *name* would read **Always allow `call_mcp_tool`** and grant every tool
+on every MCP server the user ever configures, present and future, from one click on a dialog that named
+one of them. That is the same shape as `run_command`, which this codebase already refuses to key on its
+own name, and the resolution is the same: the rule store gets a kind whose value is the *target* —
+`aic-dc-claude/second_opinion` — so the dialog reads **Always allow `call_mcp_tool(aic-dc-claude/second_opinion)`**
+and grants exactly that.
+
+The unease about this was that a schema change is a large answer to one tool. It is not one tool.
+`call_mcp_tool` is how `agy` reaches *every* MCP server, so the new kind is what makes standing rules
+work at all for anything the user mounts later; without it the only two available answers are "ask every
+time forever" and "grant everything". `derive_rules` returns the target rule and stops, before the `exec`
+branch it would otherwise fall into, and a call whose `ServerName` or `ToolName` is missing or not a
+string derives **no rule at all** rather than a rule matching the empty string — an unparseable call is
+one the user should be asked about, every time.
+
+### The config file is written per spawn and blanked on retire
+
+`mcp_config.json` carries a bearer token in cleartext, which settles three things that would otherwise be
+preference. It is written **atomically**, because `agy` reads it during its own startup and a partially
+written file is a spawn that silently has no consultant. It is `0600` inside a `0700` directory, set
+explicitly rather than left to the process umask, because the common `0022` would make the credential
+world-readable. And it is written **unconditionally**, overwriting whatever is there — blanking on exit is
+a promise a crash does not keep, so the invariant has to be *the file on disk names the listener that is
+running now*, restored on the way in rather than only on the way out.
+
+`_offer_consultant` fails soft: no Claude credentials, or a listener that will not start, clears the
+config and logs, and the `agy` session starts with no consultant rather than not starting. A second
+opinion is a tool, not a precondition.
+
+### The gate was reading a different configuration directory than everything else
+
+`AgyService` constructed its `AntigravityPermissionGate` without `config_dir`, so its `RuleStore` fell
+through to `~/.config/aic-dc` while every other piece of state this service owns — the mirror, the gate
+socket, the master root, the registry — lived in the directory it was handed. The SDK transport passes it
+and says why in a comment; this one was simply missing it.
+
+It surfaced as the end-to-end probe hanging. `ps` showed `python -m aic_dc.agy.hook` blocked for
+**11 minutes 31 seconds**: a permission dialog raised with nobody present to answer it, because the rule
+the probe had seeded was in the probe's directory and the gate was looking in the developer's. The
+user-facing shape of the same fault is worse than the inconsistency: a standing grant made on the `agy`
+transport by a user whose host was given a configuration directory went somewhere that host does not
+manage, does not back up, and does not clear.
+
+### Scratch is swept on ownership, not on age and not behind a latch
+
+`ClaudeConsultant` sweeps stale consultation scratch directories on construction, unfiltered by age,
+because ownership rather than age is the question. One instance is constructed per consultation, so the
+sweep needed a predicate that could not delete a *live* consultation's `cwd`.
+
+A once-per-process latch was written first and is wrong, as review said: `config_dir` is shared between
+every AIC⚡DC process on the machine, and process A's first construction would sweep process B's live
+scratch while B's own latch sat harmlessly set. The predicate is now ownership — the directory carries
+its creator's pid in its name, and `os.kill(pid, 0)` answers whether that process is still running. The
+regression test spawns a **real** `subprocess.Popen`, creates scratch in its name, and asserts it
+survives; a stub pid would prove nothing about `os.kill`.
+
+**The TTL was declined and then adopted, on an argument that caught a contradiction.** The refusal ran:
+a recycled pid leaves litter, litter is the safe direction to fail in, and an age cut-off is the heuristic
+that deletes a long consultation's `cwd` out from under it — with, in the same breath, the observation
+that `agy`'s 180.0s wall bounds how long a consultation can live. Both halves of that cannot be true. If
+no consultation can reach three minutes, then no age threshold measured in hours can reach live work, and
+the reason for refusing age evaporates. What survives is the case liveness alone gets wrong and gets wrong
+*permanently*: a host killed mid-consultation whose pid is recycled onto a daemon leaves a directory
+`os.kill(pid, 0)` reports as live for as long as the machine is up. So the predicate is now *dead owner*
+**or** *older than an hour* — a disjunct, never age alone, at twenty-four times the longest life a scratch
+directory can have. `st_mtime` rather than a creation time, because the only thing that refreshes it is a
+write inside the directory, so a directory in use looks younger, which is the direction to be wrong in.
+
+The other half of the prescription — moving the sweep out of `__init__` into `_offer_consultant`, so it
+runs once per spawn rather than once per consultation — was **not** adopted, and the disagreement is
+recorded rather than resolved. Review argued constructor side effects and filesystem I/O on the hot path
+of a call under a 180-second wall. Against that: the sweep already runs at spawn time, because
+`_offer_consultant` constructs a `ClaudeConsultant` to ask `available()`; its per-consultation repeat is
+one `iterdir` of a directory that is empty in the healthy case; and the consultant owning its own scratch
+is a smaller interface than the caller owning it on its behalf. The cost of being wrong about the location
+is milliseconds. The cost of being wrong about the predicate was a deleted working directory.
+
+### What the end-to-end run measured
+
+P16 drives a real `AgyService` with a real listener over a real `ClaudeConsultant` and a real `agy`, with
+the rule store seeded through `derive_rules` rather than through a dialog — so the probe fails if the
+grant ever stops being derivable. One run, one consultation:
+
+```
+t+ 0.0s  RULE     {"kind": "mcp_tool", "value": "aic-dc-claude/second_opinion"}
+t+ 4.6s  CONFIG   exists=True mode=0o600  serverUrl=http://127.0.0.1:36241/mcp  (Bearer …)
+t+14.5s  toolUse  view_file  …/master/.gemini/antigravity-cli/mcp/aic-dc-claude/second_opinion.json
+t+14.5s  toolUse  call_mcp_tool  ServerName=aic-dc-claude ToolName=second_opinion
+t+14.5s  result   "THE-CONSULTANT-WAS-REACHED-1."  duration_ms=3198  full_bytes=29
+t+14.5s  complete tool_calls=2  permission_prompts=0
+t+14.5s  GRANT    turn=None spent=1 attempts=1
+t+17.0s  CONFIG after shutdown exists=False
+```
+
+Six claims land in those eight lines, and each of them was a separate assumption before the run.
+`agy` reads the config it was handed and mounts the server; it locates the schema by `view_file` under
+`<root>/.gemini/antigravity-cli/mcp/<server>/`, as [AG-24](#ag-24) measured; the gate matches the standing
+rule and raises **no dialog**; the bearer authenticates; Claude's answer comes back **verbatim** — the
+sentence is an exact-match canary precisely so a summary cannot pass for a consultation; the budget
+records one answer and one attempt and the turn id is cleared on the way out; and the credential is gone
+from disk after shutdown.
+
+The same probe told to consult three times measures the budget against a live model rather than against a
+stub. `agy` made exactly **three** `call_mcp_tool` calls and **no retry**: the first two returned their
+canaries in 2,739 ms and 2,889 ms, the third came back flagged —
+
+```
+Encountered error in tool execution: Consultation budget for this turn is spent (2/2). This is a
+per-turn limit, not a failure: proceed with your own reasoning and answer the user. Do not retry
+this tool.
+```
+
+— and the model reported that refusal **verbatim to the user** beside the two answers, then ended the turn
+`permission_prompts=0`, `cancelled=false`. Three things are settled by that. The flagged path reaches the
+model as prose it can read rather than as a broken tool, which is what [AG-26](#ag-26) § *`isError` answers
+one question* predicted and had measured only on a hand-rolled server. The refusal does not spend an
+attempt — the grant ends `spent=2 attempts=2`, not `attempts=3` — so a model that keeps asking cannot
+exhaust the refund path by being refused. And the steering sentence works on this model: *Do not retry
+this tool* was obeyed on the first reading, with no flag-provoked loop of the kind the first cut of the
+listener was designed around.
+
+### The canary an echo could have produced, and the control the probe did not have
+
+Two holes in the run above were named by review and both were real.
+
+**The canary was satisfiable by an echo.** `THE-CONSULTANT-WAS-REACHED-1.` is *supplied in the request*,
+so anything on the path that reflects its input — a stub left behind, an error handler that quotes the
+payload, a proxy that swallows the call — returns it. The run did not prove Claude was reached; it proved
+a round trip happened. Replaced (P17) by a canary the request does not contain: `agy` is asked to consult
+with *"reply with only the reverse of this string"* and a 16-character nonce. The tool result came back
+`8VED925FMF4BHN1D` for a nonce of `D1NHB4FMF529DEV8` — 16 bytes, 3,395 ms — containing the reversed
+string and **not** containing the supplied one. Nothing on the path produces that without having computed
+it. One half of the original probe was already sound and is kept: the assertion is on the `toolResult`
+event carrying the MCP payload, never on `agy`'s final prose, so the model's own report cannot stand in
+for the tool's.
+
+**`permission_prompts == 0` is a count of zero, and a zero cannot tell a match from an absence.** It is
+equally consistent with the rule matching and with the gate never being consulted at all — a hook that
+failed to execute, an exception before the dialog, a tool class that bypasses hooks. P17 therefore runs a
+second arm as a **negative control**: identical code, no rule seeded, the dialog answered `deny`. The arms
+diverge exactly where they must:
+
+```
+arm A (rule seeded)   dialogs=0  result status=success  16 bytes  grant spent=1 attempts=1
+arm B (no rule)       dialogs=1  result status=error     0 bytes  grant spent=0 attempts=0
+                      agy reported: "tool call denied by pre-tool hook: P17 control"
+```
+
+The gate is on the path, the standing rule is what admits the call, and a consultation that was not
+allowed never reaches the listener — arm B's grant is untouched, which is the artefact distinguishing
+*refused* from *ran and was then discarded*.
+
+### Two design questions closed by measurement rather than by argument
+
+Review named four blind spots where a bad answer would force a *structural* change rather than a tuning
+change. Two were checkable here and both came back the way the built design needs.
+
+**A large answer arrives whole (P18).** A second opinion on a diff is prose and prose can be large, so if
+`agy`'s MCP client truncated results the consultant could not return raw answers at all — it would have
+to paginate, or write the answer to a file and hand back a path. The hypothesis was concrete: Go clients
+commonly scan lines with a 64 KB ceiling. Measured with a self-verifying payload that declares its own
+length and ends in a size-specific tail token, one call per size:
+
+```
+8 KB       LEN=8000       TAIL=dEfGh0ENDMARK8000ENDMARK      ✓
+64 KB      LEN=64000      TAIL=EfGh0ENDMARK64000ENDMARK      ✓
+256 KB     LEN=256000     TAIL=789AENDMARK256000ENDMARK      ✓
+1 MB       LEN=1000000    TAIL=CdEENDMARK1000000ENDMARK      ✓
+```
+
+Every size intact, every turn `SUCCESS`, no socket reset and no ceiling at 64 KB. The tail token is what
+carries the claim: truncation removes the end, so a correct tail is evidence the end arrived. It is not
+evidence that nothing was elided from the *middle*, which no probe of this shape can give — but a
+transport that drops the middle and keeps the tail is not a failure mode anything exhibits.
+
+**The stop reaches an in-flight consultation, and does so in seconds (P19).** [AG-26](#ag-26) built
+`cancel_session` on the measurement that the gate is *blind* for the whole length of an MCP call, and
+tested it in-process. What was never run is the whole path — ⏹ → `cancel_streaming` → `cancel_session` →
+`ClaudeConsultant.cancel()` → the handler answering → `agy` ending its turn. Left unreached, `agy` would
+sit on its 180.0s wall and the stop would have bought nothing, which is precisely the failure the
+`run_command` design was rejected for.
+
+Measured end to end, with the stop deliberately timed to land **inside** the call — the probe waits for
+the `call_mcp_tool` announcement and then sleeps, because a fixed delay lands in the wrong arm and
+measures the gate's ordinary starvation instead:
+
+```
+t+11.4s  call_mcp_tool announced      (the gate goes blind here)
+t+14.4s  ⏹  -> cancel_streaming        3.0s into the consultation
+         host log: "The stop ended a consultation that was in flight"
+t+20.0s  streamComplete cancelled=true, preceded by stop_acknowledged
+         stop -> turn end = 5.6s      against a 180.0s wall
+```
+
+Two things had to be added to get that reading, and both are the same lesson. `cancel_session` returns
+whether it found anything to stop and the caller **discarded the boolean** — so the one piece of evidence
+that the stop reached the consultation rather than merely the master existed nowhere, and a run where it
+silently reached nothing would look identical. It is now logged. And the first run of the probe measured
+the wrong arm without saying so: a fixed 8-second delay landed *before* the consultation began, the call
+was starved at the gate in the ordinary way, and the 2.5s it reported would have read as a pass for a
+mechanism that never fired.
+
+**What 5.6s does not prove, and the artefact that does.** Review's closing round granted the trace and
+then refused to grant the conclusion, on a confound worth recording because it is the same shape as
+every other trap in this file. The gate stays latched after a stop, so *every* subsequent tool call is
+starved — the trace above ends with a `view_file` denied right after the in-flight `call_mcp_tool`. That
+means `agy` would have wound up in about 5.6s **even if `cancel_session` returned `True` while failing to
+abort the underlying `query()`**, leaving a consultation running unreferenced and spending the account
+holder's subscription with nobody waiting for the answer. The latency measures the master's exit, not the
+consultant's death; a returned boolean says a task was cancelled, not that the CLI it owned is gone.
+
+So the probe was extended to assert on two artefacts nobody has to be trusted about. `sterile_cwd` removes
+its scratch directory in a `finally`, which runs only when the consultation task actually unwinds; and the
+`claude` CLI is a descendant process, which is either in `/proc` or it is not. Both are sampled
+immediately before the stop and then polled after it:
+
+```
+t+14.6s  scratch before stop: ['c-827107-ihvu3g2g']   CLI children: [827202]
+t+20.3s  scratch empty, no CLI child                  5.8s after the stop
+```
+
+The directory that existed is gone and the process that existed is gone, which is what "the `query()` was
+torn down" means operationally. Had `cancel()` returned `True` over a still-running consultation, the
+scratch directory would have remained for as long as the answer took and pid 827202 would still have been
+in the tree — and the 60s poll would have said so rather than passing quietly.
+
+A probe measures once; the same artefacts are now a **regression test** that needs no `agy` at all
+(`TestTheStopActuallyTearsDown`). It points the CLI at a capture server that reads the request and then
+never answers, so the stop lands on a consultation genuinely in flight, then asserts the scratch
+directory is gone and every `claude` descendant of the test process is dead or reaped. Both of its
+assertions were earned. The first cut waited on the scratch directory's existence and passed **in 1.07
+seconds**, before a subprocess existed to tear down — so it now waits for the capture server to report a
+request *arrived*. The second cut waited on that with `threading.Event.wait`, which blocks the loop the
+consultation runs on, and failed claiming the CLI never called. Mutated — `cancel()` reduced to a bare
+`return True`, precisely the bug review hypothesised — the test fails in 37s saying *"cancel() returned
+True and the consultation kept running"*; unmutated it passes in 7s.
+
+Review then found a third hole and, in fixing it, produced a fourth. Its finding was sound: the pid of
+the CLI was sampled *before* the stop and asserted dead after, so an SDK that read the kill as an
+abnormal exit and **respawned** would satisfy the assertion with a process the test never looks at. Its
+fix was to scan `/proc` dynamically after the stop for any descendant whose command line says `claude` —
+and that fix silently defeats its own other recommendation, which was to stop treating a zombie as torn
+down. A zombie has released its `mm`, so `/proc/<pid>/cmdline` reads **empty**: no command-line filter
+can see one. Composed naively the two suggestions give a test that passes with leaked zombies, which is
+the state the second suggestion exists to catch. The assertion is therefore the *union* — a respawn found
+by its command line, the original found by its pid — sampled after the stop. With the zombie carve-out
+removed entirely the test still passes in 6.9s, so the SDK does reap and the stricter assertion is free.
+A suggested "exactly one API request arrived" counter was declined, because this file's own measurement
+puts a single CLI run at three requests and the invariant would be imaginary.
+
+One residual is left standing rather than built against: a stop cannot recall a request already on the
+wire, and a turn in prefill may be billed after the socket is gone. It is bounded to a single turn by
+`max_turns=1` and recorded as [AG-R-27](risks.md#ag-r-27).

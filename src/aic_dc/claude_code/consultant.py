@@ -44,8 +44,10 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import os
 import shutil
 import tempfile
+import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
@@ -73,6 +75,22 @@ DEFAULT_MODEL: str | None = None
 #: than having the client give up first. A timeout we raise says what
 #: happened; one the client raises says only that we were slow.
 DEFAULT_TIMEOUT_SECONDS = 150.0
+
+#: When a scratch directory is stale whatever its name says (:func:`sweep_scratch`).
+#:
+#: **A disjunct, never the whole predicate.** Liveness answers ownership and
+#: age cannot, which is why age was rejected on its own — the first version of
+#: this sweep used age alone and would delete a running consultation's ``cwd``.
+#: What age does answer is the one case liveness gets wrong: a host killed
+#: mid-consultation whose pid is then recycled onto a long-lived daemon leaves
+#: a directory that ``os.kill(pid, 0)`` reports as live **forever**.
+#:
+#: An hour is safe because a consultation cannot last one. The internal
+#: timeout above is 150s and ``agy``'s own MCP wall is 180.0s, measured
+#: exactly, so 3,600s is twenty-four times the longest a live scratch
+#: directory can possibly exist. That margin is what makes the disjunct free:
+#: it can only ever fire on a directory whose owner is gone.
+STALE_AFTER_SECONDS = 60.0 * 60.0
 
 #: What the consultant is told about its own situation.
 #:
@@ -130,7 +148,11 @@ def sterile_cwd(config_dir: Path | str, *, prefix: str = "c-") -> Iterator[Path]
     """
     parent = Path(config_dir) / SCRATCH_DIR
     parent.mkdir(parents=True, exist_ok=True)
-    root = Path(tempfile.mkdtemp(prefix=prefix, dir=parent))
+    # **The pid is in the name because the sweep reads it.** Without it
+    # there is no way to tell a directory belonging to a live consultation
+    # from one a killed process abandoned, and the only predicate left is
+    # age — which cannot distinguish them at all. See :func:`sweep_scratch`.
+    root = Path(tempfile.mkdtemp(prefix=f"{prefix}{os.getpid()}-", dir=parent))
     try:
         yield root
     finally:
@@ -140,22 +162,87 @@ def sterile_cwd(config_dir: Path | str, *, prefix: str = "c-") -> Iterator[Path]
             logger.warning("Could not remove the consultation scratch %s: %s", root, exc)
 
 
+def _owner_is_alive(name: str) -> bool:
+    """Whether the process that made a scratch directory is still running.
+
+    ``False`` for a name this cannot parse, which is the direction to be
+    wrong in for a directory written by a version that did not stamp the
+    pid: those can only have come from an earlier run, because an earlier
+    *version* is not what is running now.
+    """
+    parts = name.split("-")
+    if len(parts) < 3 or not parts[1].isdigit():
+        return False
+    try:
+        os.kill(int(parts[1]), 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # Alive, and owned by somebody else. Not ours to remove either way.
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _older_than(child: Path, now: float) -> bool:
+    """Whether a scratch directory predates any consultation that could be live.
+
+    ``st_mtime`` rather than a creation time, because the one thing that
+    refreshes it is a write **inside** the directory — so a directory being
+    used looks younger, which is the direction to be wrong in. A directory
+    this cannot stat has vanished underneath us, and reporting it not-stale
+    leaves it to the next sweep rather than raising here.
+    """
+    try:
+        return (now - child.stat().st_mtime) > STALE_AFTER_SECONDS
+    except OSError:
+        return False
+
+
 def sweep_scratch(config_dir: Path | str) -> int:
-    """Remove scratch directories a previous process left behind.
+    """Remove scratch directories whose owning process is gone.
 
     :func:`sterile_cwd` removes its own, so the only way one survives is a
     process that never ran the ``finally`` — ``SIGKILL``, a power cut, an
-    ``os._exit``. Nothing else collects those. Unfiltered by age deliberately:
-    age is not the question, ownership is, and every directory under here
-    belongs to a consultation that is over by definition once this process is
-    the one doing the sweeping.
+    ``os._exit``. Nothing else collects those.
+
+    **The predicate is liveness, not age, and that is a correction.** This
+    was unfiltered, on the reasoning that "ownership is the question, and
+    everything present when this process starts is somebody else's
+    litter". The second half of that sentence stops being true the moment
+    this process opens a scratch directory of its own — and one instance of
+    :class:`ClaudeConsultant` is constructed per consultation, so the
+    sweep ran again, mid-flight, and deleted a live consultation's ``cwd``.
+    A once-per-process latch would fix that case and not the one where the
+    user has two AIC⚡DC processes open, because ``config_dir`` is shared
+    between them.
+
+    Asking the operating system which process owns a directory answers all
+    of it. ``os.kill(pid, 0)`` is the question, the pid is in the name, and
+    the failure direction is safe: a recycled pid leaves litter, where the
+    age heuristic it replaces destroyed work.
+
+    **Age returns as a disjunct**, on an argument that contradicted the
+    sentence above. Litter is indeed the safe direction to fail in, but
+    "leaves litter" understates the recycled-pid case: if the new owner of
+    that pid is a daemon, the directory is reported live for as long as the
+    machine is up and is never collected at all. The reason age was rejected
+    — that it destroys a long consultation's work — cannot apply at
+    :data:`STALE_AFTER_SECONDS`, because a consultation cannot reach an hour:
+    the internal timeout is 150s and ``agy`` cancels at 180.0s. So the
+    predicate is *dead owner* **or** *older than any possible consultation*,
+    and neither half can fire on live work.
     """
     parent = Path(config_dir) / SCRATCH_DIR
     if not parent.is_dir():
         return 0
     removed = 0
+    now = time.time()
     for child in parent.iterdir():
         if not child.is_dir():
+            continue
+        if _owner_is_alive(child.name) and not _older_than(child, now):
             continue
         try:
             shutil.rmtree(child)
@@ -220,6 +307,15 @@ class ClaudeConsultant:
         # Litter from a process that was killed mid-consultation, taken out
         # here for the reason the ``agy`` consultant takes its own out here:
         # this is the first place in the program that knows where it lives.
+        #
+        # **Safe to run here only because the predicate is liveness.** One
+        # instance of this class is constructed per consultation, and the
+        # sweep used to be unfiltered — so a second, overlapping
+        # consultation deleted the first one's ``cwd`` out from under a
+        # live subprocess. ``agy`` was measured serialising its MCP calls
+        # (P11), which made the overlap rare rather than impossible, and
+        # "rare" is how this kind of fault gets shipped. See
+        # :func:`sweep_scratch` for what replaced the age reasoning.
         sweep_scratch(self._config_dir)
 
     # ------------------------------------------------------------------

@@ -237,6 +237,53 @@ def normalise_args(tool_name: str, args: dict[str, Any]) -> dict[str, Any]:
     return merged
 
 
+#: How much of one MCP argument the dialog shows before eliding it. The
+#: dialog also ships the whole ``input`` dict, so this bounds a *headline*
+#: rather than what is available to read.
+MCP_ARG_CHARS = 200
+
+
+def mcp_rule_target(tool_name: str, args: dict[str, Any]) -> str | None:
+    """``"<server>/<tool>"`` for an MCP call, or ``None`` for anything else.
+
+    The string a standing ``mcp_tool`` rule is matched on. ``None`` for a
+    call that is not an MCP call *and* for an MCP call whose target cannot
+    be read — both mean "no standing rule can apply here", which is the
+    safe reading of an unknown target.
+    """
+    if tool_name != agy_tools.MCP_TOOL:
+        return None
+    target = agy_tools.mcp_target(args)
+    return None if target is None else f"{target[0]}/{target[1]}"
+
+
+def mcp_description(tool_name: str, args: dict[str, Any]) -> str | None:
+    """A one-line rendering of what an MCP call is asking for.
+
+    **Mechanical rather than clever.** This host cannot know which argument
+    of an arbitrary MCP tool is the interesting one — ``second_opinion``
+    calls it ``question``, the next server will call it something else — so
+    every string argument is rendered as ``name: value`` with each value
+    capped, and nothing is guessed. Non-string arguments are named without
+    their values, because a nested object elided to 200 characters is
+    noise rather than a summary.
+    """
+    if tool_name != agy_tools.MCP_TOOL:
+        return None
+    arguments = args.get("Arguments")
+    if not isinstance(arguments, dict) or not arguments:
+        return None
+    parts: list[str] = []
+    for key, value in arguments.items():
+        if isinstance(value, str):
+            single = " ".join(value.split())
+            capped = single if len(single) <= MCP_ARG_CHARS else single[: MCP_ARG_CHARS - 1] + "…"
+            parts.append(f"{key}: {capped}")
+        else:
+            parts.append(str(key))
+    return " · ".join(parts) or None
+
+
 def denormalise_args(tool_name: str, amended: dict[str, Any]) -> dict[str, Any]:
     """The reverse, for ``modified_args`` on the way back to the harness.
 
@@ -331,6 +378,10 @@ class _AntigravityBroker(PermissionBroker):
 
         tool_class = TOOL_CLASSES.get(tool_name, "exec")
         normalised = normalise_args(tool_name, tool_input)
+        # `"<server>/<tool>"` when this is an MCP call whose target can be
+        # read, and `None` otherwise. Four fields below turn on it, which
+        # is why it is computed once rather than asked four times.
+        mcp_target = mcp_rule_target(tool_name, normalised)
 
         diff = None
         if tool_class == "write":
@@ -353,7 +404,10 @@ class _AntigravityBroker(PermissionBroker):
             # The engine's own tool name, not a Claude equivalent. The
             # dialog reports what was actually called.
             "tool_name": tool_name,
-            "server": None,
+            # Named for an MCP call, because "which server" is the first
+            # thing a user needs to know about one and the tool name they
+            # are shown — `call_mcp_tool` — does not say.
+            "server": mcp_target.split("/", 1)[0] if mcp_target else None,
             "tool_use_id": getattr(context, "tool_use_id", None) or "",
             "agent_id": getattr(context, "agent_id", None),
             "tool_class": tool_class,
@@ -369,12 +423,20 @@ class _AntigravityBroker(PermissionBroker):
                 else GATED_BY_DEFAULT.get(tool_class, True)
             ),
             "input": normalised,
-            "summary": summarise_request(tool_name, normalised, tool_class),
+            "summary": (
+                f"{tool_name}: {mcp_target}"
+                if mcp_target
+                else summarise_request(tool_name, normalised, tool_class)
+            ),
             "blocked_path": None,
             "decision_reason": None,
             "title": None,
             "display_name": None,
-            "description": normalised.get("description") or None,
+            "description": (
+                normalised.get("description")
+                or mcp_description(tool_name, normalised)
+                or None
+            ),
             # AG-15. This was `[]`, on reasoning that was right about the
             # engine and stopped one step short: Antigravity has no
             # `updated_permissions` at any layer, so there is nothing to
@@ -386,9 +448,16 @@ class _AntigravityBroker(PermissionBroker):
             ),
             "suggested_mode": None,
             "diff": diff,
+            # **Not for an MCP call**, though its class is `exec`.
+            # `build_command_payload` falls back to a rendering of the
+            # whole input when there is no `command` key, and an MCP call
+            # has none — so the dialog would show a JSON blob in the slot
+            # labelled "command", with `command_flags` having scanned it
+            # for shell hazards it cannot contain. An MCP call is not a
+            # shell command and this says so by omitting the block.
             "command": (
                 build_command_payload(self._repo_root, tool_name, normalised)
-                if tool_class == "exec"
+                if tool_class == "exec" and not mcp_target
                 else None
             ),
             "question": None,
@@ -624,6 +693,9 @@ class AntigravityPermissionGate:
             command=normalised.get("command"),
             path=self._absolute_path(normalised),
             tool_name=tool_name,
+            # The target of an MCP call, which is in its arguments rather
+            # than in its name — see `rules.mcp_tool_match`.
+            mcp_tool=mcp_rule_target(tool_name, normalised),
         )
         if standing is not None:
             # A denied read still wins over a standing allow: shift-clicking
