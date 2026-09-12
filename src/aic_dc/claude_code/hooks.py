@@ -1,9 +1,13 @@
-"""Hooks — the two events AIC⚡DC subscribes to, both purely observational.
+"""Hooks — the three events AIC⚡DC subscribes to, all purely observational.
 
 ``PostToolUse`` is the substantial one: what to do after the agent writes a
 file. ``PreCompact`` is a single broadcast, and it is here because it is the
 one fact about a session that the message stream cannot carry in time — see
-:func:`build_pre_compact_hook`.
+:func:`build_pre_compact_hook`. ``PreToolUse`` is narrower still: it fires on
+the two Antigravity tools and copies down their ``tool_use_id``, which is
+the only fact in this file that exists *nowhere else* — an in-process MCP
+handler is called with its arguments and nothing about the call. See
+:func:`build_consultation_anchor_hook`.
 
 **``PostToolUse``.** Three things, all of them bookkeeping:
 
@@ -34,6 +38,12 @@ decision *shadows* ``can_use_tool``, so the CLI stops asking us and our
 permission dialog silently never appears again. A hook that returned
 "allow" to be helpful would ungate every gated tool in the session
 without a single error message. See ``specs5/plan/sdk-surface.md``.
+
+Since AG-28 there *is* a ``PreToolUse`` registration, which moves that
+invariant from theoretical to load-bearing. It is scoped to
+:data:`CONSULT_TOOL_MATCHER` precisely so the pair it could ungate is the
+pair a silent ungating would cost the most: ``generate_image`` writes to
+the repository and ``second_opinion`` bills a separate provider.
 
 The re-index is debounced, because a turn that edits eight files fires
 eight hooks in a few seconds and each re-index ends with two whole-index
@@ -73,6 +83,16 @@ WRITE_TOOL_MATCHER = "Write|Edit|MultiEdit|NotebookEdit"
 # does not try. It sets a flag, and the *disk* is asked later. See
 # `Reindexer.note_shell_ran` and CC-18.
 SHELL_TOOL_MATCHER = "Bash"
+
+# The consultation tools. Matched only to *read the id off the call* —
+# `PreToolUse` is the one place the `tool_use_id` of an in-process MCP tool
+# is visible to us, because the handler itself is handed nothing but its
+# own `args` dict. See `ConsultantBridge.note_tool_use` for what the id
+# then buys, and AG-28 for why the alternatives were heuristics.
+CONSULT_TOOL_MATCHER = (
+    "mcp__aic-dc-antigravity__second_opinion"
+    "|mcp__aic-dc-antigravity__generate_image"
+)
 
 # Where each of those tools keeps the path. NotebookEdit is the odd one out,
 # which is the whole reason this is a table and not a constant.
@@ -548,13 +568,71 @@ def build_pre_compact_hook(
     return pre_compact
 
 
+def build_consultation_anchor_hook(
+    bridge: Callable[[], Any],
+) -> Callable[[Any, str | None, Any], Awaitable[dict[str, Any]]]:
+    """The ``PreToolUse`` callback for the consultation tools: note the id.
+
+    **It decides nothing.** It returns ``{}`` on every path, like its
+    neighbours and for a sharper reason than theirs: this is the module's
+    only ``PreToolUse`` registration, and a ``PreToolUse`` hook that
+    returns a decision *shadows* ``can_use_tool``. One stray
+    ``permissionDecision`` here and the permission dialog stops appearing
+    for these two tools — the pair that bill a separate account and write
+    files. So it reads, it records, and it answers with nothing.
+
+    What it records is the one fact only this event carries. An in-process
+    MCP handler is called with its ``args`` dict and no context object, so
+    a consultation cannot otherwise learn the ``tool_use_id`` of the card
+    that invoked it, and its row has to be minted an identity of its own
+    and rendered detached from that card (the cost AG-13 accepted). The
+    hook fires just before the handler, with both the arguments and the
+    id, which is exactly the join.
+
+    ``bridge`` is a callable rather than the bridge itself. The service
+    mounts the consultant before it builds the matchers, so one could be
+    passed directly — but ``service.consultant_bridge`` is the single
+    place that answers "is there a consultant", and a hook holding its own
+    reference would be a second one to keep in agreement. Reading it late
+    also makes ``None`` an ordinary answer rather than a wiring bug.
+    """
+
+    async def pre_tool_use(
+        input_data: Any,
+        tool_use_id: str | None,
+        context: Any,
+    ) -> dict[str, Any]:
+        try:
+            target = bridge()
+            if target is None:
+                return {}
+            data = input_data or {}
+            target.note_tool_use(
+                data.get("tool_name") or "",
+                data.get("tool_input") or {},
+                # The payload's own id first: the callback argument is
+                # typed optional, while `PreToolUseHookInput.tool_use_id`
+                # is required.
+                data.get("tool_use_id") or tool_use_id,
+            )
+        except Exception as exc:  # noqa: BLE001 - an anchor is worth less
+            # Losing the id costs the consultation its nesting, nothing
+            # more: `_tab` falls back to the minted identity and the row
+            # renders where it always did.
+            logger.warning("Could not note the consultation's tool id: %s", exc)
+        return {}
+
+    return pre_tool_use
+
+
 def build_hook_matchers(
     reindexer: Reindexer,
     broadcast: Callable[[Event], Awaitable[None]] | None = None,
+    consultant_bridge: Callable[[], Any] | None = None,
 ) -> dict[str, list[Any]]:
     """The ``hooks=`` mapping for ``ClaudeAgentOptions``.
 
-    Two events, and both of them only watch. Every other hook event AIC⚡DC
+    Three events, and all of them only watch. Every other hook event AIC⚡DC
     could subscribe to is either already covered by the message pump (which
     sees the same facts in the stream, in time to be useful) or is a
     permission decision we must not make here.
@@ -562,10 +640,16 @@ def build_hook_matchers(
     ``PreCompact`` registers without a ``matcher``: the field filters on a
     tool name and this event has none, so a matcher string here would be a
     pattern tested against nothing.
+
+    ``PreToolUse`` registers *only* when a consultant bridge is passed, and
+    only against :data:`CONSULT_TOOL_MATCHER`. The narrowness is the point:
+    this event is the one that can shadow ``can_use_tool``, so the fewer
+    tools reach it the smaller the blast radius of a future edit that
+    forgets the rule. Sessions without Antigravity register none at all.
     """
     from claude_agent_sdk import HookMatcher
 
-    return {
+    matchers: dict[str, list[Any]] = {
         "PostToolUse": [
             HookMatcher(
                 matcher=WRITE_TOOL_MATCHER,
@@ -581,3 +665,11 @@ def build_hook_matchers(
         ],
         "PreCompact": [HookMatcher(hooks=[build_pre_compact_hook(broadcast)])],
     }
+    if consultant_bridge is not None:
+        matchers["PreToolUse"] = [
+            HookMatcher(
+                matcher=CONSULT_TOOL_MATCHER,
+                hooks=[build_consultation_anchor_hook(consultant_bridge)],
+            ),
+        ]
+    return matchers

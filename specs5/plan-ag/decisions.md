@@ -2746,3 +2746,118 @@ puts a single CLI run at three requests and the invariant would be imaginary.
 One residual is left standing rather than built against: a stop cannot recall a request already on the
 wire, and a turn in prefill may be billed after the socket is gone. It is bounded to a single turn by
 `max_turns=1` and recorded as [AG-R-27](risks.md#ag-r-27).
+
+## AG-28 — The consultation row borrows the id of the call that spawned it **(measured and built 2026-09-12)**
+
+**The question.** A consultation rendered as a free-floating row at the *end* of the turn rather than
+nested under the tool call that asked for it, so the card a reader was looking at and the call it answered
+were separated by everything else the turn did. The renderer already knows how to nest one — it has done
+it for `Task` subagents since the strip existed — and the join it performs is narrow:
+`groupBlocksByScope` places a row immediately after the main-transcript tool block whose `block_id`
+equals the row's `tool_use_id`, and fills it from `nested.get(row.tool_use_id)`, where `nested` is bucketed
+by each streamed block's `agent_id`. A tool block's `block_id` **is** its `tool_use_id`
+(`blocks.js` `applyToolUse`). So the whole of the problem is that the bridge does not know the real
+`toolu_…` of the call it is serving.
+
+It cannot know it. An in-process MCP handler registered with `claude_agent_sdk.tool` receives only its own
+`args` dict — no `tool_use_id`, no context object (measured against the installed SDK, 2026-09-01).
+`PreToolUse` is the only place that id is visible.
+
+**Built:** `CONSULT_TOOL_MATCHER` and `build_consultation_anchor_hook` in
+`src/aic_dc/claude_code/hooks.py`, registered from `_build_bridge_wiring` in
+`src/aic_dc/claude_code/service.py`; `STAGE_LIMIT`, `ANCHOR_ARGS`, `_normalise`, `_anchor_key`,
+`note_tool_use` and `_claim` in `src/aic_dc/antigravity/bridge.py`; a fourth match field in
+`findSubagentTab` in `webapp/src/chat-panel/subagent-tabs.js`. `registered_hook_events` in
+`src/aic_dc/claude_code/sdk_surface.py` learned to read subscript assignments, because
+`build_hook_matchers` stopped being a single dict literal and full hook coverage silently read as none.
+26 new tests; 5,261 green.
+
+### The hook stages, the handler claims, and the join is on content
+
+The hook is scoped to exactly the two Antigravity tool names and returns `{}` on every path. Both of those
+are load-bearing. This module's docstring used to say the hooks were observational and mean it as a
+description; since this entry it is an invariant, because in this SDK a `PreToolUse` hook that returns a
+*decision* shadows `can_use_tool` and the permission dialog silently stops appearing. The matcher is
+narrow precisely so that the pair it could ungate is the pair a silent ungating would cost the most:
+`generate_image` writes to the repository and `second_opinion` bills a separate provider. One test asserts
+the empty dict on every path; another asserts the matcher names only those two tools.
+
+What is staged is `(turn, tool, key) -> tool_use_id`, where the key is every *identifying* argument of the
+call — `(question, context)` for a consultation, `(prompt, output_name, aspect_ratio)` for an image. Not
+the question alone: a model comparing two files writes the **same** question over two different contexts in
+parallel, so a question-only key degenerates into pairing by arrival order, which is the one mechanism this
+design exists to avoid — `asyncio` gives no guarantee that handlers start in the order their hooks fired.
+Not the whole `tool_input` either: the hook reads it off the CLI's wire protocol while the handler reads it
+from the in-process MCP call, and any divergence in defaulting between those two paths would stop every
+consultation nesting at once. The identifying arguments are model-authored strings both sides carry
+verbatim. `_normalise` is shared by both sides so they agree by construction rather than by two
+transformations being written the same way twice.
+
+### An ambiguous claim takes nothing, because a lost coin toss is worse than no nesting
+
+`_claim` matches within the current turn and claims **only when exactly one staged entry matches**. Two
+matches claim nothing and delete nothing.
+
+This one rule closes two separate holes that arrived as separate review blockers with separate proposed
+fixes, neither of which works. The first is genuinely identical parallel calls — two `second_opinion`s
+issued for independent readings, or two `generate_image`s with the same prompt and ratio and no
+`output_name`. The proposed fix was an occurrence index, but the handler cannot learn its own occurrence
+index: it knows only its arguments, and an index assigned at claim time *is* arrival-order pairing under
+another name. The second is a denial. The hook fires before the permission dialog, so a refusal leaves a
+staged id no handler will ever take back; the turn filter cannot help, because a retry in the *same* turn
+finds an entry with the same turn id and would claim the **denied** call — rendering a live card under the
+call the user refused, beside that call's own refusal, and leaving the queue phase-shifted for the rest of
+the turn. The proposed fix there was a `PostToolUse` eviction, but a denied call never executes, so the
+event meant to clean up after a denial is the one event a denial does not produce.
+
+Declining covers both, and loses nothing that was winnable: ambiguity only arises when both hooks fired
+before either handler claimed, and in the ordinary interleaving the first handler sees exactly one entry
+and claims correctly. The failure it degrades to — an unanchored, free-floating row — is precisely what
+shipped before this entry existed.
+
+A precise eviction *is* buildable and was declined: `can_use_tool` does receive `context.tool_use_id`, so
+the permission broker could tell the bridge to discard exactly the denied id and a same-turn retry would
+anchor correctly. That buys back one nesting in a rare case at the price of coupling the permission package
+to the consultation bridge, and the fix for a correlation problem should not be a second correlation
+mechanism that has to be kept in agreement with the first.
+
+### `agent_id` stays minted, and only `tool_use_id` carries the real id
+
+The row keeps a minted `task_id` (⏹ routes on its `consultation-` prefix, and a real `toolu_` there would
+be offered to a CLI that has never heard of it) and a minted `agent_id` equal to it. The real `toolu_…`
+goes on `tool_use_id`, and is stamped as the `agent_id` of every block, notice and heartbeat the
+consultation produces — because that is the key `nested` is bucketed by.
+
+That makes a row's `agent_id` differ from its own children's, which reads like a broken invariant and was
+argued as one. It is not the invariant this renderer has. A grep for every reader of a row's `agent_id`
+found exactly three, and all three are **transcript fetches**: `block-render.js:1204` gates the "Read this
+subagent's transcript" button on it, `tabs.js:765` passes it to `_loadSubagentTranscript`, and
+`rendering.js:1880` collects it for the "View subagents (n)" affordance. Nothing joins blocks to a row by
+`row.agent_id`; the join at `block-render.js:620` is `nested.get(row.tool_use_id)`. So the contract the
+renderer actually requires is **`block.agent_id == row.tool_use_id`**, which holds in the anchored case and
+in the fallback, and a real `toolu_` in `row.agent_id` would buy nothing while arming three affordances to
+fetch a session transcript for a consultation that never was an SDK subagent and has no log on disk.
+
+The split has one cost, paid in the webapp: `streaming.js` routes a scoped system notice through
+`findSubagentTab`, which matched `rowKey`, `agent_id` and `task_id`. With notices now stamped with the
+pointer, a consultation's "no tools, no repository access" warning fell back to Main — the one place it is
+not about. `findSubagentTab` gained `tool_use_id` as a fourth match, with a regression test. One line
+against three broken fetch affordances is the right side of that trade.
+
+### What the review moved
+
+Three rounds with Antigravity, converged. Round one killed question-only keying with a case this side had
+wrongly dismissed, killed a `self._staged.clear()` that turned one lost nesting into a lost nesting for
+every consultation in flight, and caught that `_anchor_key` ignored the tool name — so a `generate_image`
+payload carrying a `question` field would be identified by it. It also argued the id split correctly in
+substance while suggesting a repair (`nested.get(row.agent_id)`) that would have broken `Task` subagents,
+whose blocks carry the parent call's id and not the SDK agent id. Round two found the denial phase shift,
+which was the most serious thing in the whole review. Two of its claims were refuted by measurement: React
+key collisions do not apply to a Lit webapp that renders blocks through `${entries.map(...)}` with no key
+function and has no readers of `data-block-id` or `data-agent-id`; and the orphan-block leakage it
+identified across an interrupted turn is real in shape but unchanged by this entry, since `observe()` reads
+the turn live per step and behaves identically with a minted scope — recorded as risk, not blocker. Round
+three converged on all three points.
+
+One residual is left standing: two calls byte-identical in every anchor argument, in parallel, in one
+turn, render unanchored. Nothing local can do better, and it is recorded as [AG-R-28](risks.md#ag-r-28).

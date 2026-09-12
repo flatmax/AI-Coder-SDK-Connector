@@ -7345,3 +7345,70 @@ And the no-tools posture is now enforced at the launch path by `_no_tools_or_fai
 `ConsultationError` rather than an `assert`, because `assert` is stripped under `python -O`.
 
 Nineteen tests, four suites, and the full run: **5234 Python passed, 4533 webapp passed.**
+
+## The row that had no card to sit under (2026-09-12)
+
+Migration step 3 asks for inline rendering as the default consultation surface. Its first piece is not a
+rendering change at all: before a consultation can be *inline*, it has to have somewhere to be inline
+**in**. It did not. A consultation appeared as a free-floating row at the end of the turn, so the card a
+reader was watching and the tool call that asked for it were separated by everything else the turn did.
+
+The renderer has nested subagents under their spawning call since the strip existed, and the join it does
+is narrow: a row goes after the main-transcript tool block whose `block_id` equals the row's
+`tool_use_id`, and is filled from the blocks whose `agent_id` equals that same value. So the entire
+problem was that the bridge never learns the real `toolu_…` of the call it is serving — an in-process MCP
+handler is given its own `args` dict and nothing else. `PreToolUse` is the only place that id exists.
+
+The mechanism is a decision-free hook that stages `(turn, tool, identifying-arguments) -> tool_use_id`,
+and a handler that claims it back by matching. It is written up as [AG-28](decisions.md#ag-28); what
+belongs here is what three rounds of review did to it, because almost none of the final shape survived
+round one intact.
+
+**Round one killed the key.** The first cut matched on the question alone. The reviewer's case was one I
+had considered and wrongly dismissed: a model comparing two files writes the *same* question over two
+different contexts, in parallel, and on the question alone those two pair by arrival order — which is
+precisely the mechanism the whole design exists to avoid. It also caught a `self._staged.clear()` on the
+quiet path that turned one lost nesting into a lost nesting for every consultation in flight, and an
+`_anchor_key` that ignored the tool name and would have identified a `generate_image` payload by a
+`question` field it happened to carry. Three adopted.
+
+**Round two found the one that mattered.** The hook fires before the permission dialog, so a *denied*
+call leaves a staged id that no handler will ever take back. The turn filter does not help, because a
+retry in the same turn carries the same turn id — so the retry would claim the **denied** call's id, and
+render its live card under the call the user had just refused, beside that refusal, with the queue
+phase-shifted for the rest of the turn. That is the difference between a feature that degrades and one
+that lies, and it was found by a reviewer that has never seen the repository.
+
+Its two proposed fixes are both dead, and usefully so. An occurrence index cannot work: the handler does
+not know whether it is the first or the second of two identical calls, and an index assigned at claim
+time *is* the arrival-order pairing round one had just finished demolishing. A `PostToolUse` eviction
+cannot work either, because a denied call never executes — the event meant to clean up after a denial is
+the one event a denial does not produce.
+
+What replaced both is a single rule: **claim only when exactly one staged entry matches**. Two matches
+claim nothing and delete nothing. It closes the denial and the identical-parallel case together, it loses
+nothing that was winnable — in the ordinary interleaving the first handler sees one entry and claims
+correctly — and what it degrades to is the free-floating row that shipped before any of this existed. A
+precise eviction is buildable, since `can_use_tool` does receive `tool_use_id`, and was declined: the fix
+for a correlation problem should not be a second correlation mechanism kept in agreement with the first.
+
+**Two of the review's claims were refuted by measurement, and one by grep.** The React key-collision
+warning does not reach a Lit webapp that renders blocks through `${entries.map(...)}` with no key
+function and has no readers of `data-block-id` or `data-agent-id`. The orphan-block leakage across an
+interrupted turn is real in shape and is not a regression: `observe()` reads the turn live per step and
+does the same thing with a minted scope, so it predates the anchor. And the round-three insistence that
+`row.agent_id` must carry the real id fell to three call sites — every reader of a row's `agent_id` in the
+webapp is a *transcript fetch*, and a consultation has no transcript on disk, so putting a plausible
+`toolu_` there would arm three affordances to go looking for a session that never existed. The invariant
+this renderer has is `block.agent_id == row.tool_use_id`, not parent-equals-child.
+
+The review also missed one, which is worth recording as plainly as the ones it caught: splitting the ids
+meant scoped system notices were suddenly stamped with the pointer rather than the row's `agent_id`, and
+`findSubagentTab` did not match on it — so a consultation's "no tools, no repository access" warning fell
+back to Main, the one place it is not about. One line and a regression test.
+
+One residual stands: two calls byte-identical in every anchor argument, in parallel, in one turn, nest
+under neither. Nothing local can do better, and [AG-R-28](risks.md#ag-r-28) says so rather than pretending
+otherwise.
+
+**26 tests across five files; 5,261 Python passed, 4,534 webapp passed.**

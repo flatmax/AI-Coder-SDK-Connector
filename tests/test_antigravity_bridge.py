@@ -28,7 +28,12 @@ import time
 
 import pytest
 
-from aic_dc.antigravity.bridge import SERVER_NAME, ConsultantBridge, Event
+from aic_dc.antigravity.bridge import (
+    SERVER_NAME,
+    STAGE_LIMIT,
+    ConsultantBridge,
+    Event,
+)
 from aic_dc.antigravity.consultant import ConsultationError, ImageResult
 from aic_dc.antigravity.credentials import MissingCredentialsError
 
@@ -707,7 +712,12 @@ class TestTheConsultationGetsATab:
 
     @pytest.mark.asyncio
     async def test_one_identity_joins_the_row_to_its_blocks(self):
-        """``row.tool_use_id`` is what picks the blocks to mirror."""
+        """``row.tool_use_id`` is what picks the blocks to mirror.
+
+        With no ``PreToolUse`` hook in front of it — the case here — all
+        three ids collapse onto the minted one, which is the behaviour
+        that shipped before AG-28 and the fallback it keeps.
+        """
         bridge, seen = self.bridge_with_emit()
         await bridge.second_opinion("Well?")
         row = self.events(seen, "subagentEvent")[0].payload
@@ -990,6 +1000,280 @@ class TestTheConsultationGetsATab:
         assert beats, "no heartbeat at all"
         assert not any("queued behind paid traffic" in m for m in beats)
         assert any("Antigravity is working" in m for m in beats)
+
+
+class TestTheRowNestsInsideItsToolCard:
+    """AG-28 — the consultation borrows the id of the call that spawned it.
+
+    Everything here turns on one join the renderer already performs:
+    ``groupBlocksByScope`` places a subagent row immediately after the
+    main-transcript tool block whose ``block_id`` equals the row's
+    ``tool_use_id``, and fills it with the blocks whose ``agent_id``
+    equals that same value. A tool block's ``block_id`` *is* its
+    ``tool_use_id`` (``blocks.js`` ``applyToolUse``), so putting the real
+    call id on both row fields is the whole of the change — the webapp
+    needs none.
+
+    ``task_id`` is the one that must *not* move: ``stop_task`` routes ⏹ on
+    its ``consultation-`` prefix, and a real ``toolu_`` there would be
+    offered to a CLI that has never heard of it.
+    """
+
+    def bridge_with_emit(self, consultant=None, request_id="req-1"):
+        seen = []
+
+        async def emit(event, rid):
+            seen.append((event, rid))
+
+        return (
+            ConsultantBridge(
+                consultant or FakeConsultant(answer="ok"),
+                emit=emit,
+                request_id=lambda: request_id,
+            ),
+            seen,
+        )
+
+    def rows(self, seen):
+        return [e.payload for e, _ in seen if e.name == "subagentEvent"]
+
+    def note(self, bridge, question, tool_use_id, context="", tool="second_opinion"):
+        """What the ``PreToolUse`` hook does, without the CLI."""
+        bridge.note_tool_use(
+            f"mcp__aic-dc-antigravity__{tool}",
+            {"question": question, "context": context}
+            if tool == "second_opinion"
+            else {"prompt": question},
+            tool_use_id,
+        )
+
+    @pytest.mark.asyncio
+    async def test_the_row_points_at_the_spawning_call(self):
+        """``tool_use_id`` alone, which is what places the row."""
+        bridge, seen = self.bridge_with_emit()
+        self.note(bridge, "Well?", "toolu_01ABC")
+        await bridge.second_opinion("Well?")
+        assert self.rows(seen)[0]["tool_use_id"] == "toolu_01ABC"
+
+    @pytest.mark.asyncio
+    async def test_the_task_id_stays_minted(self):
+        """Or ⏹ stops routing to the bridge and reaches the CLI instead."""
+        bridge, seen = self.bridge_with_emit()
+        self.note(bridge, "Well?", "toolu_01ABC")
+        await bridge.second_opinion("Well?")
+        assert self.rows(seen)[0]["task_id"].startswith("consultation-")
+
+    @pytest.mark.asyncio
+    async def test_the_agent_id_stays_minted_too(self):
+        """It is the *transcript* key, and a consultation has no
+        transcript on disk. An id that is obviously ours says so; a
+        borrowed ``toolu_`` would make a structural limitation read as a
+        dropped session in every log line that failed to fetch it."""
+        bridge, seen = self.bridge_with_emit()
+        self.note(bridge, "Well?", "toolu_01ABC")
+        await bridge.second_opinion("Well?")
+        row = self.rows(seen)[0]
+        assert row["agent_id"] == row["task_id"]
+        assert row["agent_id"].startswith("consultation-")
+
+    @pytest.mark.asyncio
+    async def test_what_the_row_holds_is_stamped_on_its_blocks(self):
+        """The join is only a join if both halves carry the same value.
+
+        ``groupBlocksByScope`` fills a row from ``nested.get(row.tool_use_id)``
+        against a map keyed by ``block.agent_id``, so the blocks — and the
+        scoped notices that render beside them — must be stamped with the
+        *pointer*, not with the row's own identity.
+        """
+        bridge, seen = self.bridge_with_emit()
+        self.note(bridge, "Well?", "toolu_01ABC")
+        await bridge.second_opinion("Well?")
+        posture = [
+            e for e, _ in seen
+            if e.name == "systemEvent"
+            and e.payload.get("subtype") == "consultation_posture"
+        ]
+        assert posture[0].payload["data"]["agent_id"] == "toolu_01ABC"
+        assert self.rows(seen)[0]["tool_use_id"] == "toolu_01ABC"
+
+    @pytest.mark.asyncio
+    async def test_the_terminal_row_agrees_with_the_opening_one(self):
+        """Both announcements, or the tab settles a row nobody opened."""
+        bridge, seen = self.bridge_with_emit()
+        self.note(bridge, "Well?", "toolu_01ABC")
+        await bridge.second_opinion("Well?")
+        opened, settled = self.rows(seen)[0], self.rows(seen)[-1]
+        assert settled["terminal"] is True
+        for field in ("task_id", "agent_id", "tool_use_id"):
+            assert opened[field] == settled[field]
+
+    @pytest.mark.asyncio
+    async def test_concurrent_consultations_pair_by_question(self):
+        """Not by arrival order.
+
+        Nothing guarantees two handlers start in the order their hooks
+        fired, so index-pairing would silently swap two live streams. The
+        question is what both sides actually hold.
+        """
+        bridge, seen = self.bridge_with_emit()
+        self.note(bridge, "First?", "toolu_FIRST")
+        self.note(bridge, "Second?", "toolu_SECOND")
+        await bridge.second_opinion("Second?")
+        await bridge.second_opinion("First?")
+        assert [r["tool_use_id"] for r in self.rows(seen)][:1] == ["toolu_SECOND"]
+        assert self.rows(seen)[-1]["tool_use_id"] == "toolu_FIRST"
+
+    @pytest.mark.asyncio
+    async def test_an_id_is_consumed_once(self):
+        """A second consultation with the same question must not reuse it,
+        or two rows claim one card and the renderer stacks them."""
+        bridge, seen = self.bridge_with_emit()
+        self.note(bridge, "Well?", "toolu_01ABC")
+        await bridge.second_opinion("Well?")
+        await bridge.second_opinion("Well?")
+        first, second = self.rows(seen)[0], self.rows(seen)[-1]
+        assert first["tool_use_id"] == "toolu_01ABC"
+        assert second["tool_use_id"].startswith("consultation-")
+
+    @pytest.mark.asyncio
+    async def test_a_denied_call_cannot_poison_a_later_turn(self):
+        """The hook fires before the permission dialog, so a refusal
+        leaves a staged id that no handler will ever take back. It must
+        not be handed to the next turn's consultation instead."""
+        turn = {"id": "req-1"}
+        seen = []
+
+        async def emit(event, rid):
+            seen.append((event, rid))
+
+        bridge = ConsultantBridge(
+            FakeConsultant(answer="ok"), emit=emit, request_id=lambda: turn["id"]
+        )
+        self.note(bridge, "Well?", "toolu_DENIED")
+        turn["id"] = "req-2"
+        await bridge.second_opinion("Well?")
+        assert self.rows(seen)[0]["tool_use_id"].startswith("consultation-")
+
+    @pytest.mark.asyncio
+    async def test_a_denial_retried_in_the_same_turn_claims_neither_id(self):
+        """The turn filter cannot help here: both ids belong to this turn.
+
+        A refusal leaves its staged id behind, so a retry of the identical
+        call finds two entries and no way to tell them apart. Taking the
+        first would render the live card under the call the user *refused*,
+        beside that call's own "denied" result. Claiming nothing leaves an
+        unanchored row, which is what shipped before any of this existed.
+        """
+        bridge, seen = self.bridge_with_emit()
+        self.note(bridge, "Well?", "toolu_DENIED")
+        self.note(bridge, "Well?", "toolu_APPROVED")
+        await bridge.second_opinion("Well?")
+        assert self.rows(seen)[0]["tool_use_id"].startswith("consultation-")
+
+    @pytest.mark.asyncio
+    async def test_two_indistinguishable_calls_anchor_neither(self):
+        """Two parallel calls with byte-identical arguments.
+
+        A model asked for two independent readings writes the same
+        question twice. Nothing in either payload separates them, so a
+        first-match claim is a coin toss — and a lost toss puts each
+        stream under the other's card, disagreeing with the result
+        rendered beside it. Both fall back instead.
+        """
+        bridge, seen = self.bridge_with_emit()
+        self.note(bridge, "Is this safe?", "toolu_ONE", context="code")
+        self.note(bridge, "Is this safe?", "toolu_TWO", context="code")
+        await bridge.second_opinion("Is this safe?", "code")
+        await bridge.second_opinion("Is this safe?", "code")
+        assert all(
+            row["tool_use_id"].startswith("consultation-") for row in self.rows(seen)
+        )
+
+    @pytest.mark.asyncio
+    async def test_an_ambiguous_pair_does_not_consume_the_ids(self):
+        """Declining must not eat them: a third, distinguishable call in
+        the same turn is unaffected by the pair it could not separate."""
+        bridge, seen = self.bridge_with_emit()
+        self.note(bridge, "Same?", "toolu_ONE")
+        self.note(bridge, "Same?", "toolu_TWO")
+        self.note(bridge, "Different?", "toolu_THREE")
+        await bridge.second_opinion("Different?")
+        assert self.rows(seen)[0]["tool_use_id"] == "toolu_THREE"
+        assert len(bridge._staged) == 2
+
+    @pytest.mark.asyncio
+    async def test_a_structured_argument_still_separates_two_calls(self):
+        """The schema says these are strings, so a dict is already off the
+        documented path — but collapsing every non-string to one empty
+        value would make two such calls indistinguishable, which is the
+        single thing the key exists to prevent."""
+        bridge, seen = self.bridge_with_emit()
+        for name, uid in (("a.py", "toolu_A"), ("b.py", "toolu_B")):
+            bridge.note_tool_use(
+                "mcp__aic-dc-antigravity__second_opinion",
+                {"question": "Bugs?", "context": {"path": name}},
+                uid,
+            )
+        await bridge.second_opinion("Bugs?", {"path": "b.py"})
+        assert self.rows(seen)[0]["tool_use_id"] == "toolu_B"
+
+    @pytest.mark.asyncio
+    async def test_an_unconsumed_id_does_not_accumulate(self):
+        """One turn of nothing but refusals still has a bounded buffer."""
+        bridge, _ = self.bridge_with_emit()
+        for n in range(STAGE_LIMIT * 3):
+            self.note(bridge, f"Question {n}?", f"toolu_{n}")
+        assert len(bridge._staged) == STAGE_LIMIT
+
+    @pytest.mark.asyncio
+    async def test_generate_image_anchors_on_its_prompt(self):
+        bridge, seen = self.bridge_with_emit(
+            FakeConsultant(image=TestGenerateImage.IMAGE)
+        )
+        self.note(bridge, "a cat", "toolu_IMG", tool="generate_image")
+        await bridge.generate_image("a cat")
+        assert self.rows(seen)[0]["tool_use_id"] == "toolu_IMG"
+
+    @pytest.mark.asyncio
+    async def test_one_question_over_two_contexts_does_not_cross_anchor(self):
+        """The ordinary parallel case, and the reason the key is not the
+        question alone: a model comparing two files writes *the same*
+        question twice with a different diff in each. Keyed on the
+        question only, those two pair by arrival order — and handlers do
+        not start in the order their hooks fired, so the two live streams
+        would render under each other's cards."""
+        bridge, seen = self.bridge_with_emit()
+        self.note(bridge, "Any bugs?", "toolu_A", context="diff of A")
+        self.note(bridge, "Any bugs?", "toolu_B", context="diff of B")
+        await bridge.second_opinion("Any bugs?", "diff of B")
+        await bridge.second_opinion("Any bugs?", "diff of A")
+        assert self.rows(seen)[0]["tool_use_id"] == "toolu_B"
+        assert self.rows(seen)[-1]["tool_use_id"] == "toolu_A"
+
+    @pytest.mark.asyncio
+    async def test_a_quiet_turn_does_not_discard_other_staged_ids(self):
+        """Failing to claim costs one nesting; clearing the buffer would
+        cost every consultation in flight one."""
+        turn = {"id": None}
+        bridge = ConsultantBridge(
+            FakeConsultant(answer="ok"),
+            emit=None,
+            request_id=lambda: turn["id"],
+        )
+        turn["id"] = "req-1"
+        self.note(bridge, "Well?", "toolu_01ABC")
+        turn["id"] = None
+        assert bridge._claim("second_opinion", "Well?", "") is None
+        turn["id"] = "req-1"
+        assert bridge._claim("second_opinion", "Well?", "") == "toolu_01ABC"
+
+    @pytest.mark.asyncio
+    async def test_a_missing_hook_is_the_old_behaviour(self):
+        """The fallback is not a degraded mode; it is what shipped."""
+        bridge, seen = self.bridge_with_emit()
+        await bridge.second_opinion("Well?")
+        row = self.rows(seen)[0]
+        assert row["agent_id"] == row["tool_use_id"] == row["task_id"]
 
 
 class TestTheTabAndTheAnswerAgree:

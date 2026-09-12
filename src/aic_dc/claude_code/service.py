@@ -804,21 +804,6 @@ class ClaudeCodeService:
         repo-wide questions, which is the hardest kind of fault to attribute.
         """
         try:
-            hooks = build_hook_matchers(self.reindexer, self._broadcast)
-        except Exception as exc:
-            logger.warning(
-                "Hooks unavailable: the file tree and the indexes will not "
-                "follow the agent's writes, and a compaction pause will go "
-                "unannounced: %s",
-                exc,
-            )
-            hooks = None
-            self._degradations.append(
-                "The post-write re-index hook did not start, so the file tree "
-                "and the symbol map will not follow the agent's writes — "
-                "refresh them by hand after it edits files."
-            )
-        try:
             mcp_servers = {SERVER_NAME: self.mcp_bridge.build_server()}
         except Exception as exc:
             logger.warning(
@@ -833,7 +818,40 @@ class ClaudeCodeService:
                 "will fall back to Glob, Grep and Read, which answer "
                 "repo-wide questions less well."
             )
+        # Before the hooks, which is the reverse of the order this ran in
+        # until AG-28. The `PreToolUse` matcher exists only to read the id
+        # off a consultation tool call, so a session with no consultant
+        # should not register that event at all — and whether there is one
+        # is only known after this line. Its own failure is already
+        # contained: `_add_consultant` never raises, it degrades.
         mcp_servers = self._add_consultant(mcp_servers)
+        try:
+            hooks = build_hook_matchers(
+                self.reindexer,
+                self._broadcast,
+                # Still a callable rather than the bridge itself. The
+                # attribute is the single source of truth for "is there a
+                # consultant", and a hook holding its own reference would
+                # be a second one to keep in agreement.
+                consultant_bridge=(
+                    (lambda: self.consultant_bridge)
+                    if getattr(self, "consultant_bridge", None) is not None
+                    else None
+                ),
+            )
+        except Exception as exc:
+            logger.warning(
+                "Hooks unavailable: the file tree and the indexes will not "
+                "follow the agent's writes, and a compaction pause will go "
+                "unannounced: %s",
+                exc,
+            )
+            hooks = None
+            self._degradations.append(
+                "The post-write re-index hook did not start, so the file tree "
+                "and the symbol map will not follow the agent's writes — "
+                "refresh them by hand after it edits files."
+            )
         return hooks, mcp_servers
 
     def _add_consultant(self, mcp_servers: Any) -> Any:

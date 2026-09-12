@@ -845,6 +845,24 @@ describe('a system event that names a subagent lands in its tab', () => {
     expect(seen).toEqual([['🚫 The consultation had no tools', 'warning']]);
   });
 
+  it('routes a notice that names the spawning call, not the agent', async () => {
+    // AG-28's half of the same join. A consultation's row keeps a *minted*
+    // `agent_id` — there is no SDK session behind it to fetch — and carries
+    // the real `toolu_` only as `tool_use_id`, which is what nests it under
+    // its card. Its blocks and notices are stamped with that same pointer,
+    // so a notice about a consultation names the call and not the agent.
+    // Matching on `agent_id` alone sent it to Main.
+    const p = mountPanel();
+    const { reqId, tab } = await withSubagent(p);
+    const mainBefore = p.messages.length;
+    pushEvent('system-event', ungrounded(reqId, { agent_id: PARENT }));
+    await settle(p);
+    expect(contentsOf(tab.messages)).toEqual([
+      'This consultation reached for a tool and got nothing …',
+    ]);
+    expect(p.messages.length).toBe(mainBefore);
+  });
+
   it('falls back to Main when the named tab is not open', async () => {
     // A consultation the user closed, or a reconnect that has not rebuilt
     // the strip yet. An unsaid warning is worse than one in the wrong place.

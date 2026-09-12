@@ -279,7 +279,15 @@ roughly 40% of the estimate**. A costing exercise that only ever adds is not mea
    of shared CLI environment state. This is the step that ends the asymmetry the exercise was framed
    around.
 3. **Inline rendering as the default consultation surface**, with a full streaming view available and
-   detachment non-destructive.
+   detachment non-destructive. **Its first piece is built, 2026-09-12**, and it was not a rendering
+   change: a consultation had nowhere to be inline *in*, because the bridge never learned the
+   `tool_use_id` of the call it was serving and the row therefore floated to the end of the turn. A
+   `PreToolUse` hook now stages that id and the handler claims it back by matching every identifying
+   argument — [AG-28](../plan-ag/decisions.md#ag-28), with the residual at
+   [AG-R-28](../plan-ag/risks.md#ag-r-28). What remains of step 3 is the surface itself: stop creating a
+   strip tab eagerly and render the stream expanded inline; make the full view a projection of retained
+   blocks rather than a disk read, which a consultation has nothing to answer; and key the consultant's
+   live conversation by consultation id so two in flight can be stopped independently.
 4. **Provision `agy`'s MCP root as a build step.** It has no MCP servers configured today, so this is
    construction, not configuration — the correction that turned a claimed half-day into a build task.
    **The mechanism has since left this layer**: `agy mcp add` documents `--type http` with repeatable

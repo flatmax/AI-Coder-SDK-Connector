@@ -2700,3 +2700,31 @@ first one runs to completion unobserved. So the honest statement is that a stop 
 *local* consultation — which is what a user pressing ⏹ is asking for, and what the subscription-drain
 worry was actually about — and best-effort against a single already-transmitted turn upstream. Recorded
 rather than mitigated, because the only thing that would shrink the window is not sending the request.
+
+## AG-R-28 — Two byte-identical consultations in one turn nest under neither call
+
+**Accepted, bounded, and irreducible without a change to the CLI.** [AG-28](decisions.md#ag-28) anchors a
+consultation's row to its spawning tool call by staging the real `toolu_…` in a `PreToolUse` hook and
+letting the handler claim it back by matching every identifying argument. The join is on content, because
+content is the only thing both sides hold: an in-process MCP handler receives its own `args` dict and
+nothing else.
+
+So two calls whose anchor arguments are identical — the same question over the same context, or the same
+prompt at the same aspect ratio with no filename — are indistinguishable to the mechanism. `_claim` claims
+only when exactly one staged entry matches, so both fall back to the minted identity and render as
+free-floating rows at the turn level. That is the pre-AG-28 behaviour, logged at debug, and it is the
+deliberate choice: the alternative is a coin toss whose lost half renders a live card under a *different*
+call, beside that call's own result, disagreeing with it in the one place a reader is looking.
+
+Two narrow paths could still mis-anchor rather than decline, and both require a staged entry to be missing
+when its own handler claims. The first is an SDK that dispatches a handler without having run its hook,
+which is outside this mechanism to defend against — the hook is awaited before dispatch. The second is
+buffer eviction: `STAGE_LIMIT` is 16, so sixteen intervening unclaimed consultations in a single turn could
+push one half of an ambiguous pair out and leave the other claimable. Consultations are user-facing calls
+that run once or twice a turn, so this is recorded rather than defended against; raising the cap trades a
+bound nobody has approached for a bound nobody would.
+
+There is one adjacent path that is *not* new here. `observe()` reads the turn id live on each step, so a
+consultation outliving its turn emits blocks tagged with the new turn, which the renderer's fallback would
+spill into the main transcript. That was raised during AG-28's review as a regression and is not one: it
+behaves identically with the minted scope and predates the anchor entirely.

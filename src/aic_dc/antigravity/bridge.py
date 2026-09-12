@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import secrets
 from typing import Any
@@ -104,6 +105,88 @@ HEARTBEAT_SECONDS = 20.0
 #: waits on one that has stopped reading. Expiry is logged and the tab
 #: settles anyway: a stale tab is a smaller fault than a stalled turn.
 DRAIN_SECONDS = 5.0
+
+#: How many un-consumed tool ids the anchor buffer keeps. Every entry is
+#: normally consumed microseconds later by the handler the hook fired for,
+#: so the buffer holds one item; what this bounds is the abnormal case,
+#: where a call is denied at the permission dialog or the turn is aborted
+#: between the hook and the handler and the entry is never taken back.
+#: Turn-scoping in :meth:`ConsultantBridge._claim` clears those on the next
+#: turn, so this only has to survive one turn's worth of them.
+STAGE_LIMIT = 16
+
+#: The arguments that identify one call of each consultation tool, in the
+#: order they are read. Comparing the whole ``tool_input`` would be
+#: stricter and worse: the hook reads it off the CLI's wire protocol while
+#: the handler reads it from the in-process MCP call, and any divergence
+#: in defaulting between those two paths would silently stop every
+#: consultation from anchoring. These are model-authored strings both
+#: sides carry verbatim, so they cannot drift.
+#:
+#: Both of ``second_opinion``'s arguments, not just the question. One turn
+#: can issue several consultations concurrently, and a model comparing two
+#: files writes the *same* question over two different contexts —
+#: "review this for bugs" twice, with a different diff in each. On the
+#: question alone those two are indistinguishable and pair by arrival
+#: order, which is the index-pairing this design exists to avoid: handlers
+#: do not start in the order their hooks fired, so the two live streams
+#: would render under each other's cards.
+ANCHOR_ARGS: dict[str, tuple[str, ...]] = {
+    "second_opinion": ("question", "context"),
+    "generate_image": ("prompt", "output_name", "aspect_ratio"),
+}
+
+
+def _normalise(value: Any) -> str:
+    """One anchor argument as both sides of the join must see it.
+
+    Shared by :func:`_anchor_key` and :meth:`ConsultantBridge._claim` so
+    the hook's reading of a payload and the handler's reading of its own
+    arguments agree by construction, rather than by two transformations
+    being written the same way twice and staying that way.
+
+    ``strip()`` is the only normalisation applied to a string, and it is
+    applied because whitespace is the one difference the two transports
+    could plausibly introduce without the model having written it.
+
+    A non-string is JSON rather than empty. The schema declares every
+    anchor argument as a string, so a payload carrying a dict here is
+    already off the documented path — but collapsing all of them to one
+    empty value would make two such calls indistinguishable, which is the
+    one thing the key exists to prevent. ``sort_keys`` because the two
+    sides may have round-tripped the value through different JSON
+    decoders; ``default=str`` because a key that cannot be computed is
+    worse than an approximate one.
+    """
+    if isinstance(value, str):
+        return value.strip()
+    if value is None:
+        return ""
+    try:
+        return json.dumps(value, sort_keys=True, default=str)
+    except (TypeError, ValueError):  # pragma: no cover - default=str covers it
+        return repr(value)
+
+
+def _anchor_key(tool_name: str, tool_input: Any) -> tuple[str, ...]:
+    """The identifying arguments of a consultation call, from either side.
+
+    Both the ``PreToolUse`` hook and the tool handler call this on what
+    they were handed, so the two agree by construction rather than by two
+    call sites staying in step.
+
+    Keyed by tool name rather than by sweeping every known argument: a
+    ``generate_image`` payload that happened to carry a ``question`` field
+    would otherwise be identified by it, and match a consultation.
+
+    ``strip()`` is the only normalisation, and it is here because
+    whitespace is the one difference the two transports could plausibly
+    introduce without the model having written it.
+    """
+    names = ANCHOR_ARGS.get(tool_name, ())
+    if not names or not isinstance(tool_input, dict):
+        return ()
+    return tuple(_normalise(tool_input.get(name)) for name in names)
 
 
 def _text(body: str) -> dict[str, Any]:
@@ -342,30 +425,139 @@ class ConsultantBridge:
         self._request_id = request_id
         self._counter = 0
         self._tasks: set[Any] = set()
+        # (turn, tool, key) -> tool_use_id, staged by the `PreToolUse`
+        # hook and consumed by the handler. See :meth:`note_tool_use`.
+        self._staged: list[dict[str, Any]] = []
 
     # ------------------------------------------------------------------
     # AG-13 — the consultation as its own agent tab
     # ------------------------------------------------------------------
 
-    def _new_agent_id(self) -> str:
-        """A fresh identity for one consultation.
+    def _new_task_id(self) -> str:
+        """A fresh *task* identity for one consultation.
 
-        **Minted, not borrowed, and the reason is a measured limitation.**
-        An in-process MCP tool handler receives only its own ``args``
-        dict — no ``tool_use_id``, no context object
-        (``claude_agent_sdk.tool``, verified 2026-09-01) — so a
-        consultation cannot learn the id of the tool card that invoked it.
-        Correlating against the most recent
-        ``mcp__aic-dc-antigravity__*`` card in the pump would be a race
-        whose failure mode is attaching output to the *wrong* card, which
-        is worse than not attaching it.
-
-        The cost, accepted in AG-13: the row does not nest inside its
-        spawning tool card the way a ``Task`` subagent's does. It gets its
-        own row and its own tab.
+        Minted, and it stays minted even when the row's other two ids are
+        borrowed from the real tool call (see :meth:`note_tool_use`). This
+        is the id the ⏹ button sends, and ``stop_task`` routes on its
+        shape: anything starting ``consultation-`` is stopped by this
+        bridge without ever reaching the CLI, which has never heard of it.
+        A real ``toolu_`` here would be offered to the CLI first and
+        refused.
         """
         self._counter += 1
         return f"consultation-{id(self):x}-{self._counter}"
+
+    def note_tool_use(
+        self,
+        tool_name: str,
+        tool_input: dict[str, Any],
+        tool_use_id: str | None,
+    ) -> None:
+        """Record the id of a consultation tool call about to run. AG-28.
+
+        Called from the ``PreToolUse`` hook, which fires immediately
+        before the handler and is the *only* place this id is visible: an
+        in-process MCP handler is invoked with its ``args`` dict and no
+        context object (``claude_agent_sdk.tool``, verified 2026-09-01).
+        Without it the consultation has to mint an identity of its own and
+        render detached from the card that spawned it — the cost AG-13
+        accepted and this retires.
+
+        Correlating instead against "the most recent
+        ``mcp__aic-dc-antigravity__*`` card in the pump" was the
+        alternative, and it was rejected for being a guess whose failure
+        mode is attaching a consultation's output to the *wrong* card.
+        This is not a guess; the hook and the handler see the same call.
+
+        Keyed on the call's arguments rather than paired by arrival order,
+        because a turn can issue several consultations concurrently and
+        nothing guarantees the handlers start in the order the hooks
+        fired. Two calls identical in *every* argument remain
+        indistinguishable and pair FIFO — recorded as AG-R-28 — but that
+        is a repeated question with a repeated context, not the ordinary
+        case of one question asked over two different diffs. Even then the
+        answers cannot be swapped: each returns through its own tool call.
+        """
+        if not tool_use_id:
+            return
+        tool = str(tool_name or "").rsplit("__", 1)[-1]
+        self._staged.append(
+            {
+                "turn": self._turn(),
+                "tool": tool,
+                "key": _anchor_key(tool, tool_input),
+                "tool_use_id": str(tool_use_id),
+            }
+        )
+        # A staged id is consumed by the handler that follows it — unless
+        # there is no handler, which is the case worth bounding: a call
+        # denied at the permission dialog, or a turn aborted between the
+        # hook and the tool, leaves its entry behind. Turn-scoping in
+        # :meth:`_claim` clears those on the next turn; the cap is what
+        # keeps a *single* long turn of denials from growing without end.
+        del self._staged[:-STAGE_LIMIT]
+
+    def _claim(self, tool: str, *args: str) -> str | None:
+        """Take back the id staged for this call, if it is still ours.
+
+        Turn-scoped and self-cleaning, which is most of what makes a
+        denied call harmless: the phantom entry it left is discarded the
+        first time a *later* turn looks, so it can never be handed to a
+        consultation in some other turn. No turn-end hook is needed for
+        that, and one that was needed would be a second thing to keep in
+        agreement.
+
+        The rest of what makes it harmless is the ambiguity rule below.
+        Within a single turn the phantom outlives its denial, so a retry
+        of the same call would otherwise claim the *denied* id and render
+        its live card under the call the user refused. Two indistinguish-
+        able entries therefore claim nothing at all.
+
+        **Reads nothing destructively on the way out.** A first cut
+        cleared the whole buffer when there was no live turn, on the
+        reasoning that entries staged outside one are unusable. They are
+        unusable *to this call*; they may be the next one's. Failing to
+        claim is a lost nesting, while clearing is a lost nesting for
+        every other consultation in flight, so the quiet path returns
+        empty-handed and touches nothing.
+
+        Returns ``None`` whenever the join is not certain — no hook ran,
+        the arguments did not match, the turn moved on. The caller then
+        falls back to the minted identity, which is exactly the behaviour
+        that shipped before this existed.
+        """
+        turn = self._turn()
+        if turn is None:
+            return None
+        key = tuple(_normalise(value) for value in args)
+        self._staged = [e for e in self._staged if e["turn"] == turn]
+        matches = [
+            index
+            for index, entry in enumerate(self._staged)
+            if entry["tool"] == tool and entry["key"] == key
+        ]
+        if len(matches) == 1:
+            return str(self._staged.pop(matches[0])["tool_use_id"])
+        if matches:
+            # Two staged calls this turn are indistinguishable from each
+            # other, so nothing here can say which of them is us. Taking
+            # the first is a coin toss, and a lost toss is worse than an
+            # unanchored row: the card would render under a *different*
+            # call, beside that call's own result, and the two would
+            # disagree in the one place a reader is looking.
+            logger.debug(
+                "%d staged tool ids for %s are indistinguishable; the "
+                "consultation's row will not nest under its card",
+                len(matches),
+                tool,
+            )
+            return None
+        logger.debug(
+            "No staged tool id for %s; the consultation's row will not nest "
+            "under its card",
+            tool,
+        )
+        return None
 
     def _turn(self) -> str | None:
         """The request id the tab must be attributed to.
@@ -383,7 +575,9 @@ class ConsultantBridge:
             logger.exception("Could not read the active request id")
             return None
 
-    async def _announce(self, agent_id: str, label: str, **fields: Any) -> None:
+    async def _announce(
+        self, scope: str, label: str, *, task_id: str, **fields: Any
+    ) -> None:
         """One ``subagentEvent``, in the shape the tab strip already reads.
 
         No new event name and no webapp change: ``subagent-tabs.js`` joins
@@ -400,9 +594,26 @@ class ConsultantBridge:
         if self._emit is None or request_id is None:
             return
         payload = {
-            "task_id": agent_id,
-            "agent_id": agent_id,
-            "tool_use_id": agent_id,
+            # Minted, so ⏹ routes here rather than to the CLI, which has
+            # never heard of this id.
+            "task_id": task_id,
+            # Minted too, and deliberately: `agent_id` is the *transcript*
+            # key. It keys the tab, it is what the "read this subagent's
+            # transcript" button sends, and it is what appears in a log
+            # line when that read fails. A consultation has no transcript
+            # on disk (its blocks live in memory only), so this id names
+            # something that cannot be fetched — and an id that is
+            # obviously ours is the right way to say so. A `toolu_` here
+            # would make a structural limitation read as a dropped
+            # session in every log that saw it.
+            "agent_id": task_id,
+            # Borrowed when the hook caught it, and the only field that
+            # moves. `groupBlocksByScope` places a row immediately after
+            # the main-transcript tool block whose `block_id` matches
+            # this, and a tool block's `block_id` *is* its `tool_use_id`
+            # — so this one value is the whole of what nests the
+            # consultation inside the card that spawned it.
+            "tool_use_id": scope,
             "description": label,
             "task_type": "consultation",
             "subagent_type": "Antigravity",
@@ -413,7 +624,7 @@ class ConsultantBridge:
         # `_push` already absorbs a dead client; scheduling it puts the
         # timeout on the *wait* rather than on the send.
         await self._drain(
-            agent_id,
+            scope,
             {self._schedule(Event("subagentEvent", payload), request_id)},
             f"the tab's {'terminal' if fields.get('terminal') else 'opening'} row",
         )
@@ -696,7 +907,7 @@ class ConsultantBridge:
             )
 
     @contextlib.asynccontextmanager
-    async def _tab(self, label: str) -> Any:
+    async def _tab(self, label: str, *, anchor: str | None = None) -> Any:
         """Open a tab for one consultation, and settle it however it ends.
 
         A context manager because the *settling* is the part that must not
@@ -734,23 +945,36 @@ class ConsultantBridge:
         ``completed``, and a ``return`` from inside the ``with`` block
         would look like success here no matter what it returned.
         """
-        agent_id = self._new_agent_id()
+        task_id = self._new_task_id()
+        # Two ids, and the split is AG-28. The consultation keeps one
+        # coherent identity of its own — `task_id`, which is also its
+        # `agent_id` — and gains a *pointer* to where it attaches: the
+        # spawning tool call's id, when the `PreToolUse` hook caught it.
+        #
+        # `scope` is that pointer, and it is what every block, notice and
+        # heartbeat below is stamped with, because the renderer fills a
+        # row from the blocks whose `agent_id` matches the row's
+        # `tool_use_id`. Falling back to the task id is not a degraded
+        # mode so much as the previous one: it is exactly what shipped
+        # before the hook existed, and it still renders — beside the card
+        # instead of inside it.
+        scope = anchor or task_id
         # Asked for rather than named: the consultant knows which raw
         # objects it will feed this thing (AG-16). `StepTranslator` is
         # still the answer on the SDK transport, and the fallback keeps a
         # consultant written before this seam existed working.
         make = getattr(self._consultant, "make_translator", None)
         translator = (
-            make(self._turn() or "", agent_id)
+            make(self._turn() or "", scope)
             if callable(make)
-            else StepTranslator(self._turn() or "", agent_id=agent_id)
+            else StepTranslator(self._turn() or "", agent_id=scope)
         )
         # Mutable, shared with the heartbeat: it is the only way the
         # heartbeat can tell a queued consultation from a working one, and
         # that distinction is the whole of what it has to say.
         progress = {"steps": 0, "text": 0}
         pending: set[Any] = set()
-        observer = self._observer(agent_id, translator, progress, pending)
+        observer = self._observer(scope, translator, progress, pending)
 
         if self._emit is None or self._turn() is None:
             # Built above the gate, deliberately: the observer is how the
@@ -759,17 +983,17 @@ class ConsultantBridge:
             yield observer
             return
 
-        await self._announce(agent_id, label)
-        await self._push_posture(agent_id)
+        await self._announce(scope, label, task_id=task_id)
+        await self._push_posture(scope)
         status = "failed"
-        heartbeat = asyncio.ensure_future(self._heartbeat(agent_id, progress))
+        heartbeat = asyncio.ensure_future(self._heartbeat(scope, progress))
         try:
             yield observer
         except BaseException as exc:
             # The reason, into the tab. Until now a failed consultation
             # settled red and said nothing about why; the explanation went
             # to the model as tool text, which the user does not read.
-            await self._push_reason(agent_id, exc)
+            await self._push_reason(scope, exc)
             # Including cancellation: a consultation the user stopped did
             # not complete, and saying so is the point of the ⏹ button.
             raise
@@ -786,22 +1010,23 @@ class ConsultantBridge:
             # Seeded from the same translator the answer came out of, so
             # the two cannot disagree about what was said.
             if not progress["text"]:
-                await self._seed_tab(agent_id, translator)
+                await self._seed_tab(scope, translator)
         finally:
             heartbeat.cancel()
             # Before the drain and before the terminal row, because both
             # of those close the tab over whatever is still on it. See
             # `_flush_pending`.
-            await self._flush_pending(agent_id, translator, pending)
+            await self._flush_pending(scope, translator, pending)
             # Drain what *this* consultation scheduled before saying its
             # tab is done, or the terminal event can arrive ahead of the
             # text it is meant to be terminating. Bounded: see
             # `DRAIN_SECONDS` for why a rendering wait must not be able to
             # hold the answer.
-            await self._drain(agent_id, pending, "its streamed text")
+            await self._drain(scope, pending, "its streamed text")
             await self._announce(
-                agent_id,
+                scope,
                 label,
+                task_id=task_id,
                 status=status,
                 terminal=True,
                 usage=translator.turn_usage() or None,
@@ -952,11 +1177,15 @@ class ConsultantBridge:
         judgement between two models that are supposed to disagree in
         front of the user.
         """
+        # Claimed before the tab is opened, and only ever claimed here:
+        # one call consumes one staged id, so a handler that runs without
+        # a hook having fired gets `None` and the minted identity.
+        anchor = self._claim("second_opinion", question, context)
         try:
             # The catch is *outside* the tab, so a failure propagates
             # through it and settles the row as failed rather than as a
             # green "completed". See `_tab`.
-            async with self._tab("Second opinion") as observer:
+            async with self._tab("Second opinion", anchor=anchor) as observer:
                 answer = await self._consultant.second_opinion(
                     question, context, observer=observer
                 )
@@ -980,9 +1209,10 @@ class ConsultantBridge:
         filesystem (AG-R-3), so it is directly usable in a markdown or
         HTML reference — which is the only reason the agent asked.
         """
+        anchor = self._claim("generate_image", prompt, output_name, aspect_ratio)
         try:
             # Outside the tab, for the same reason as second_opinion.
-            async with self._tab("Generate image") as observer:
+            async with self._tab("Generate image", anchor=anchor) as observer:
                 result = await self._consultant.generate_image(
                     prompt,
                     output_name=output_name,

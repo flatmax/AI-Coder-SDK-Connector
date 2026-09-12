@@ -33,11 +33,13 @@ import threading
 import pytest
 
 from aic_dc.claude_code.hooks import (
+    CONSULT_TOOL_MATCHER,
     DEBOUNCE_SECONDS,
     PATH_KEYS,
     SHELL_TOOL_MATCHER,
     WRITE_TOOL_MATCHER,
     Reindexer,
+    build_consultation_anchor_hook,
     build_hook_matchers,
     build_post_shell_hook,
     build_post_tool_use_hook,
@@ -168,6 +170,7 @@ class TestItDecidesNothing:
         assert SHELL_TOOL_MATCHER == "Bash"
 
     def test_the_matcher_mapping_subscribes_to_two_events(self, reindexer):
+        """Two without a consultant bridge; the third is conditional."""
         matchers = build_hook_matchers(reindexer)
         assert sorted(matchers) == ["PostToolUse", "PreCompact"]
         assert matchers["PostToolUse"][0].matcher == WRITE_TOOL_MATCHER
@@ -189,9 +192,117 @@ class TestItDecidesNothing:
         assert matcher.matcher is None
         assert len(matcher.hooks) == 1
 
-    def test_pretooluse_is_not_subscribed_at_all(self, reindexer):
-        """The shadowing hazard is specifically PreToolUse's."""
+    def test_pretooluse_is_not_subscribed_without_a_consultant(self, reindexer):
+        """The shadowing hazard is specifically PreToolUse's, so a session
+        with no Antigravity subscribes to it not at all."""
         assert "PreToolUse" not in build_hook_matchers(reindexer)
+
+
+class TestTheConsultationAnchorHook:
+    """AG-28 — the one `PreToolUse` registration, and the rules on it.
+
+    It exists to copy down a `tool_use_id` that is visible nowhere else:
+    an in-process MCP handler is called with its arguments and no context
+    object, so without this the consultation cannot learn which tool card
+    invoked it. Everything asserted here is about it staying *only* that.
+    """
+
+    class Recorder:
+        def __init__(self):
+            self.notes = []
+
+        def note_tool_use(self, tool_name, tool_input, tool_use_id):
+            self.notes.append((tool_name, tool_input, tool_use_id))
+
+    def test_it_registers_only_when_a_bridge_is_passed(self, reindexer):
+        bridge = self.Recorder()
+        matchers = build_hook_matchers(reindexer, consultant_bridge=lambda: bridge)
+        assert sorted(matchers) == ["PostToolUse", "PreCompact", "PreToolUse"]
+        assert matchers["PreToolUse"][0].matcher == CONSULT_TOOL_MATCHER
+
+    def test_the_matcher_names_only_the_two_antigravity_tools(self):
+        """Narrow on purpose: this is the event that can ungate a tool,
+        and these two write files and bill a separate account."""
+        assert CONSULT_TOOL_MATCHER.split("|") == [
+            "mcp__aic-dc-antigravity__second_opinion",
+            "mcp__aic-dc-antigravity__generate_image",
+        ]
+        for tool in ("Bash", "Write", "Edit", "Task", "mcp__aic-dc__symbol_map"):
+            assert tool not in CONSULT_TOOL_MATCHER
+
+    async def test_it_returns_an_empty_dict_on_every_path(self):
+        """A `permissionDecision` here would shadow `can_use_tool` and
+        the dialog for these two tools would never appear again."""
+        bridge = self.Recorder()
+        hook = build_consultation_anchor_hook(lambda: bridge)
+        cases = [
+            {
+                "tool_name": "mcp__aic-dc-antigravity__second_opinion",
+                "tool_input": {"question": "Well?"},
+                "tool_use_id": "toolu_01",
+            },
+            {"tool_name": "mcp__aic-dc-antigravity__second_opinion"},
+            {"tool_input": {"question": "Well?"}},
+            {},
+            None,
+        ]
+        for case in cases:
+            assert await hook(case, "toolu_01", {"signal": None}) == {}
+
+    async def test_it_returns_an_empty_dict_when_the_bridge_throws(self):
+        def boom():
+            raise RuntimeError("no consultant")
+
+        hook = build_consultation_anchor_hook(boom)
+        assert await hook({"tool_name": "x"}, "toolu_01", {"signal": None}) == {}
+
+    async def test_it_returns_an_empty_dict_when_noting_throws(self, caplog):
+        class Broken:
+            def note_tool_use(self, *_):
+                raise RuntimeError("staged nothing")
+
+        hook = build_consultation_anchor_hook(lambda: Broken())
+        with caplog.at_level(logging.WARNING):
+            assert await hook({"tool_name": "x"}, "toolu_01", {}) == {}
+        assert "could not note" in caplog.text.lower()
+
+    async def test_it_passes_the_call_through_to_the_bridge(self):
+        bridge = self.Recorder()
+        hook = build_consultation_anchor_hook(lambda: bridge)
+        await hook(
+            {
+                "tool_name": "mcp__aic-dc-antigravity__second_opinion",
+                "tool_input": {"question": "Well?"},
+                "tool_use_id": "toolu_01ABC",
+            },
+            "toolu_01ABC",
+            {"signal": None},
+        )
+        assert bridge.notes == [
+            (
+                "mcp__aic-dc-antigravity__second_opinion",
+                {"question": "Well?"},
+                "toolu_01ABC",
+            )
+        ]
+
+    async def test_the_payloads_id_wins_over_the_callback_argument(self):
+        """`PreToolUseHookInput.tool_use_id` is required; the callback
+        argument is typed optional, so it is the weaker source."""
+        bridge = self.Recorder()
+        hook = build_consultation_anchor_hook(lambda: bridge)
+        await hook(
+            {"tool_name": "t", "tool_input": {}, "tool_use_id": "toolu_PAYLOAD"},
+            None,
+            {},
+        )
+        assert bridge.notes[0][2] == "toolu_PAYLOAD"
+
+    async def test_a_missing_bridge_is_not_an_error(self):
+        """The bridge is absent whenever Antigravity is unconfigured, and
+        it is read late, so `None` is an ordinary answer."""
+        hook = build_consultation_anchor_hook(lambda: None)
+        assert await hook({"tool_name": "t"}, "toolu_01", {}) == {}
 
 
 class TestItNeverRaises:

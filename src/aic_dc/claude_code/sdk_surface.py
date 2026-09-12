@@ -152,9 +152,14 @@ PENDING_OPTIONS: dict[str, str] = {
 HOOK_EVENTS: dict[str, tuple[str, str]] = {
     "PostToolUse": (HANDLED, "broadcasts the write and queues re-indexing"),
     "PreToolUse": (
-        DECLINED,
-        "a pre-tool veto is a permission decision, and can_use_tool is "
-        "where AIC-DC makes those — two gates would disagree",
+        HANDLED,
+        "registered on the two Antigravity tools alone, and it decides "
+        "nothing: it copies down the tool_use_id so a consultation can "
+        "render inside the card that spawned it (AG-28), which is the one "
+        "fact an in-process MCP handler is never told. The veto half stays "
+        "declined — a pre-tool veto is a permission decision and "
+        "can_use_tool is where AIC-DC makes those, so a decision returned "
+        "here would shadow it and two gates would disagree",
     ),
     "PermissionRequest": (
         DECLINED,
@@ -417,10 +422,20 @@ def assigned_option_keys() -> frozenset[str]:
 def registered_hook_events() -> frozenset[str]:
     """Hook events ``hooks.py`` registers, by reading its AST.
 
-    Same reasoning as :func:`assigned_option_keys`: the returned mapping's
-    literal keys are the registration, and reading them from syntax means
-    adding a matcher updates this without touching :data:`HOOK_EVENTS`'s
-    status by hand.
+    Same reasoning as :func:`assigned_option_keys`: the mapping's literal
+    keys are the registration, and reading them from syntax means adding a
+    matcher updates this without touching :data:`HOOK_EVENTS`'s status by
+    hand.
+
+    **Two shapes, because there are two kinds of registration.** The
+    unconditional events are keys of a dict literal. ``PreToolUse`` is
+    added afterwards under an ``if`` — it registers only when the session
+    has an Antigravity bridge to hand the id to (AG-28) — so its name
+    appears as a subscript on the assignment target instead. Reading only
+    the dict literal is what this function did until that branch existed,
+    and it silently reported *nothing* once the function stopped returning
+    a literal at all. Both forms are collected now, and the union is the
+    coverage: an event registered on any path is an event we handle.
     """
     source = _module_source("hooks")
     if not source:
@@ -430,17 +445,25 @@ def registered_hook_events() -> frozenset[str]:
     except SyntaxError:  # pragma: no cover - our own module
         return frozenset()
 
+    found: set[str] = set()
     for node in ast.walk(tree):
         if not isinstance(node, ast.FunctionDef) or node.name != "build_hook_matchers":
             continue
         for inner in ast.walk(node):
-            if isinstance(inner, ast.Return) and isinstance(inner.value, ast.Dict):
-                return frozenset(
+            if isinstance(inner, ast.Dict):
+                found.update(
                     key.value
-                    for key in inner.value.keys
+                    for key in inner.keys
                     if isinstance(key, ast.Constant) and isinstance(key.value, str)
                 )
-    return frozenset()
+            elif isinstance(inner, ast.Assign):
+                for target in inner.targets:
+                    if not isinstance(target, ast.Subscript):
+                        continue
+                    key = target.slice
+                    if isinstance(key, ast.Constant) and isinstance(key.value, str):
+                        found.add(key.value)
+    return frozenset(found)
 
 
 @functools.cache

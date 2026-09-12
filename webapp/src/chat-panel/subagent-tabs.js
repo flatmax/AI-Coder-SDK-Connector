@@ -77,20 +77,33 @@ export function subagentTabId(row) {
 }
 
 /**
- * The subagent tab matching an id — its row key, its `agent_id` or its task
- * id, whichever the caller has in hand.
+ * The subagent tab matching an id — its row key, its `agent_id`, its task id
+ * or the id of the tool call that spawned it, whichever the caller has in
+ * hand.
  *
- * Three fields rather than one because the three arrive at different times and
+ * Four fields rather than one because the four arrive at different times and
  * every caller knows a different one: the strip knows the tab id, an event
  * knows the row key, and "is this subagent already open?" is asked with an
  * `agent_id` read off a settled row.
+ *
+ * `tool_use_id` is the fourth and the newest. A block or a scoped notice
+ * produced *inside* a subagent is stamped with the spawning call's id, not
+ * with the subagent's own — that is what nests it under the right card — so
+ * a handler routing one of those knows only this field. Without it a
+ * consultation's "no tools, no repository access" notice fell back to the
+ * main transcript, which is the one place it is not about.
  */
 export function findSubagentTab(panel, id) {
   if (typeof id !== 'string' || !id) return null;
   for (const [tabId, tab] of panel._tabs) {
     const sub = tab.subagent;
     if (!sub) continue;
-    if (sub.rowKey === id || sub.agent_id === id || sub.task_id === id) {
+    if (
+      sub.rowKey === id
+      || sub.agent_id === id
+      || sub.task_id === id
+      || sub.tool_use_id === id
+    ) {
       return { tabId, tab };
     }
   }

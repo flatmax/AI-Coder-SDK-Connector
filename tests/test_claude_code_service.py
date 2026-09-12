@@ -2715,7 +2715,7 @@ class TestBridgeWiring:
         from aic_dc.claude_code import mcp_server as mcp_module
         from aic_dc.claude_code import service as service_module
 
-        def boom_hook(reindexer, broadcast=None):
+        def boom_hook(reindexer, broadcast=None, consultant_bridge=None):
             raise RuntimeError("no sdk")
 
         def boom_server(self):
@@ -2729,9 +2729,15 @@ class TestBridgeWiring:
                 event_callback=events,
                 engine_config=EngineConfig(),
             )
-        assert len(svc.session.health.degradations) == 2
-        assert "re-index hook" in svc.session.health.degradations[0]
-        assert "repo tools" in svc.session.health.degradations[1]
+        # Unordered on purpose: the claim is that both losses are named,
+        # and the order they are built in is not a promise to the reader.
+        # It changed once already, when AG-28 moved the consultant mount
+        # ahead of the hooks so a session without one registers no
+        # `PreToolUse`.
+        reported = svc.session.health.degradations
+        assert len(reported) == 2
+        assert any("re-index hook" in line for line in reported)
+        assert any("repo tools" in line for line in reported)
 
     def test_a_session_that_started_whole_reports_no_loss(self, wired):
         """The banner is silent otherwise, so an empty list is the normal
