@@ -1278,6 +1278,70 @@ class TestChatStreaming:
         await service.chat_streaming(REQUEST_ID, "hello")
         assert events.calls == []
 
+    async def test_the_pushed_viewer_state_stands_in(self, service):
+        """The arrival path the browser actually uses.
+
+        ``viewer-framing.js`` pushes through ``set_viewer_state`` and leaves
+        the turn argument null — deliberately, because two sources for one
+        field disagree — so this is the path every real turn takes and the
+        turn-argument tests above cover the one nothing calls.
+        """
+        service.set_viewer_state("src/a.py", start_line=4)
+        await send(service, "hello")
+        assert service.session.turns[0].viewer.path == "src/a.py"
+
+    async def test_a_stated_viewer_beats_a_stale_push(self, service):
+        service.set_viewer_state("stale.py")
+        await send(service, viewer={"path": "fresh.py"})
+        assert service.session.turns[0].viewer.path == "fresh.py"
+
+    async def test_an_explicitly_empty_viewer_clears_a_stale_push(self, service):
+        """"Nothing is open" has to outrank the last thing that was."""
+        service.set_viewer_state("stale.py")
+        await send(service, viewer={})
+        assert service.session.turns[0].viewer is None
+
+
+class TestSetViewerState:
+    """The push, which had no test on any engine until AG-33.
+
+    Which is how the Antigravity adapter's copy came to differ from this one
+    without anyone noticing — it cleared to ``{}`` and kept ``start_line:
+    None`` verbatim. Both stored a shape nothing read, so nothing failed.
+    The rule is :func:`aic_dc.framing.viewer_payload` now and all three
+    adapters share it; these assert the contract from this side.
+    """
+
+    def test_a_path_and_a_line_are_stored_and_echoed(self, service):
+        assert service.set_viewer_state("src/a.py", start_line=4) == {
+            "status": "ok",
+            "path": "src/a.py",
+            "start_line": 4,
+        }
+
+    def test_closing_the_pane_clears_it(self, service):
+        """Rather than leaving the agent pointed at a file nobody reads."""
+        service.set_viewer_state("src/a.py")
+        assert service.set_viewer_state(None) == {"status": "cleared"}
+        assert service._viewer_state is None
+
+    def test_a_line_that_is_not_one_is_omitted(self, service):
+        """A stored ``None`` would render as ``(cursor on line None)``."""
+        service.set_viewer_state("src/a.py", start_line=None, end_line=None)
+        assert service._viewer_state == {"path": "src/a.py"}
+
+    def test_it_reaches_the_ui_state_tool_as_well_as_the_prompt(self, service):
+        """The refresh channel Claude has and the other engines do not.
+
+        Worth pinning here because it is the reason turn-scoped framing is
+        enough on this engine: a model that thinks the state is stale can ask
+        for it. ``agy``'s only MCP server is the consultation listener, so
+        its model cannot — AG-R-33.
+        """
+        service.set_viewer_state("src/a.py", start_line=4)
+        snapshot = service._ui_state_snapshot()
+        assert snapshot["viewer"] == {"path": "src/a.py", "start_line": 4}
+
 
 # ---------------------------------------------------------------------------
 # Image pointers, after the fact

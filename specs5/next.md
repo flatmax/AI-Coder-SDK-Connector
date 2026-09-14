@@ -819,6 +819,17 @@ did not exist. Answering in both places would have given one field two sources t
 shape § C3 keeps finding — and the per-turn argument would have been the worse of the two, since it only
 knows about turns that start in this browser.
 
+**It was built once and needed building three times, which this item could not see.** *"The service's
+existing fallback feeds both readers"* was an account of `claude_code/service.py`, and correct. Both
+Antigravity adapters received the same push — `engine_router` mounts the master under the legacy
+`ClaudeCodeService` name, so the one call site above reaches all three engines — stored it, and read it
+nowhere. So from 2026-08-28 to 2026-09-14 the agent was told what the user was looking at on **one engine
+of three**, and this entry said the item had left the queue
+([`plan-ag/decisions.md` AG-33](plan-ag/decisions.md#ag-33)). The audit that found C7 was a scan for
+fields with no writer; a field with a writer and a reader on one of three implementations is a different
+shape, and nothing here was looking for it. Worth leaving in a closed item rather than only recording it
+in the fix: what made the gap invisible is that every single-engine statement above is still true.
+
 `active-file-changed` was chosen over `navigate-file` because it reports what a viewer *has* open rather
 than what it was asked to open (a fetch can fail, and routing diverges SVG→diff on a scroll hint), both
 viewers emit it, and it already carries `null` for the close. Three cases the event's own shape forces:

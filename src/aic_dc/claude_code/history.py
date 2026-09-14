@@ -43,6 +43,7 @@ import re
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
+from aic_dc import framing
 from aic_dc.claude_code.messages import (
     files_written_by,
     flatten_tool_result,
@@ -60,11 +61,17 @@ logger = logging.getLogger(__name__)
 # apart in a row of a list, short enough not to wrap it.
 PREVIEW_CHARS = 100
 
-# The framing wrapper `session.build_framing` puts around UI context. It is
-# stripped on the way out: the model needed it, the user did not write it,
-# and showing it would bury every historical prompt under a context blob.
-_FRAMING_OPEN = "<aic-dc-ui-context>"
-_FRAMING_CLOSE = "</aic-dc-ui-context>"
+# The framing wrapper `framing.build` puts around UI context. It is stripped
+# on the way out: the model needed it, the user did not write it, and showing
+# it would bury every historical prompt under a context blob.
+#
+# **Imported rather than spelled.** These were literals here and in
+# `session.build_framing`, and the two had to agree exactly — a wrapper
+# edited on one side only leaves the block in every browsed prompt with
+# nothing reporting it. The aliases stay because they are what this module's
+# own tests and readers use.
+_FRAMING_OPEN = framing.FRAMING_OPEN
+_FRAMING_CLOSE = framing.FRAMING_CLOSE
 
 # How the CLI opens the prompt it writes when it compacts a conversation.
 # Matched as a prefix because the entry's own `isCompactSummary` flag does

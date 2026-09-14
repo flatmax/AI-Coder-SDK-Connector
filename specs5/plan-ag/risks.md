@@ -3011,3 +3011,43 @@ of them a witness for the others. `AgyGateServer.note_paths` warns, once, when t
 and the derived one disagree, and that warning is the only signal this condition has: it names
 `roots.PRODUCT_DIR` explicitly and says every path computed from it is suspect, because by the time it
 fires the mirror has already routed around the problem and will not complain again.
+
+---
+
+<a id="ag-r-33"></a>
+
+## AG-R-33 — Neither Antigravity transport can be asked what the user is looking at *now*
+
+Left by [AG-33](decisions.md#ag-33), which closed the larger half of this: the open file now reaches
+the model on all three engines, in identical words, on the turn's own prompt.
+
+What did not come with it is the refresh. On the Claude engine the viewer state feeds **two** readers —
+the turn framing and the `ui_state` MCP tool (`claude_code/mcp_server.py`) — so a model that suspects
+its context has gone stale mid-turn can ask for the live answer. On both Antigravity transports the
+framing is the only report. Measured rather than assumed: the sole MCP server `agy` is given is the
+consultation listener, written by `AgySession` from `ConsultListener.config_entry`, which declares
+`second_opinion` and nothing else. There is no `ui_state` for that model to call.
+
+**Why this is a residue and not the same bug again.** The framed fact is turn-scoped and true when
+sent, so nothing in front of the model is wrong. The gap is narrower than it sounds and shows up in one
+shape: a long turn during which the user navigates. The agent finishes work on the file the turn opened
+with while the user is looking at something else, and has no way to notice.
+
+**Why the fix is not `PreInvocation`.** That is the tempting shape, since [AG-32](decisions.md#ag-32)
+already re-injects a message at every invocation on the `agy` transport, and it is wrong here for the
+reason AG-33 records: a re-asserted viewer either repeats a stale claim as though it were live, or
+contradicts the turn's own opening framing. A **tool the model chooses to call** is the right shape
+because it carries its own freshness — the answer is dated by the asking.
+
+**What it would cost.** More than it looks. Claude's `ui_state` arrives through an MCP server this app
+already runs for that engine and mounts in-process; giving the Antigravity transports an equivalent
+means an MCP server exposing repository/UI surface to a model whose gate is `AgyGateServer`, and
+[AG-24](decisions.md#ag-24) records that every `agy` MCP call is two hook events with the server and
+tool named as a pair rather than as `mcp__server__tool`. So the tool would need gate policy of its own,
+and *that* is the work — not the snapshot, which is three fields the adapter already holds.
+
+**The tripwire.** `test_claude_code_service.py::TestSetViewerState::
+test_it_reaches_the_ui_state_tool_as_well_as_the_prompt` pins the Claude side, and the framing module's
+docstring names this asymmetry at the point where a reader would otherwise assume parity. There is no
+test on the Antigravity side, because the thing to assert is the absence of a tool, and an assertion
+that `agy` is given exactly one MCP server would fail the day a second one is added for any reason.

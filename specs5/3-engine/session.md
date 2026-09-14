@@ -203,6 +203,18 @@ review's shape, neither of which the user could sensibly retype every turn.
 Images are not framing — they are content blocks in the message, passed through `query()`'s verbatim
 dict path. See [`../4-features/images.md`](../4-features/images.md).
 
+**The framing itself is not this engine's, as of 2026-09-14.** The block was built in this module, where
+the other two adapters could not reach it, so the Antigravity engines stored the browser's push and never
+read it — the user's open file reached the model on one engine of three
+([`../plan-ag/decisions.md` AG-33](../plan-ag/decisions.md#ag-33)). The wrapper, the validator, the
+sentences and the two-arrival-path precedence now live in `src/aic_dc/framing.py` and every adapter calls
+them, because a model asked the same question about the same file has to be told the same fact in the same
+words whichever engine is mounted. `build_framing` and `compose_prompt` remain here as the mapping from a
+`Turn` to that module's arguments — that part is engine-specific, and these are the names this document
+refers to. What is still this engine's alone is the *refresh*: the `ui_state` MCP tool answers the same
+question mid-turn, and the Antigravity transports have no equivalent
+([`../plan-ag/risks.md` AG-R-33](../plan-ag/risks.md#ag-r-33)).
+
 ### Concurrency guard
 
 One user-initiated turn at a time, as before. Subagents spawned by the `Task` tool are internal to

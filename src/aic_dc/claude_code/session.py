@@ -41,6 +41,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from aic_dc import framing
 from aic_dc.claude_code.cost import CostLedger
 from aic_dc.claude_code.engine_config import EngineConfig
 from aic_dc.claude_code.health import (
@@ -116,27 +117,14 @@ class SessionLostError(RuntimeError):
 # ---------------------------------------------------------------------------
 
 
-@dataclass(frozen=True)
-class ViewerFraming:
-    """What the user is looking at, for turn framing. Never file content."""
-
-    path: str
-    start_line: int | None = None
-    end_line: int | None = None
-
-    @classmethod
-    def from_dict(cls, data: Any) -> ViewerFraming | None:
-        """Build from the RPC payload, tolerating a missing or bad shape."""
-        if not isinstance(data, dict):
-            return None
-        path = data.get("path")
-        if not isinstance(path, str) or not path:
-            return None
-        return cls(
-            path=path,
-            start_line=_as_int(data.get("start_line")),
-            end_line=_as_int(data.get("end_line")),
-        )
+#: What the user is looking at, for turn framing. Never file content.
+#:
+#: The class itself moved to :mod:`aic_dc.framing` on 2026-09-14, because
+#: the other two engines could not reach it here and so never framed the
+#: user's screen at all (AG-33). The alias stays: this is the name the RPC
+#: inventory, the webapp and this module's own tests know it by, and
+#: renaming it would have made an internal move into a surface change.
+ViewerFraming = framing.Viewer
 
 
 @dataclass(frozen=True)
@@ -248,58 +236,23 @@ class ActiveTurn:
 
 
 def build_framing(turn: Turn) -> str:
-    """Describe UI state the agent cannot otherwise see.
+    """This turn's framing block, or ``""`` when there is nothing to say.
 
-    Answers exactly one question — "what is the user looking at?" — which
-    no tool can answer. Everything the agent might want to *read* it reads
-    with its own tools, so this is paths, ranges, and mode facts only, and
-    never file content (``specs5/3-engine/session.md`` § Turn framing,
-    ``specs5/plan/decisions.md`` CC-14).
+    The sentences live in :mod:`aic_dc.framing` and the reasons for them
+    live in its docstring — what stays here is the mapping from a
+    :class:`Turn` to that module's two arguments, which is the only part of
+    it that is Claude-specific.
 
-    Only facts the user could not reasonably have typed. A file the user
-    wants named is named in the prompt — the picker inserts the path there
-    rather than into a block out here (``specs5/plan/decisions.md`` CC-21),
-    so framing carries the viewer's live cursor and the review's shape and
-    nothing else.
-
-    Returns the empty string when there is nothing to say, so an ordinary
-    turn is sent exactly as the user typed it.
+    **Kept as a function rather than inlined at the call sites.** It is the
+    documented name in ``specs5/3-engine/session.md`` § Turn framing, and
+    the engine-agnostic module cannot depend on this one's ``Turn``.
     """
-    lines: list[str] = []
-
-    if turn.viewer is not None:
-        where = f"- {turn.viewer.path}"
-        if turn.viewer.start_line is not None:
-            if turn.viewer.end_line is not None and turn.viewer.end_line != turn.viewer.start_line:
-                where += f" (lines {turn.viewer.start_line}-{turn.viewer.end_line} selected)"
-            else:
-                where += f" (cursor on line {turn.viewer.start_line})"
-        lines.append("Open in the user's editor pane:")
-        lines.append(where)
-
-    review = turn.review or {}
-    if review.get("active"):
-        lines.append("Code review is active:")
-        for key in ("branch", "base_branch", "merge_base"):
-            value = review.get(key)
-            if value:
-                lines.append(f"- {key.replace('_', ' ')}: {value}")
-
-    if not lines:
-        return ""
-    body = "\n".join(lines)
-    # A named wrapper so the model can tell our framing from the user's
-    # own words, and so a user who pastes similar text is not confused
-    # with the real thing.
-    return f"<aic-dc-ui-context>\n{body}\n</aic-dc-ui-context>"
+    return framing.build(viewer=turn.viewer, review=turn.review)
 
 
 def compose_prompt(turn: Turn) -> str:
     """Framing plus the user's text, in that order."""
-    framing = build_framing(turn)
-    if not framing:
-        return turn.message
-    return f"{framing}\n\n{turn.message}"
+    return framing.compose(build_framing(turn), turn.message)
 
 
 def build_content_blocks(turn: Turn) -> list[dict[str, Any]]:
@@ -1549,10 +1502,6 @@ _CONNECTION_FAILURE_NAMES = frozenset(
 )
 
 
-def _as_int(value: Any) -> int | None:
-    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
-        return None
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
+# `_as_int` moved to `aic_dc.framing` with `ViewerFraming`, unchanged. It
+# was this module's only caller, and leaving a copy behind would be a
+# second coercion rule for the same JavaScript-shaped input.

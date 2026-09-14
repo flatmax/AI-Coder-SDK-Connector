@@ -732,12 +732,19 @@ class TestTheWriteGuidance:
     """
 
     def test_the_prompt_is_the_users_own_text(self, tmp_path, monkeypatch):
-        """The mirror records what the user typed, and only that.
+        """A turn with no UI state to report is sent exactly as typed.
 
         This asserted the opposite until AG-32: a browsed transcript stored
         the framed guidance and stripped it on the way out, which made every
         reader of the mirror depend on a strip step to tell the truth about
         who said what.
+
+        Narrower than it was since AG-33 — turn framing *does* ride the
+        prompt when there is something to frame, and `TestViewerFraming`
+        below is where that is asserted. The two halves are compatible
+        because the guidance is standing and the framing is turn-scoped: one
+        belongs on `PreInvocation` and the other cannot go there. What this
+        still guards is that an ordinary turn carries no block at all.
         """
         from aic_dc.agy import tools as agy_tools
 
@@ -830,6 +837,172 @@ class TestTheWriteGuidance:
             # Only the constructor call above it is under test.
             asyncio.run(svc._ensure_session())
         assert captured.get("guidance") == agy_tools.WRITE_GUIDANCE
+
+
+class TestViewerFraming:
+    """AG-33: the model is told what the user is looking at.
+
+    The browser has pushed the open file to whichever adapter is master
+    since phase 3 — `viewer-framing.js` calls
+    `ClaudeCodeService.set_viewer_state`, and `engine_router` routes that
+    name to the mounted adapter whatever engine it is. So the push landed
+    here all along. What was missing is the read: `_viewer` was assigned by
+    two paths and consulted by none, and a user who asked *"why is this
+    failing?"* got an answer that depended on which engine they had chosen
+    in Settings.
+
+    Asserted on the prompt rather than on `_viewer`, because storing it was
+    never the part that broke.
+    """
+
+    def _sent(self, tmp_path, monkeypatch):
+        """Capture the prompt the turn hands to the pump."""
+        sent = {}
+
+        async def fake_run(self, session, translator, request_id, message):
+            sent["message"] = message
+
+        async def fake_ensure(self):
+            return types.SimpleNamespace(conversation_id="b1d377c5")
+
+        monkeypatch.setattr(AgyService, "_run_agy_turn", fake_run)
+        monkeypatch.setattr(AgyService, "_ensure_session", fake_ensure)
+        return sent
+
+    def test_the_pushed_viewer_state_reaches_the_prompt(self, tmp_path, monkeypatch):
+        """The gap AG-33 closed, stated as the symptom.
+
+        `set_viewer_state` then a turn: before AG-33 the prompt was the bare
+        message and the model had no idea a file was open.
+        """
+        sent = self._sent(tmp_path, monkeypatch)
+        svc = service(tmp_path)
+        svc.set_viewer_state("src/a.py", start_line=10, end_line=20)
+        asyncio.run(svc.chat_streaming("r1", "why is this failing?"))
+        asyncio.run(asyncio.sleep(0))
+        assert sent["message"] == (
+            "<aic-dc-ui-context>\n"
+            "Open in the user's editor pane:\n"
+            "- src/a.py (lines 10-20 selected)\n"
+            "</aic-dc-ui-context>\n"
+            "\n"
+            "why is this failing?"
+        )
+
+    def test_it_is_the_same_block_the_claude_engine_sends(self, tmp_path, monkeypatch):
+        """AG-9's rule, applied to a sentence rather than to a module.
+
+        A model asked the same question about the same file has to be told
+        the same fact in the same words on every engine, or the answer
+        depends on a Settings choice made for unrelated reasons.
+        """
+        from aic_dc.claude_code.session import Turn, compose_prompt
+        from aic_dc.framing import Viewer
+
+        sent = self._sent(tmp_path, monkeypatch)
+        svc = service(tmp_path)
+        svc.set_viewer_state("src/a.py", start_line=10, end_line=20)
+        asyncio.run(svc.chat_streaming("r1", "why is this failing?"))
+        asyncio.run(asyncio.sleep(0))
+        assert sent["message"] == compose_prompt(
+            Turn(
+                request_id="r1",
+                message="why is this failing?",
+                viewer=Viewer("src/a.py", 10, 20),
+            )
+        )
+
+    def test_the_turn_argument_overrides_the_pushed_state(
+        self, tmp_path, monkeypatch
+    ):
+        """Claude's precedence, to the letter: a stated viewer answers."""
+        sent = self._sent(tmp_path, monkeypatch)
+        svc = service(tmp_path)
+        svc.set_viewer_state("stale.py")
+        asyncio.run(
+            svc.chat_streaming("r1", "hello", viewer={"path": "fresh.py"})
+        )
+        asyncio.run(asyncio.sleep(0))
+        assert "- fresh.py" in sent["message"]
+        assert "stale.py" not in sent["message"]
+
+    def test_an_explicitly_empty_viewer_clears_a_stale_push(
+        self, tmp_path, monkeypatch
+    ):
+        """`if viewer:` could not be told "nothing is open".
+
+        The falsy-guard meant an empty payload was *silence*, so a closed
+        pane left the last pushed path in front of the model for the rest of
+        the session — pointing it at a file nobody was looking at.
+        """
+        sent = self._sent(tmp_path, monkeypatch)
+        svc = service(tmp_path)
+        svc.set_viewer_state("stale.py")
+        asyncio.run(svc.chat_streaming("r1", "hello", viewer={}))
+        asyncio.run(asyncio.sleep(0))
+        assert sent["message"] == "hello"
+
+    def test_closing_the_pane_stops_the_framing(self, tmp_path, monkeypatch):
+        """The other way a pane closes: a `set_viewer_state` with no path."""
+        sent = self._sent(tmp_path, monkeypatch)
+        svc = service(tmp_path)
+        svc.set_viewer_state("src/a.py")
+        svc.set_viewer_state(None)
+        asyncio.run(svc.chat_streaming("r1", "hello"))
+        asyncio.run(asyncio.sleep(0))
+        assert sent["message"] == "hello"
+
+    def test_the_framing_carries_no_file_content(self, tmp_path, monkeypatch):
+        """CC-14 on this transport too: paths and ranges, never a body."""
+        sent = self._sent(tmp_path, monkeypatch)
+        svc = service(tmp_path)
+        svc.set_viewer_state("src/a.py", start_line=1, end_line=999)
+        asyncio.run(svc.chat_streaming("r1", "hello"))
+        asyncio.run(asyncio.sleep(0))
+        items = [
+            line for line in sent["message"].splitlines() if line.startswith("- ")
+        ]
+        assert items == ["- src/a.py (lines 1-999 selected)"]
+
+    def test_the_mirror_reads_back_the_users_own_words(
+        self, tmp_path, monkeypatch
+    ):
+        """The cost of riding the prompt, and how it is paid.
+
+        The mirror stores what the model was sent, verbatim and framing and
+        all — a transcript that quietly disagreed with the prompt would be
+        worse than one carrying a block the reader strips. So the strip is
+        the contract, asserted here against a real composed prompt rather
+        than against a literal.
+        """
+        from aic_dc.claude_code.history import strip_framing
+
+        sent = self._sent(tmp_path, monkeypatch)
+        svc = service(tmp_path)
+        svc.set_viewer_state("src/a.py", start_line=10, end_line=20)
+        asyncio.run(svc.chat_streaming("r1", "why is this failing?"))
+        asyncio.run(asyncio.sleep(0))
+        assert strip_framing(sent["message"]) == "why is this failing?"
+
+    def test_the_guidance_still_does_not_ride_the_prompt(
+        self, tmp_path, monkeypatch
+    ):
+        """AG-32 is not reversed by AG-33.
+
+        The framing block came back and the guidance did not come back with
+        it. Worth asserting together, because the obvious way to build this
+        feature is to restore the old prepend and add the viewer to it.
+        """
+        from aic_dc.agy import tools as agy_tools
+
+        sent = self._sent(tmp_path, monkeypatch)
+        svc = service(tmp_path)
+        svc.set_viewer_state("src/a.py")
+        asyncio.run(svc.chat_streaming("r1", "hello"))
+        asyncio.run(asyncio.sleep(0))
+        assert "aic-dc-ui-context" in sent["message"]
+        assert agy_tools.WRITE_GUIDANCE not in sent["message"]
+        assert "ArtifactMetadata" not in sent["message"]
 
 
 class TestModelPersistence:

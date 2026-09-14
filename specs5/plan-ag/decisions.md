@@ -3346,3 +3346,116 @@ Four of five lifecycle events are wired, the guidance reaches every invocation o
 including a subagent's, the transcript mirror follows the directory `agy` says it is using, and the
 user's prompt in the mirror is the user's prompt. `roots.PRODUCT_DIR` is still hard-coded for two
 readers that had no payload to learn from — [AG-R-32](risks.md#ag-r-32).
+
+---
+
+<a id="ag-33"></a>
+
+## AG-33 — What the user is looking at travels on the prompt, and one module owns the sentences **(found and built 2026-09-14)**
+
+The browser has told the server which file is open in the viewer pane since phase 3, on every engine.
+`webapp/src/app-shell/viewer-framing.js` calls `ClaudeCodeService.set_viewer_state`, and
+`engine_router` mounts whichever adapter is master under that legacy name — so the push has been
+arriving at the Antigravity adapters all along. It was **stored and never read**.
+`AntigravityService._viewer` was assigned by two paths, `AgyService._viewer` by one more, and no line
+in either file consulted either. The symptom, stated as a user would hit it: open a file, ask *"why
+is this failing?"*, and whether the model knows what you mean depends on which engine you chose in
+Settings for unrelated reasons. That is exactly [AG-1](#ag-1)'s asymmetry, shipped and user-visible.
+
+The docstring said so, which is the part worth recording. `set_viewer_state` on the Antigravity
+adapter has read **"What the user is looking at, for turn framing"** since the day it was written. A
+promise in a docstring that no code keeps is worse than a missing feature, because it stops anyone
+looking.
+
+### The channel: the prompt, decided rather than inherited
+
+[AG-32](#ag-32) had moved the `agy` write guidance *off* the prompt onto `PreInvocation` hours
+earlier, for three faults. The naive reading is that framing should follow it. Only one of the three
+transfers.
+
+- **Once per turn** was a fault for standing guidance, because the write it guards against can happen
+  at any invocation. It is **correct** for framing. "What the user was looking at when they pressed
+  send" is a fact about the turn. Re-asserting it every invocation would either repeat a stale claim
+  as though it were live, or — if refreshed — contradict the turn's own opening framing the moment the
+  user scrolled mid-turn. The lifetimes of the two facts differ, so their channels differ.
+- **Master only** was a fault for guidance a subagent needs, because a subagent writes files too. A
+  subagent is given its own task rather than the user's screen, and the Claude engine frames the
+  master's turn only, so matching that is parity rather than a gap.
+- **Stored as the user's words** is a real cost, and it is the one that transfers. It is paid the way
+  Claude pays it: a named wrapper the model can tell from the user's own text, and
+  `history.strip_framing` removing the block at read time. `AntigravityMirror.note_prompt` stores the
+  prompt **verbatim**, framing and all, deliberately — a transcript that quietly disagreed with what
+  the model was actually sent would be worse than one carrying a block the reader strips.
+
+The SDK transport had no alternative to weigh in any case. `AntigravitySession.stream_turn` takes a
+plain prompt string; `system_instructions` (`antigravity/surface.py:145`) is per-agent and static, so
+the prompt is the only per-turn channel that exists there. The `agy` transport *does* have
+`PreInvocation`, and the argument above is why it is not used for this.
+
+### One module, because a sentence is a feature too
+
+The renderer lived in `claude_code/session.py`, where the other two adapters could not reach it. The
+fix is not three renderers. A model asked the same question about the same file has to be told the
+same fact **in the same words** on every engine, or an answer differs for a reason the user cannot
+see — and [AG-9](#ag-9) is the standing rule against paying for one feature twice.
+
+`src/aic_dc/framing.py` now owns the wrapper constants, the validator, the sentences, the
+composition, and the two-arrival-path precedence. `claude_code.session.ViewerFraming` is an alias of
+`framing.Viewer` rather than a second class, because that is the name the RPC inventory, the webapp
+and the existing tests know it by, and renaming it would have turned an internal move into a surface
+change. `build_framing` and `compose_prompt` stay as functions: they are the documented names in
+`specs5/3-engine/session.md` § Turn framing, and the engine-agnostic module cannot depend on
+`session.Turn`.
+
+The tag was spelled in **three** places before this — a literal in `build_framing`, and
+`_FRAMING_OPEN` / `_FRAMING_CLOSE` in `history.py`. Two of those are a renderer and its reader, which
+have to agree exactly; a wrapper edited on one side only leaves the block in every browsed prompt
+with nothing reporting it. `history.py` imports the constants now and keeps its aliases.
+
+### The scope was wrong in one direction and short in another
+
+The task was written up as needing *"a `set_viewer_state` on `AgyService`"*. Measured before building:
+`AgyService` already had one by inheritance — MRO `['AgyService', 'AntigravityService', 'object']` —
+`set_viewer_state` is not in `RPC_SURFACES`, so the router treats it as a core method and mounts it,
+and the browser's push already reached it. **No new RPC method and no webapp change was needed.** The
+missing half was always the read.
+
+What the scope did *not* contain is where the rest of the work went. `set_viewer_state` had been
+written twice and had **no test on either engine**, which is how the two copies came to differ
+without anyone noticing:
+
+- The Antigravity copy cleared to `{}` where Claude cleared to `None`. Two spellings of empty, both
+  falsy, harmless for exactly as long as nothing read them.
+- It stored `{"path": path, "start_line": None, "end_line": None}` verbatim, where Claude omitted
+  absent keys. A stored `None` reaching the renderer prints **`(cursor on line None)`** into the
+  model's prompt — the kind of sentence a model believes.
+- It validated neither the path's type nor the lines'. `set_viewer_state(42)` stored `{"path": 42}`.
+
+So the normaliser moved too: `framing.viewer_payload` is the one rule for what a push stores, and all
+three adapters call it. `Viewer.from_dict` remains the one rule for what a turn is framed *from*. The
+two are deliberately not the same strictness — the push is a typed RPC argument the browser controls,
+the turn's dict is a shape off the wire that it does not, which is why `"3"` is coerced by one and
+rejected by the other.
+
+### The `if viewer:` guard could not be told that nothing is open
+
+Both `chat_streaming` overrides read `if viewer: self._viewer = dict(viewer)`. A falsy payload was
+therefore *silence* rather than an answer, so a closed pane could not clear a stale push and the model
+stayed pointed at a file nobody was looking at for the rest of the session.
+`framing.resolve` distinguishes the two: `None` on the turn means *not stated*, so the push stands in;
+anything else is an **answer**, including an empty mapping. Claude's own resolution moved onto the same
+function, so the three engines now answer this identically rather than nearly.
+
+### What this is worth, and what it does not buy
+
+The user's open file reaches the model on all three engines, in identical words, and closing the pane
+is now sayable. What the Antigravity transports still lack is the *refresh*: Claude's model can call
+the `ui_state` MCP tool whenever it wants the live answer, and the only MCP server `agy` is given is
+the consultation listener, so its model cannot ask. The framing remains a true statement about the
+turn, and the missing tool is recorded as [AG-R-33](risks.md#ag-r-33) rather than papered over by
+re-asserting a turn-scoped fact at every invocation and hoping it is still current.
+
+The selection range is still not sent by anything — `set_viewer_state` accepts `start_line` /
+`end_line` and the renderer has always drawn them, but no selection plumbing exists in either viewer.
+That is unchanged by this and the reasoning is still `specs5/next.md` § C7: a range that lags the
+cursor points the agent at lines the user is not looking at, which is worse than no range.

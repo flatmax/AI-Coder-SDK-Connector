@@ -53,6 +53,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from aic_dc import framing
 from aic_dc.claude_code import sdk_surface
 from aic_dc.claude_code.account_usage import AccountUsage
 from aic_dc.claude_code.cost import UNPRICED
@@ -84,7 +85,6 @@ from aic_dc.claude_code.session import (
     SessionLostError,
     Turn,
     TurnInProgressError,
-    ViewerFraming,
 )
 from aic_dc.claude_code.session_store import DISK_WARNING_BYTES, RepoSessionStore
 from aic_dc.claude_code.turn_hud import log_turn_hud
@@ -1352,10 +1352,11 @@ class ClaudeCodeService:
             # The browser may send the viewer with the turn; when it does
             # not, the last `set_viewer_state` push stands in. Same fact,
             # two arrival paths — and the push is the one that keeps
-            # working when the turn comes from somewhere else.
-            viewer=ViewerFraming.from_dict(
-                viewer if viewer is not None else self._viewer_state
-            ),
+            # working when the turn comes from somewhere else. The
+            # precedence moved to `framing.resolve` with the rest of it, so
+            # that the two Antigravity adapters answer this the same way
+            # rather than nearly (AG-33).
+            viewer=framing.resolve(viewer, self._viewer_state),
         )
 
         try:
@@ -2268,20 +2269,23 @@ class ClaudeCodeService:
         participant could otherwise put a path of their choosing in front
         of the model on somebody else's turn. It is a small lever, and it
         is still a lever on what the agent reads.
+
+        The rule itself moved to :func:`aic_dc.framing.viewer_payload` on
+        2026-09-14, when the Antigravity adapters started reading the state
+        they had always stored (AG-33). It was written here and *guessed at*
+        there, and the two guesses differed — one stored ``{}`` for empty
+        and kept ``start_line: None`` verbatim. Divergence in a normaliser
+        the browser cannot see the far side of is not a tidiness question:
+        ``viewer-framing.js`` calls one method name and the router points it
+        at whichever engine is mounted.
         """
         restricted = self._check_localhost_only()
         if restricted is not None:
             return restricted
-        if not path or not isinstance(path, str):
-            self._viewer_state = None
+        self._viewer_state = framing.viewer_payload(path, start_line, end_line)
+        if self._viewer_state is None:
             return {"status": "cleared"}
-        state: dict[str, Any] = {"path": path}
-        if isinstance(start_line, int):
-            state["start_line"] = start_line
-        if isinstance(end_line, int):
-            state["end_line"] = end_line
-        self._viewer_state = state
-        return {"status": "ok", **state}
+        return {"status": "ok", **self._viewer_state}
 
     def _schedule_doc_index_build(self) -> None:
         """Start the doc-index build in the background. Idempotent.

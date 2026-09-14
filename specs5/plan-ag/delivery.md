@@ -7984,3 +7984,178 @@ either of these: `AgyService._viewer` is assigned at `service.py:609` and read n
 `AntigravityService._viewer` is the same — declared, assigned in two places, never read. So the
 viewer state the browser pushes reaches the model on the Claude transport, where
 `claude_code/service.py` forwards `_viewer_state` into the turn, and on **neither** Antigravity one.
+
+> **Built later the same day**, as [AG-33](decisions.md#ag-33) — see
+> [§ The file on the user's screen, on every engine](#the-file-on-the-users-screen-on-every-engine-2026-09-14).
+> One correction to the paragraph above, made while measuring rather than while reading: the missing
+> piece was **only** the read. The push already reached both Antigravity adapters, because
+> `AgyService` inherits `set_viewer_state` and `engine_router` mounts the master adapter under the
+> legacy `ClaudeCodeService` name — so no new RPC method and no webapp change went with the fix.
+
+---
+
+## The file on the user's screen, on every engine (2026-09-14)
+
+[AG-33](decisions.md#ag-33), [AG-R-33](risks.md#ag-r-33). Third of three that day, and the only one of
+the three that was not on the list.
+
+### Found in a docstring that already said it worked
+
+It came out of checking row 691's neighbours. `AntigravityService.set_viewer_state`'s docstring reads
+**"What the user is looking at, for turn framing"**, and has since the adapter was written. Nothing kept
+that promise. `AntigravityService._viewer` was declared at `service.py:206`, assigned at `:645` and
+`:1251`; `AgyService._viewer` assigned at `service.py:609`. Read: nowhere, in either file.
+
+The user-visible form: open a file, type *"why is this failing?"*, and whether the model knows what you
+mean depends on which engine Settings has mounted. That is [AG-1](decisions.md#ag-1)'s asymmetry, and
+unlike most of AG-1 it was **shipped** rather than unbuilt — every push arrived, was stored, and was
+discarded.
+
+A docstring is a bad place for a bug to hide, and it is the reason this one lasted. Anyone auditing the
+adapter for viewer support found a method with the right name, the right arguments, a localhost gate,
+and a sentence saying what it feeds.
+
+### The scope, measured before building rather than after
+
+The task was written up as needing *"a `set_viewer_state` on `AgyService`"*. Three measurements said
+otherwise, and all three were cheap:
+
+- `AgyService.__mro__` is `['AgyService', 'AntigravityService', 'object']`, and `set_viewer_state` is not
+  in `vars(AgyService)`. It already had one.
+- `set_viewer_state` is not in `RPC_SURFACES`, so `engine_router._missing_core_methods` treats it as a
+  **core** method — an adapter lacking it would not mount at all. Both Antigravity adapters have zero
+  missing core methods.
+- `viewer-framing.js` calls `ClaudeCodeService.set_viewer_state`, and the router exposes the master
+  adapter under that legacy name whatever engine it is.
+
+So the push had been arriving all along and **no new RPC method and no webapp change was needed**. Worth
+writing down as a correction rather than absorbing silently, because the scope was wrong in the
+direction that costs most: it named a method to add, which would have produced a second
+`set_viewer_state` shadowing the inherited one and left the actual defect — the missing read — in place
+under a change that looked like a fix.
+
+### The channel had to be argued against the morning's own decision
+
+[AG-32](decisions.md#ag-32) shipped hours earlier and moved the `agy` write guidance **off** the prompt
+onto `PreInvocation`, naming three faults. The obvious move was to follow it. Working through the three
+is what settled this, and only one transfers:
+
+| AG-32's fault | Does it transfer? |
+|---|---|
+| Arrived **once per turn**, where the guarded failure happens at any invocation | **No — it inverts.** "What the user was looking at when they pressed send" *is* a per-turn fact. Re-asserting it every invocation repeats a stale claim as though it were live; refreshing it contradicts the turn's own opening framing the moment the user scrolls |
+| Reached the **master only**, and a subagent writes files too | **No.** A subagent is given its own task, not the user's screen, and the Claude engine frames the master's turn only. Matching that is parity |
+| Stored in the mirror as **the user's own words** | **Yes**, and it is paid the way Claude pays it: a named wrapper, and `history.strip_framing` at read time |
+
+The mirror cost is worth being explicit about, because it looks like a regression of the thing AG-32
+fixed and is not. `AntigravityMirror.note_prompt` stores the prompt **verbatim, framing and all, on
+purpose** — a transcript that quietly disagreed with what the model was actually sent would be a worse
+artefact than one carrying a block the reader strips. What AG-32 objected to was a *paragraph the user
+did not write* being recorded as theirs. A framing block is not that: it is wrapped in a tag named after
+this app, it is stripped by the reader, and it says something the user did do.
+
+The SDK transport had nothing to weigh in any case. `AntigravitySession.stream_turn` takes a plain
+prompt string; `system_instructions` (`antigravity/surface.py:145`) is per-agent and static. The prompt
+is the only per-turn channel that exists there. The `agy` transport *does* have `PreInvocation`, and the
+table above is why it is not used.
+
+### One module, because a sentence is a feature
+
+`src/aic_dc/framing.py`: the wrapper constants, `Viewer` and its validator, `viewer_payload` for the
+push, the sentences, `compose`, and `resolve` for the two arrival paths. Every adapter calls it.
+
+Three things made this more than a file move.
+
+**The tag was spelled three times.** A literal inside `build_framing`, and `_FRAMING_OPEN` /
+`_FRAMING_CLOSE` in `history.py`. Two of those are a renderer and its reader and have to agree exactly;
+a wrapper edited on one side leaves the block in every browsed prompt with nothing reporting it.
+`history.py` imports the constants now and keeps its private aliases, which is what its own tests read.
+
+**`ViewerFraming` is an alias, not a rename.** `claude_code.session.ViewerFraming = framing.Viewer`.
+The name is published in `aic_dc.claude_code.__all__`, `specs5/next.md` § C7 and
+`specs5/impl-history/work-log.md` refer to it, and `tests/test_claude_code_session.py` constructs it
+positionally — `ViewerFraming("a.py", 1, 2)`. Renaming would have turned an internal move into a surface
+change for nothing. **No webapp file names it**, which is worth stating because the first draft of this
+section said otherwise: the browser knows `set_viewer_state` and the `ClaudeCodeService` namespace, never
+the Python class behind them.
+
+**The refactor is guarded by literals, not by comparison.** `test_framing.py` pins the whole rendered
+block as a string:
+
+```
+<aic-dc-ui-context>
+Open in the user's editor pane:
+- src/a.py (lines 10-20 selected)
+Code review is active:
+- branch: feature
+...
+```
+
+Comparing against `build_framing` would pass for free now the two are the same code, which is exactly
+why it is written out. That test **passed on the first run against the shipped renderer**, before any
+wiring, which is the evidence the words did not change when they moved. A round-trip test pairs it with
+`strip_framing`, since the renderer and the reader are now in different modules.
+
+### Where the work actually went: a method written twice and tested never
+
+`set_viewer_state` existed on two adapters and had **no test on either**. That is how the copies came to
+differ, and every difference was harmless for exactly as long as nothing read the field:
+
+- Antigravity cleared to `{}`; Claude cleared to `None`. Two spellings of empty, both falsy.
+- Antigravity stored `{"path": p, "start_line": None, "end_line": None}` verbatim; Claude omitted absent
+  keys. A stored `None` reaching the renderer prints **`(cursor on line None)`** into the model's
+  prompt. It never did, because `_as_int` dropped it one layer later — so this was one deleted
+  coercion away from putting a fabricated line number in front of the model.
+- Antigravity validated nothing. `set_viewer_state(42)` stored `{"path": 42}`.
+- The reply shape differed: `{"status": "ok"}` against Claude's `{"status": "ok", **state}` /
+  `{"status": "cleared"}`. Free to align — `pushViewerState` swallows the reply and reads no field of it.
+
+`framing.viewer_payload` is now the one rule for what a push stores, called by all three. `from_dict`
+remains the one rule for what a turn is framed from, and the two are deliberately **not** the same
+strictness: the push is a typed RPC argument the browser controls, so `"3"` is rejected; the turn's dict
+is a shape off the wire that it does not, so `"3"` is coerced.
+
+**And `if viewer:` could not be told that nothing is open.** Both overrides read
+`if viewer: self._viewer = dict(viewer)`, so a falsy payload was *silence* rather than an answer and a
+closed pane could not clear a stale push — the agent stayed pointed at a file nobody was looking at for
+the rest of the session. `framing.resolve` separates *not stated* (`None` → the push stands in) from
+*stated* (anything else, including `{}`, is the answer). Claude's own resolution moved onto the same
+function, so three engines answer this identically instead of nearly.
+
+### Fail-first, and what failed
+
+Thirteen tests written against the shipped source before any wiring: 5 in `test_agy_service.py`, 7 in
+`test_antigravity_service.py`, 1 in `test_framing.py`. The `test_framing.py` failure is the one worth
+naming — `assert ViewerFraming is framing.Viewer` — because the other 28 tests in that file passed
+immediately, which is what said the extracted renderer was faithful before anything depended on it.
+
+Three of the new `agy` tests passed against the shipped source too, and they were kept: they assert that
+a cleared pane frames nothing, which is trivially true when nothing frames anything. They only become
+real coverage after the wiring, and that is the point of them.
+
+**72 new tests; 5,474 passed.** Forty-six in `test_framing.py`, 11 in `test_antigravity_service.py`, 8 in
+`test_agy_service.py`, 7 in `test_claude_code_service.py`. The last of those is the Claude adapter's
+`set_viewer_state`, which was as untested as the Antigravity one. The three failures are the known
+environmental ones in `test_claude_consultant.py`.
+
+### Neighbours corrected while here
+
+`webapp/src/app-shell/viewer-framing.js`'s header described the push as feeding `_viewer_state` and its
+two readers, which was an account of the Claude adapter presented as an account of the app. It now says
+that the `ClaudeCodeService` name is the legacy namespace rather than the engine, that this one call site
+serves all three, and that what the state *feeds* still differs one way — `ui_state` is Claude's.
+
+`specs5/3-engine/session.md` § Turn framing and `specs5/5-webapp/shell.md` § Telling the Server What Is
+Open both described framing as this engine's, which was true when written.
+
+### What is left
+
+[AG-R-33](risks.md#ag-r-33): the Antigravity model cannot **ask**. Claude's viewer state feeds the
+`ui_state` MCP tool as well as the framing, so a model that suspects its context is stale can get the
+live answer; the only MCP server `agy` is given is the consultation listener, which declares
+`second_opinion` and nothing else. The framing is a true statement about the turn, so nothing in front of
+the model is wrong — the gap is a long turn during which the user navigates. Recorded rather than fixed
+by re-asserting a turn-scoped fact every invocation, which is the failure mode AG-33 exists to avoid.
+
+Unchanged and still recorded at `specs5/next.md` § C7: the **selection range** is accepted, stored and
+rendered, and nothing sends it, because no selection plumbing exists in either viewer and a range that
+lags the cursor points the agent at lines the user is not looking at.

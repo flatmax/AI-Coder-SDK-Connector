@@ -451,6 +451,166 @@ class TestATurnDoesNotHoldTheRpcOpen:
         asyncio.run(body())
 
 
+class TestViewerFraming:
+    """AG-33: the prompt says what the user is looking at.
+
+    ``set_viewer_state`` has existed on this adapter since it was written,
+    and its docstring said *"for turn framing"* — a promise the code did not
+    keep. ``_viewer`` was assigned by two paths and read by none, so the
+    browser's report of the open file was stored and thrown away, on both
+    Antigravity transports, while Claude framed it. The sentences now come
+    from :mod:`aic_dc.framing` and every engine composes them the same way.
+
+    Asserted on the prompt the session receives, because that is the thing
+    the model actually sees. ``FakeSession.stream_turn`` takes it as its
+    first argument, which is why the fake is reused here rather than a
+    ``_run_turn`` patch — this exercises the composition *and* the handoff.
+    """
+
+    def _prompt(self, svc, tmp_path, *args):
+        """Run one gated turn and return the prompt the session was given."""
+        seen = {}
+        release = asyncio.Event()
+        fake, _names = _running(svc, release)
+        real = fake.stream_turn
+
+        def spy(prompt, *, translator=None):
+            seen["prompt"] = prompt
+            return real(prompt, translator=translator)
+
+        fake.stream_turn = spy
+
+        async def body():
+            await _start(svc, *args)
+            release.set()
+            await next(iter(svc._turn_tasks))
+
+        asyncio.run(body())
+        return seen["prompt"]
+
+    def test_the_pushed_viewer_state_reaches_the_prompt(self, tmp_path):
+        """The gap AG-33 closed, on the transport that had it longest."""
+        svc = service(tmp_path)
+        svc.set_viewer_state("src/a.py", start_line=10, end_line=20)
+        assert self._prompt(svc, tmp_path, "r1", "why is this failing?") == (
+            "<aic-dc-ui-context>\n"
+            "Open in the user's editor pane:\n"
+            "- src/a.py (lines 10-20 selected)\n"
+            "</aic-dc-ui-context>\n"
+            "\n"
+            "why is this failing?"
+        )
+
+    def test_it_is_the_same_block_the_claude_engine_sends(self, tmp_path):
+        """AG-9 applied to a sentence: one feature, paid for once."""
+        from aic_dc.claude_code.session import Turn, compose_prompt
+        from aic_dc.framing import Viewer
+
+        svc = service(tmp_path)
+        svc.set_viewer_state("src/a.py", start_line=10, end_line=20)
+        assert self._prompt(svc, tmp_path, "r1", "why is this failing?") == (
+            compose_prompt(
+                Turn(
+                    request_id="r1",
+                    message="why is this failing?",
+                    viewer=Viewer("src/a.py", 10, 20),
+                )
+            )
+        )
+
+    def test_a_turn_with_nothing_to_frame_is_sent_verbatim(self, tmp_path):
+        """The property that makes composing unconditionally safe."""
+        assert self._prompt(service(tmp_path), tmp_path, "r1", "hi") == "hi"
+
+    def test_the_turn_argument_overrides_the_pushed_state(self, tmp_path):
+        svc = service(tmp_path)
+        svc.set_viewer_state("stale.py")
+        prompt = self._prompt(svc, tmp_path, "r1", "hi", None, {"path": "fresh.py"})
+        assert "- fresh.py" in prompt
+        assert "stale.py" not in prompt
+
+    def test_an_explicitly_empty_viewer_clears_a_stale_push(self, tmp_path):
+        """`if viewer:` could not be told "nothing is open"."""
+        svc = service(tmp_path)
+        svc.set_viewer_state("stale.py")
+        assert self._prompt(svc, tmp_path, "r1", "hi", None, {}) == "hi"
+
+    def test_the_mirror_reads_back_the_users_own_words(self, tmp_path):
+        """`note_prompt` stores the prompt verbatim, framing and all.
+
+        That is deliberate — a transcript disagreeing with what the model
+        was sent would be worse — so the strip is the contract that keeps
+        the browsed history honest about who said what.
+        """
+        from aic_dc.claude_code.history import strip_framing
+
+        svc = service(tmp_path)
+        svc.set_viewer_state("src/a.py", start_line=4)
+        prompt = self._prompt(svc, tmp_path, "r1", "why is this failing?")
+        assert strip_framing(prompt) == "why is this failing?"
+
+
+class TestSetViewerState:
+    """The push itself, and why it is the same shape on every engine.
+
+    ``engine_router`` exposes whichever adapter is master under the legacy
+    ``ClaudeCodeService`` name, so ``viewer-framing.js`` calls one method
+    name and reaches all three. That is what makes a *divergent* normaliser
+    here a real defect rather than a tidiness question: the browser cannot
+    tell which one it is talking to, and neither can the user.
+    """
+
+    def test_a_falsy_path_clears_rather_than_stores_a_hole(self, tmp_path):
+        """It stored ``{}`` where Claude stores ``None``.
+
+        Both are falsy, so nothing broke while nothing read it. A reader is
+        the thing that turns the difference into a bug, and AG-33 added one.
+        """
+        svc = service(tmp_path)
+        svc.set_viewer_state("src/a.py")
+        assert svc.set_viewer_state(None)["status"] == "cleared"
+        assert svc._viewer is None
+
+    def test_the_reply_is_the_claude_adapters_reply(self, tmp_path):
+        """Same call, same answer, whichever engine is mounted."""
+        svc = service(tmp_path)
+        assert svc.set_viewer_state("src/a.py", start_line=3) == {
+            "status": "ok",
+            "path": "src/a.py",
+            "start_line": 3,
+        }
+
+    def test_a_line_number_that_is_not_one_is_dropped_not_stored(self, tmp_path):
+        """It validated neither the path's type nor the lines' at all.
+
+        A ``start_line`` of ``"10"`` would have been stored and rendered as
+        ``(cursor on line 10)`` by luck; ``None`` in both slots would have
+        rendered ``(cursor on line None)`` into the model's prompt.
+        """
+        svc = service(tmp_path)
+        svc.set_viewer_state("src/a.py", start_line=None, end_line=None)
+        assert svc._viewer == {"path": "src/a.py"}
+
+    def test_a_path_that_is_not_a_string_clears(self, tmp_path):
+        svc = service(tmp_path)
+        svc.set_viewer_state("src/a.py")
+        svc.set_viewer_state(42)
+        assert svc._viewer is None
+
+    def test_the_agy_transport_inherits_this_one(self, tmp_path):
+        """No second implementation, and none was needed.
+
+        The task this closed was written up as needing *"a
+        ``set_viewer_state`` on ``AgyService``"*. Measured: it already had
+        one by inheritance, and the browser's push already reached it
+        through the router. The missing half was always the read.
+        """
+        from aic_dc.agy.service import AgyService
+
+        assert "set_viewer_state" not in vars(AgyService)
+        assert AgyService.set_viewer_state is AntigravityService.set_viewer_state
+
+
 class TestPermissionPostures:
     def test_it_offers_no_blanket_bypass(self, tmp_path):
         """AG-5's load-bearing half, and the half that did not move.

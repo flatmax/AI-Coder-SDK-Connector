@@ -55,6 +55,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from aic_dc import framing
 from aic_dc.agy import install, roots
 from aic_dc.agy import tools as agy_tools
 from aic_dc.agy.gate_server import AgyGateServer
@@ -605,8 +606,14 @@ class AgyService(AntigravityService):
                     "turn was not sent, rather than sent without the images."
                 ),
             }
-        if viewer:
-            self._viewer = dict(viewer)
+        # AG-33, and the same three lines as the SDK transport's override on
+        # purpose: this method exists because the *pump* differs, not because
+        # the framing does, and a second arrangement of the same decision
+        # here would be a second thing to keep in step.
+        turn_viewer = framing.resolve(viewer, self._viewer)
+        if viewer is not None:
+            self._viewer = turn_viewer.as_payload() if turn_viewer else None
+        message = framing.compose(framing.build(viewer=turn_viewer), message)
         if self._turns:
             return {
                 "error": (
@@ -637,15 +644,26 @@ class AgyService(AntigravityService):
         self._turns[request_id] = translator
         import asyncio
 
-        # **The user's own text, unmodified** (AG-32). This prepended
-        # `agy_tools.WRITE_GUIDANCE` inside a framing block until
-        # 2026-09-14, which put a paragraph the user did not write into the
-        # message the mirror records as theirs — and delivered it once per
-        # turn, to the master only, where the thing it is guarding against
-        # can happen at any invocation and in any subagent. The guidance now
-        # travels on `PreInvocation`, which is the vendor's own channel for
-        # it; `history.strip_framing` stays because transcripts written
-        # before today still carry the block.
+        # **The user's own text, and this turn's framing — never the
+        # standing guidance** (AG-32, then AG-33 the same day).
+        #
+        # This prepended `agy_tools.WRITE_GUIDANCE` inside a framing block
+        # until 2026-09-14: a paragraph the user did not write, in the
+        # message the mirror records as theirs, delivered once per turn to
+        # the master only, where the thing it guards against can happen at
+        # any invocation and in any subagent. It travels on `PreInvocation`
+        # now, which is the vendor's own channel for it.
+        #
+        # The block came back hours later carrying viewer state, and that is
+        # not a reversal — the two facts have different lifetimes. Standing
+        # guidance is true at every invocation, so a per-turn prepend
+        # under-delivered it. "What the user was looking at when they pressed
+        # send" is true of *this turn*, so a per-invocation re-assertion
+        # would over-claim it. Each fact is on the channel whose lifetime
+        # matches, and `framing`'s docstring is where that is argued.
+        #
+        # `history.strip_framing` was going to stay either way: transcripts
+        # written before today still carry the guidance in a block.
         task = asyncio.create_task(
             self._run_agy_turn(session, translator, request_id, message),
             name=f"agy-turn-{request_id}",

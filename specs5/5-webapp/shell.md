@@ -166,6 +166,16 @@ tool exists for.
 - A reconnect re-pushes. Server-side viewer state is in memory and a reconnect usually means a restarted
   process, so the file still in front of the user is one the new process has never heard of
 - The **selection range is never sent** — only the file. See [`../next.md`](../next.md) § C7
+- **The `ClaudeCodeService` prefix is the legacy namespace, not the engine.** `engine_router` mounts
+  whichever adapter is master under that name, so this one call site serves all three engines and the
+  shell has nothing to switch on. That stopped being cosmetic on 2026-09-14: both Antigravity adapters
+  had been receiving this push and discarding it, so the file the user was looking at reached the model on
+  one engine of three, and the browser had no way to tell
+  ([`../plan-ag/decisions.md` AG-33](../plan-ag/decisions.md#ag-33)). Fixed in the adapters, not here.
+  What the state feeds does still differ one way: the `ui_state` tool is Claude's, because `agy`'s only
+  MCP server is the consultation listener
+  ([`../plan-ag/risks.md` AG-R-33](../plan-ag/risks.md#ag-r-33)), so on those engines the turn's framing
+  is the whole report — which is sound for a turn-scoped fact and is why nothing here pushes more often
 
 ### Reserved Strip
 

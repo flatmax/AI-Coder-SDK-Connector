@@ -67,7 +67,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from aic_dc import capabilities
+from aic_dc import capabilities, framing
 from aic_dc.antigravity import options
 from aic_dc.antigravity.credentials import Credentials
 from aic_dc.antigravity.credentials import resolve as resolve_credentials
@@ -203,7 +203,12 @@ class AntigravityService:
         self._gate: AntigravityPermissionGate | None = None
         self._permission_mode = "default"
         self._denied_read_files: list[str] = []
-        self._viewer: dict[str, Any] = {}
+        # What the browser last said the user has open, in
+        # `framing.viewer_payload`'s shape. `None` rather than `{}` for
+        # "nothing", matching the Claude adapter's `_viewer_state`: since
+        # AG-33 something reads this, and two spellings of empty is one more
+        # thing for a reader to get right.
+        self._viewer: dict[str, Any] | None = None
         self._turns: dict[str, StepTranslator] = {}
         self._errors: list[dict[str, Any]] = []
 
@@ -641,8 +646,26 @@ class AntigravityService:
                     "the images."
                 ),
             }
-        if viewer:
-            self._viewer = dict(viewer)
+        # **What the user is looking at, on the prompt** (AG-33). The
+        # browser has pushed this to whichever adapter is master since
+        # phase 3 and it was stored and never read, so a user asking "why
+        # is this failing?" about the file on their screen got an answer
+        # that depended on which engine Settings had mounted.
+        #
+        # ``framing.resolve`` decides which arrival path answers, and the
+        # composed prompt goes to the pump — which means the mirror stores
+        # it framing and all, on purpose, and ``history.strip_framing``
+        # recovers the user's words at read time. The SDK takes a plain
+        # prompt string, so there is no side channel here to use instead:
+        # ``system_instructions`` is per-agent and static.
+        turn_viewer = framing.resolve(viewer, self._viewer)
+        if viewer is not None:
+            # A viewer stated on the turn *replaces* the pushed state rather
+            # than sitting beside it. Two records of one fact disagree, and
+            # the disagreement would surface as a turn framed one way and a
+            # later turn framed another with nothing having changed.
+            self._viewer = turn_viewer.as_payload() if turn_viewer else None
+        message = framing.compose(framing.build(viewer=turn_viewer), message)
 
         # Decided here rather than inside the generator. ``stream_turn``
         # raises TurnInProgressError, but it is an async generator, so the
@@ -1244,16 +1267,38 @@ class AntigravityService:
         start_line: int | None = None,
         end_line: int | None = None,
     ) -> dict[str, Any]:
-        """**Localhost only.** What the user is looking at, for turn framing."""
+        """Record what the caller has open in their viewer.
+        **Localhost only.**
+
+        Feeds the turn framing. **That sentence was here before the code
+        was**: the docstring said *"for turn framing"* from the day this
+        adapter was written, and until AG-33 nothing read ``_viewer`` — so
+        the browser pushed the open file on every scroll and this stored it
+        and threw it away. The push was never the missing half.
+
+        Gated for the Claude adapter's reason and it is the same reason
+        here: it is an input to the prompt, so a non-localhost participant
+        could otherwise put a path of their choosing in front of the model
+        on somebody else's turn. A small lever, and still a lever on what
+        the agent reads.
+
+        Normalised through :func:`aic_dc.framing.viewer_payload` rather than
+        stored as it arrives. It used to keep ``{"path": path, "start_line":
+        None, "end_line": None}`` verbatim and to write ``{}`` where Claude
+        writes ``None`` — differences that cost nothing while nothing read
+        them, and became a rendered ``(cursor on line None)`` and a
+        two-spellings-of-empty bug the moment something did.
+
+        Inherited unchanged by :class:`~aic_dc.agy.service.AgyService`, which
+        is why there is no second copy of it there.
+        """
         restricted = self._check_localhost_only()
         if restricted is not None:
             return restricted
-        self._viewer = (
-            {"path": path, "start_line": start_line, "end_line": end_line}
-            if path
-            else {}
-        )
-        return {"status": "ok"}
+        self._viewer = framing.viewer_payload(path, start_line, end_line)
+        if self._viewer is None:
+            return {"status": "cleared"}
+        return {"status": "ok", **self._viewer}
 
     def navigate_file(self, path: str) -> dict[str, Any]:
         """Point every client at a file. Unrestricted — it changes nothing."""
