@@ -541,6 +541,84 @@ class TestATurn:
         assert not (tmp_path / "their-hooks.json").exists()
 
 
+class TestTheMasterGateKnowsItsOwnConfigRoot:
+    """AG-24 § *`agy` does not name MCP tools*, plumbed end to end.
+
+    ``agy`` reads ``<root>/.gemini/antigravity-cli/mcp/<server>/<tool>.json``
+    with ``view_file`` immediately before every MCP call, so the consultant
+    Claude offers is reachable only while that read gets through. It gets
+    through today because nothing scopes reads — and the failure when
+    something does is invisible: no denial in the transcript, and a
+    ``second_opinion`` that simply never happens.
+
+    Staged with the user's own denied-reads list pointed at the master root,
+    which is the narrowest way to make "a policy that scopes reads" real
+    without inventing one.
+    """
+
+    def test_a_schema_read_survives_a_denied_read_covering_the_root(
+        self, wired, tmp_path
+    ):
+        svc, _events = wired
+        master = roots.master_root(tmp_path / "cfg")
+        svc._denied_read_files = [str(master)]
+        # Spelled out rather than taken from `roots.mcp_schema_dir`, so this
+        # asserts the layout `agy` actually uses instead of restating the
+        # helper — a test built from the helper would keep passing if the
+        # helper moved and the vendor did not.
+        schema = (
+            master / ".gemini" / "antigravity-cli" / "mcp" / "aic-dc"
+            / "second_opinion.json"
+        )
+
+        async def go():
+            await svc.connect_engine()
+            answer = await svc._agy_gate.decide(
+                {
+                    "conversationId": svc._session.conversation_id,
+                    "stepIdx": 1,
+                    "toolCall": {
+                        "name": "view_file",
+                        "args": {"AbsolutePath": str(schema)},
+                    },
+                }
+            )
+            await svc.shutdown()
+            return answer
+
+        assert asyncio.run(go()) == {"decision": "allow"}
+
+    def test_the_token_file_in_the_same_root_is_still_denied(self, wired, tmp_path):
+        """The scope of the admission, at the file that makes it matter.
+
+        ``mcp_config.json`` holds the bearer the consultation listener
+        honours. It lives one directory away from the schemas and must not
+        come along with them.
+        """
+        svc, _events = wired
+        master = roots.master_root(tmp_path / "cfg")
+        svc._denied_read_files = [str(master)]
+
+        async def go():
+            await svc.connect_engine()
+            answer = await svc._agy_gate.decide(
+                {
+                    "conversationId": svc._session.conversation_id,
+                    "stepIdx": 1,
+                    "toolCall": {
+                        "name": "view_file",
+                        "args": {
+                            "AbsolutePath": str(roots.mcp_config_file(master))
+                        },
+                    },
+                }
+            )
+            await svc.shutdown()
+            return answer
+
+        assert asyncio.run(go())["decision"] == "deny"
+
+
 class TestTheSessionContractTheServiceReadsThrough:
     """`AgyService` inherits methods that reach into the *session*.
 

@@ -61,14 +61,14 @@ class TestEveryPathHangsOffTheRoot:
 
     @pytest.mark.parametrize(
         "accessor",
-        [roots.vendor_dir, roots.brain_dir, roots.hooks_file],
+        [roots.vendor_dir, roots.brain_dir, roots.hooks_file, roots.mcp_schema_dir],
     )
     def test_it_is_under_the_root_it_was_given(self, tmp_path, accessor):
         assert accessor(tmp_path).is_relative_to(tmp_path)
 
     @pytest.mark.parametrize(
         "accessor",
-        [roots.vendor_dir, roots.brain_dir, roots.hooks_file],
+        [roots.vendor_dir, roots.brain_dir, roots.hooks_file, roots.mcp_schema_dir],
     )
     def test_two_roots_give_two_answers(self, tmp_path, accessor):
         assert accessor(tmp_path / "a") != accessor(tmp_path / "b")
@@ -79,6 +79,26 @@ class TestEveryPathHangsOffTheRoot:
         ``.antigravity/`` is not loaded. Only this path is."""
         assert roots.hooks_file(tmp_path) == (
             tmp_path / ".gemini" / "config" / "hooks.json"
+        )
+
+    def test_the_mcp_schemas_are_where_agy_files_them(self, tmp_path):
+        """AG-24. ``agy`` writes one JSON file per MCP tool here and reads it
+        back with ``view_file`` before every MCP call it makes, so this path
+        is the consultant's reachability rather than a detail of layout."""
+        assert roots.mcp_schema_dir(tmp_path) == (
+            tmp_path / ".gemini" / "antigravity-cli" / "mcp"
+        )
+
+    def test_it_does_not_contain_the_bearer_token(self, tmp_path):
+        """Why the admission names this directory and not the root.
+
+        ``mcp_config.json`` holds the token the consultation listener
+        honours. A gate that admitted the vendor directory wholesale to buy
+        the schema reads would put that credential inside the same
+        allowance.
+        """
+        assert not roots.mcp_config_file(tmp_path).is_relative_to(
+            roots.mcp_schema_dir(tmp_path)
         )
 
     def test_the_two_roots_are_different_directories(self, tmp_path):

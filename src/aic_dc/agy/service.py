@@ -392,24 +392,29 @@ class AgyService(AntigravityService):
             # gate was not reading.
             config_dir=self._config_dir,
         )
-        self._agy_gate = AgyGateServer(
-            self._config_dir / "agy-sessions" / "gate.sock",
-            gate=self._gate,
-            config_dir=self._config_dir,
-        )
         # **The master's own config root** (AG-21), stable so that resume
         # keeps working across restarts, and private so that the hook this
         # app installs is not in the user's file. The hook goes in with it:
         # the gate is the only thing between the model and the tree on this
         # transport, because `agy` runs with `--dangerously-skip-permissions`.
+        #
+        # Resolved *before* the gate server rather than after, because the
+        # server now takes the root: AG-24's schema-read admission is scoped
+        # to a directory inside it, and a gate built without it would admit
+        # nothing and take the consultant with it.
         config_root, report = self._ensure_gate()
         if report.get("state") != "current":
-            await self._agy_gate.stop()
             raise RuntimeError(
                 "The agy permission gate could not be installed into this "
                 "session's config root, so the session would run ungated: "
                 + str(report.get("detail") or report.get("state"))
             )
+        self._agy_gate = AgyGateServer(
+            self._config_dir / "agy-sessions" / "gate.sock",
+            gate=self._gate,
+            config_dir=self._config_dir,
+            config_root=config_root,
+        )
         # **Before `exec`, because `agy` reads `mcp_config.json` during
         # startup** — a file that appears afterwards is a file it never
         # sees, and the failure is silent: the tool is simply absent and

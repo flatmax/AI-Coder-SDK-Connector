@@ -959,3 +959,168 @@ class TestARefusalCarriesATokenForItself:
             "decision": "allow"
         }
         assert policy.refusals.outstanding == 0
+
+
+class TestTheVendorReadsItsOwnMcpSchema:
+    """AG-24's other silence: the read that works because nothing stops it.
+
+    Every MCP call `agy` makes is preceded by a ``view_file`` of
+    ``<root>/.gemini/antigravity-cli/mcp/<server>/<tool>.json`` — it reads
+    the schema off disk rather than from the protocol. That read is allowed
+    today because ``tools.py`` classes ``view_file`` as a read and
+    ``pre_verdict`` auto-allows reads with no path scoping, which is to say
+    it is allowed **by accident**.
+
+    The day a policy scopes reads, the consultant stops being reachable and
+    the symptom is *the model did not call the tool*: no denial in the
+    transcript, nothing in the log, and a feature that is simply not there.
+    So the read is admitted by name and by directory, which is what makes
+    it survive a narrowing — and the tests below are written against a
+    denied-reads list that covers the config root, because that is the
+    future this exists for rather than the present it changes nothing in.
+    """
+
+    @staticmethod
+    def _wire(tmp_path, *, denied=(), policy=None, root=True):
+        from aic_dc.agy import roots
+
+        config_root = tmp_path / "master"
+        recorder = Recorder()
+        gate = None
+        if policy is None:
+            gate = AntigravityPermissionGate(
+                tmp_path,
+                broadcast=recorder,
+                localhost_available=lambda: True,
+                config_dir=tmp_path / "cfg",
+                denied_reads=lambda: [str(p) for p in denied],
+            )
+        server = AgyGateServer(
+            tmp_path / "gate.sock",
+            gate=gate,
+            policy=policy,
+            config_dir=tmp_path / "cfg",
+            config_root=config_root if root else None,
+        )
+        schema = roots.mcp_schema_dir(config_root) / "aic-dc" / "second_opinion.json"
+        schema.parent.mkdir(parents=True, exist_ok=True)
+        schema.write_text('{"name": "second_opinion"}', encoding="utf-8")
+        return server, recorder, config_root, schema
+
+    def test_a_scoped_read_policy_does_not_take_the_consultant_away(self, tmp_path):
+        """The whole point: the admission outlives a narrowing of reads."""
+        server, recorder, config_root, schema = self._wire(
+            tmp_path, denied=[tmp_path / "master"]
+        )
+        answer = asyncio.run(
+            server.decide(payload("view_file", {"AbsolutePath": str(schema)}))
+        )
+        assert answer == {"decision": "allow"}
+        assert recorder.requests() == [], "and it does not become a dialog either"
+
+    def test_the_bearer_token_beside_it_is_not_admitted(self, tmp_path):
+        """``mcp_config.json`` holds the consultation listener's token.
+
+        The reason the admission names ``antigravity-cli/mcp`` rather than
+        the config root: buying the schema reads with a root-wide allowance
+        would put a credential inside the same admission.
+        """
+        from aic_dc.agy import roots
+
+        server, _recorder, config_root, _schema = self._wire(
+            tmp_path, denied=[tmp_path / "master"]
+        )
+        answer = asyncio.run(
+            server.decide(
+                payload(
+                    "view_file",
+                    {"AbsolutePath": str(roots.mcp_config_file(config_root))},
+                )
+            )
+        )
+        assert answer["decision"] == "deny"
+
+    def test_a_traversal_out_of_the_directory_is_not_admitted(self, tmp_path):
+        """Resolved before the containment test, which is why this is a test.
+
+        A string test on the prefix would pass ``…/mcp/../config/
+        mcp_config.json``, and the file it reaches is the one above.
+        """
+        from aic_dc.agy import roots
+
+        server, _recorder, config_root, _schema = self._wire(
+            tmp_path, denied=[tmp_path / "master"]
+        )
+        escape = (
+            roots.mcp_schema_dir(config_root)
+            / ".."
+            / "config"
+            / "mcp_config.json"
+        )
+        answer = asyncio.run(
+            server.decide(payload("view_file", {"AbsolutePath": str(escape)}))
+        )
+        assert answer["decision"] == "deny"
+
+    def test_a_consultation_is_given_no_such_door(self, tmp_path):
+        """A static policy answers for itself, admission or not.
+
+        A read granted around it would falsify the header the asking model
+        is handed — "no tools and no repository access" — with every test
+        still green, because a permitted call raises no refusal to notice.
+        """
+        server, _recorder, _root, schema = self._wire(
+            tmp_path, policy=StaticPolicy.of(["finish"], "no tools here")
+        )
+        answer = asyncio.run(
+            server.decide(payload("view_file", {"AbsolutePath": str(schema)}))
+        )
+        assert answer["decision"] == "deny"
+        assert "no tools here" in answer["reason"]
+
+    def test_a_gate_with_no_config_root_admits_nothing(self, tmp_path):
+        """``None`` is the behaviour this class had before the admission."""
+        server, _recorder, _root, schema = self._wire(
+            tmp_path, denied=[tmp_path / "master"], root=False
+        )
+        answer = asyncio.run(
+            server.decide(payload("view_file", {"AbsolutePath": str(schema)}))
+        )
+        assert answer["decision"] == "deny"
+
+    def test_it_is_one_tool_and_one_directory(self, tmp_path):
+        """The narrowness, at the level where each axis is separable."""
+        server, _recorder, config_root, schema = self._wire(tmp_path)
+        assert server._is_mcp_schema_read("view_file", {"AbsolutePath": str(schema)})
+        assert not server._is_mcp_schema_read(
+            "run_command", {"CommandLine": f"cat {schema}"}
+        ), "a shell command that names the path is not this"
+        assert not server._is_mcp_schema_read("view_file", {}), "no path, no admission"
+        assert not server._is_mcp_schema_read(
+            "view_file", {"AbsolutePath": str(config_root)}
+        ), "the root itself is not inside the schema directory"
+
+    def test_the_directory_itself_is_not_a_file_to_read(self, tmp_path):
+        from aic_dc.agy import roots
+
+        server, _recorder, config_root, _schema = self._wire(tmp_path)
+        assert not server._is_mcp_schema_read(
+            "view_file", {"AbsolutePath": str(roots.mcp_schema_dir(config_root))}
+        )
+
+    def test_a_schema_that_does_not_exist_yet_is_still_admitted(self, tmp_path):
+        """``agy`` writes these during startup, so the read can race them.
+
+        An admission that required the file to exist would be a flake
+        rather than a policy.
+        """
+        from aic_dc.agy import roots
+
+        server, _recorder, config_root, _schema = self._wire(
+            tmp_path, denied=[tmp_path / "master"]
+        )
+        later = roots.mcp_schema_dir(config_root) / "aic-dc" / "generate_image.json"
+        answer = asyncio.run(
+            server.decide(payload("view_file", {"AbsolutePath": str(later)}))
+        )
+        assert answer == {"decision": "allow"}

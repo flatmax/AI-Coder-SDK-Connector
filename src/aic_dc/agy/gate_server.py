@@ -68,10 +68,11 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any, ClassVar
 
-from aic_dc.agy import hook, registry, scope
+from aic_dc.agy import hook, registry, roots, scope
 from aic_dc.antigravity.permissions import (
     AntigravityPermissionGate,
     denormalise_args,
+    normalise_args,
 )
 
 logger = logging.getLogger(__name__)
@@ -361,6 +362,7 @@ class AgyGateServer:
         *,
         gate: AntigravityPermissionGate | None = None,
         config_dir: Path | str | None = None,
+        config_root: Path | str | None = None,
         policy: StaticPolicy | None = None,
     ) -> None:
         if (gate is None) == (policy is None):
@@ -379,6 +381,12 @@ class AgyGateServer:
         self._gate = gate
         self._policy = policy
         self._config_dir = config_dir
+        #: The private ``HOME`` this session's ``agy`` runs against, or
+        #: ``None``. Held for one purpose — :meth:`_is_mcp_schema_read` —
+        #: and ``None`` admits nothing, so a caller that does not pass it
+        #: gets the behaviour this class had before AG-24's schema
+        #: admission, rather than a wider one.
+        self._config_root = Path(config_root) if config_root else None
         self._server: Any = None
         # A set, not one id: this host owns its session's conversation and
         # its subagents' while they run. See `claim`.
@@ -676,6 +684,26 @@ class AgyGateServer:
             )
             return {"decision": "deny", "reason": aimed}
 
+        # **The vendor reading its own MCP tool schema** (AG-24). Admitted
+        # by name, before the two verdict paths below, because it is the
+        # mechanical prelude to every MCP call `agy` makes rather than
+        # anything the model chose to look at: one `view_file` of
+        # `<root>/.gemini/antigravity-cli/mcp/<server>/<tool>.json`, then
+        # the call. It has always been allowed — `tools.py` classes
+        # `view_file` as a read and `pre_verdict` auto-allows reads — so
+        # this changes no behaviour today. It is here so that the first
+        # policy to *scope* reads does not take the consultant away with
+        # it, and take it away invisibly: the symptom of losing this read
+        # is `second_opinion` never being called, with no denial to find.
+        #
+        # Only on the master path. Under a static policy the answer stays
+        # the policy's, which is what keeps `_no_tools_or_fail`'s promise
+        # honest — a consultation is told nothing was read, and a side door
+        # for reads granted here would make that sentence false with every
+        # test still green.
+        if self._policy is None and self._is_mcp_schema_read(tool_name, args):
+            return {"decision": "allow"}
+
         if self._policy is not None:
             # A consultation (AG-16). Terminal on purpose: this does not
             # fall through to `pre_verdict`, because that path exists to
@@ -727,6 +755,44 @@ class AgyGateServer:
                 "overwrite": denormalise_args(tool_name, amended),
             }
         return {"decision": "allow"}
+
+    def _is_mcp_schema_read(self, tool_name: str, args: dict[str, Any]) -> bool:
+        """Whether this call is ``agy`` reading one of its own MCP schemas.
+
+        Narrow on every axis it can be, because an admission that skips the
+        dialog is a hole with a good reason rather than a safe operation:
+
+        - **One tool.** ``view_file`` and nothing else. A ``run_command``
+          that happens to name a path in the directory is not this.
+        - **One directory**, :func:`~aic_dc.agy.roots.mcp_schema_dir`, and
+          resolved before the containment test so that ``mcp/../config/
+          mcp_config.json`` is not inside it. That traversal is the one
+          that matters: the file it reaches holds the consultation
+          listener's bearer token.
+        - **One root**, the private ``HOME`` this session was given. With
+          no root there is nothing to compare against and the answer is
+          ``False`` — so a caller that passes no ``config_root`` gets the
+          gate it had before this existed.
+
+        Symlinks are followed by ``resolve()``, which is deliberate in both
+        directions: a symlink *into* the directory from elsewhere does not
+        pass, and the seeded directories under the same vendor root are
+        symlinks this app made and can be read through. ``strict=False``,
+        because ``agy`` writes these files during startup and a schema read
+        can race the file's creation — an admission that depended on the
+        file already existing would be a flake rather than a policy.
+        """
+        if tool_name != "view_file" or self._config_root is None:
+            return False
+        target = normalise_args(tool_name, args).get("file_path")
+        if not isinstance(target, str) or not target:
+            return False
+        try:
+            path = Path(target).resolve(strict=False)
+            directory = roots.mcp_schema_dir(self._config_root).resolve(strict=False)
+        except OSError:  # noqa: BLE001 - an unresolvable path is not admitted
+            return False
+        return path != directory and directory in path.parents
 
     def was_terminated(self, conversation_id: str) -> bool:
         """Whether this server ended that conversation's loop. AG-19.

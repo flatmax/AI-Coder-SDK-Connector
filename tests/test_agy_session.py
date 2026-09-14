@@ -186,6 +186,91 @@ class TestTheHandshake:
 
         asyncio.run(go())
 
+    def test_the_init_frames_tool_inventory_is_kept(self, wired):
+        """The one free look at what this binary calls its tools. AG-R-22.
+
+        ``init`` arrives before any prompt is sent, so reading the inventory
+        out of it costs no model turn and no subscription spend — which is
+        what lets a consultation check its allowlist against the vendor's
+        vocabulary on every launch instead of trusting a probe somebody has
+        to remember to re-run after an upgrade. It was read and thrown away
+        until 2026-09-14.
+        """
+        session, _server, _cfg, _events = wired
+
+        async def go():
+            await session.start()
+            found = session.advertised_tools
+            await session.close()
+            return found
+
+        assert asyncio.run(go()) == frozenset({"view_file"})
+
+    def test_no_inventory_is_no_claim_rather_than_no_tools(self, tmp_path):
+        """An ``init`` frame with no ``tools`` key must still start.
+
+        And must report nothing, because the alternative reading — an empty
+        advertisement meaning every tool is missing — would make an older
+        ``agy`` look like a renamed one on every single consultation.
+        """
+        fake = tmp_path / "fake_agy.py"
+        fake.write_text(
+            textwrap.dedent(
+                f'''
+                import json, sys, os
+                def emit(o):
+                    sys.stdout.write(json.dumps(o) + "\\n"); sys.stdout.flush()
+                emit({{"event": "init", "conversation_id": "{CONV}",
+                      "init": {{"cwd": os.getcwd()}}}})
+                for line in sys.stdin:
+                    pass
+                '''
+            ),
+            encoding="utf-8",
+        )
+        launcher = tmp_path / "agy"
+        launcher.write_text(
+            f"#!/bin/sh\nexec {sys.executable} {fake}\n", encoding="utf-8"
+        )
+        launcher.chmod(0o755)
+        server = AgyGateServer(
+            tmp_path / "g.sock",
+            gate=AntigravityPermissionGate(
+                tmp_path, broadcast=lambda e: None,
+                localhost_available=lambda: True, config_dir=tmp_path / "cfg",
+            ),
+            config_dir=tmp_path / "cfg",
+        )
+        session = AgySession(tmp_path, gate=server, executable=str(launcher))
+
+        async def go():
+            cid = await session.start()
+            found = session.advertised_tools
+            await session.close()
+            return cid, found
+
+        cid, found = asyncio.run(go())
+        assert cid == CONV, "the handshake is unaffected"
+        assert found == frozenset()
+
+    def test_the_inventory_reader_never_raises(self):
+        """Every shape that is not a list of names reduces to nothing.
+
+        It runs inside the handshake, so a session that could not start
+        because the inventory was shaped unexpectedly would be a much worse
+        failure than not knowing the inventory. The mapping arm is for a
+        future binary that describes its tools as objects, the way the SDK
+        already does.
+        """
+        from aic_dc.agy.session import _tool_names
+
+        assert _tool_names({"tools": ["a", "b"]}) == frozenset({"a", "b"})
+        assert _tool_names({"tools": [{"name": "a"}, {"name": ""}]}) == frozenset({"a"})
+        assert _tool_names({"tools": "view_file"}) == frozenset()
+        assert _tool_names({"tools": [None, 3, "a"]}) == frozenset({"a"})
+        assert _tool_names({}) == frozenset()
+        assert _tool_names(None) == frozenset()
+
     def test_start_is_idempotent(self, wired):
         session, _server, _cfg, _events = wired
 

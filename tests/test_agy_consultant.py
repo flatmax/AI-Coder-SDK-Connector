@@ -51,6 +51,17 @@ from aic_dc.antigravity.consultant import ConsultationError
 CONV = "0d9d1f3a-6c1e-4a51-9b0e-3f5f0f1b2c34"
 
 
+#: What a real ``agy`` says it has, cut down to the names this file cares
+#: about. Measured on 1.2.2: 57 of them, ``finish`` among them, and the
+#: inventory arrives in the ``init`` frame before any prompt is sent.
+#:
+#: ``finish`` is in the default because a fixture that omitted it would
+#: describe a binary AG-R-22 is *about* rather than the one users have —
+#: and every consultation run against it would carry the renamed-tool note
+#: as though it were normal.
+ADVERTISED = ("finish", "generate_image", "view_file", "read_url_content")
+
+
 def _fake_agy(
     *,
     image_path: str | None = None,
@@ -60,6 +71,7 @@ def _fake_agy(
     answer: str = "It depends.",
     log: str = "",
     hold_until: str = "",
+    advertises: tuple[str, ...] | None = ADVERTISED,
 ) -> str:
     """A fake ``agy``: init, prose, optionally an image tool call, result.
 
@@ -93,6 +105,13 @@ def _fake_agy(
     frame, so a test decides when each consultation finishes: the one it
     releases answers, and the one it does not is still running when ⏹ is
     pressed.
+
+    **``advertises`` is the binary's own tool inventory** (AG-R-22), and
+    ``None`` is not the same as ``()``: ``None`` emits an ``init`` frame
+    with no ``tools`` key at all, which is the older binary that says
+    nothing about its vocabulary, while ``()`` emits an empty list. Both
+    must leave the consultant claiming nothing about what is missing, and
+    they are separable here so that a test can prove it of each.
     """
     tool = ""
     if hold_until:
@@ -215,8 +234,10 @@ def _fake_agy(
         log = {log!r}
         def emit(o):
             sys.stdout.write(json.dumps(o) + "\\n"); sys.stdout.flush()
-        emit({{"event": "init", "conversation_id": conv,
-              "init": {{"cwd": os.getcwd(), "tools": ["generate_image"]}}}})
+        init = {{"cwd": os.getcwd()}}
+        if {advertises!r} is not None:
+            init["tools"] = list({advertises!r})
+        emit({{"event": "init", "conversation_id": conv, "init": init}})
         for line in sys.stdin:
             if not line.strip():
                 continue
@@ -235,6 +256,7 @@ def _fake_agy(
         conv=CONV,
         answer=answer,
         log=log,
+        advertises=advertises,
         tool=textwrap.indent(tool, "    ").strip("\n"),
     )
 
@@ -280,6 +302,8 @@ def gated(tmp_path, monkeypatch):
         answer: str = "It depends.",
         log: str = "",
         hold_until: str = "",
+        advertises: tuple[str, ...] | None = ADVERTISED,
+        timeout_seconds: float | None = None,
     ):
         fake = tmp_path / "fake_agy.py"
         fake.write_text(
@@ -291,6 +315,7 @@ def gated(tmp_path, monkeypatch):
                 answer=answer,
                 log=log,
                 hold_until=hold_until,
+                advertises=advertises,
             ),
             "utf-8",
         )
@@ -303,8 +328,11 @@ def gated(tmp_path, monkeypatch):
         monkeypatch.setattr(
             "aic_dc.agy.consultant.shutil.which", lambda _n: str(launcher)
         )
+        extra = (
+            {} if timeout_seconds is None else {"timeout_seconds": timeout_seconds}
+        )
         return AgyConsultant(
-            repo, config_dir=config_dir, executable=str(launcher)
+            repo, config_dir=config_dir, executable=str(launcher), **extra
         )
 
     return build, repo, config_dir
@@ -983,6 +1011,147 @@ class TestAnEmptyAnswerStillReportsWhatHappened:
 
         said = consultant_mod._empty_answer_reason(Twice())
         assert "view_file and read_url_content" in said
+
+
+class TestARenamedControlToolIsNamedRatherThanTimedOut:
+    """AG-R-22's second silence: the allowlist outliving the vocabulary.
+
+    ``finish`` is the only tool a second opinion may call, and it is how
+    the model says it is done. If a weekly-releasing CLI renames or
+    namespaces it, the allowlist refuses the consultant its own turn-ending
+    tool — and the shipped failure was the worst shape available: every
+    consultation runs to the bridge timeout, the tokens are spent, and both
+    the tab and the answer say only that Antigravity did not answer in
+    time. Nothing anywhere names the cause.
+
+    The fix is *detection*, and deliberately nothing more. ``agy``'s
+    ``init`` frame lists its tools before any prompt is sent, so the check
+    is free; permitting an unknown name because it looks like a control
+    tool is exactly the reasoning the allowlist exists to refuse, and
+    refusing to launch is ruled out by measurement — AG-R-22's P24 arm D
+    answered without making a single tool call, so a missing ``finish``
+    makes failure likely rather than certain.
+    """
+
+    def test_the_timeout_names_the_tool_the_binary_does_not_have(self, gated):
+        """The shipped message for this failure, and what it now adds.
+
+        A fake that never sends its result frame is the renamed-``finish``
+        shape end to end: the consultation cannot end its own turn, and the
+        only thing that ends it is the clock.
+        """
+        build, _repo, _cfg = gated
+        consultant = build(
+            hold_until=str(_cfg / "never-appears"),
+            advertises=("generate_image", "view_file"),
+            timeout_seconds=2.0,
+        )
+        with pytest.raises(ConsultationError) as raised:
+            asyncio.run(consultant.second_opinion("hold, then answer"))
+        said = str(raised.value)
+        assert "did not answer within 2s" in said, "still says what happened"
+        assert "does not advertise finish" in said, (
+            "and now says why: the tool it needed to stop with is not there"
+        )
+        assert "version mismatch in AIC-DC" in said, (
+            "which is nobody's question being bad"
+        )
+
+    def test_an_empty_answer_names_it_too(self, gated):
+        """The other surface, because a reader may only see one of them."""
+        build, _repo, _cfg = gated
+        consultant = build(answer="", advertises=("generate_image",))
+        with pytest.raises(ConsultationError) as raised:
+            asyncio.run(consultant.second_opinion("well?"))
+        said = str(raised.value)
+        assert "empty answer" in said
+        assert "does not advertise finish" in said
+
+    def test_a_binary_that_has_the_tool_provokes_nothing(self, gated):
+        """No false alarm on the ordinary case, which is every real run."""
+        build, _repo, _cfg = gated
+        consultant = build(answer="")
+        with pytest.raises(ConsultationError) as raised:
+            asyncio.run(consultant.second_opinion("well?"))
+        assert "does not advertise" not in str(raised.value)
+
+    def test_a_binary_that_lists_no_tools_makes_no_claim(self, gated):
+        """An ``init`` frame with no inventory is silence, not absence.
+
+        The direction this must fail in. Reading an empty advertisement as
+        "every permitted tool is missing" would fire the alarm on every
+        consultation against an older ``agy`` — teaching a reader to ignore
+        the one that matters.
+        """
+        build, _repo, _cfg = gated
+        consultant = build(answer="", advertises=None)
+        with pytest.raises(ConsultationError) as raised:
+            asyncio.run(consultant.second_opinion("well?"))
+        assert "does not advertise" not in str(raised.value)
+
+    def test_an_empty_list_is_silence_as_well(self, gated):
+        build, _repo, _cfg = gated
+        consultant = build(answer="", advertises=())
+        with pytest.raises(ConsultationError) as raised:
+            asyncio.run(consultant.second_opinion("well?"))
+        assert "does not advertise" not in str(raised.value)
+
+    def test_being_advertised_is_not_being_permitted(self, gated):
+        """The half of this that must not have moved.
+
+        The binary advertises ``read_url_content``; the policy does not
+        permit it. Detection reads the inventory — it must not widen
+        anything on the strength of what it read, or AG-R-22's cure is
+        worse than the disease.
+        """
+        build, _repo, _cfg = gated
+        consultant = build(denied="read_url_content", advertises=ADVERTISED)
+        recorder = Recorder(consultant.make_translator("r1", agent_id="a1"))
+        answer = asyncio.run(
+            consultant.second_opinion("well?", observer=recorder)
+        )
+        assert answer == "It depends."
+        assert recorder.translator.ungrounded_tools == ("read_url_content",), (
+            "an advertised tool the policy does not permit is still refused"
+        )
+
+    def test_the_missing_set_is_the_policy_minus_the_inventory(self):
+        """The subtraction itself, including the image policy's own tool.
+
+        Generalised over the policy rather than written against
+        ``CONTROL_TOOLS``: a renamed ``generate_image`` strands an image
+        generation the way a renamed ``finish`` strands a second opinion,
+        and there is no reason for one to be diagnosable and the other not.
+        """
+        assert consultant_mod._missing_from_binary(
+            SECOND_OPINION_POLICY, {"view_file"}
+        ) == ("finish",)
+        assert consultant_mod._missing_from_binary(
+            IMAGE_POLICY, {"finish"}
+        ) == ("generate_image",)
+        assert consultant_mod._missing_from_binary(
+            IMAGE_POLICY, {"finish", "generate_image", "view_file"}
+        ) == ()
+
+    def test_no_inventory_means_no_finding(self):
+        assert consultant_mod._missing_from_binary(SECOND_OPINION_POLICY, ()) == ()
+
+    def test_the_translator_carries_it_without_a_signature_change(self):
+        """Recorded on the pump, so both surfaces read one source.
+
+        ``_empty_answer_reason`` takes a translator and nothing else, and
+        the timeout reads the same attribute — so the tab and the answer
+        cannot come to different conclusions about which tool was missing.
+        """
+        from aic_dc.agy.steps import AgyTranslator
+
+        translator = AgyTranslator("r1")
+        assert translator.unadvertised_tools == ()
+        translator.note_unadvertised(("finish",))
+        translator.note_unadvertised(("finish",))
+        assert translator.unadvertised_tools == ("finish",), "recorded once"
+        said = consultant_mod._empty_answer_reason(translator)
+        assert "does not advertise finish" in said
 
 
 class TestTheNoToolsInvariantIsCheckedRatherThanAssumed:

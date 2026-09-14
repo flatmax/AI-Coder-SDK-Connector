@@ -2111,10 +2111,11 @@ overstatement: `TERMINAL_STATES` and `state == "ERROR"` are the vendor's words a
 them. What the barred-implies-failed rule buys is that they are no longer load-bearing in the direction
 that matters — a vocabulary change can now cost a card its promptness, not its truth.
 
-**Noted and not built:** the allowlist's one *permitted* entry has the opposite failure direction. If
-`agy` renamed `finish`, the gate would deny the consultant its own turn-ending tool and every
-consultation would run to the bridge's timeout. Barring an unknown tool is safe; failing to recognise
-the control tool is not, and nothing detects it today.
+**Noted and not built** — and built on 2026-09-14, in
+[§ The tool the allowlist exists to permit](#ag-r-22-the-permitted-entry) below. The allowlist's one
+*permitted* entry has the opposite failure direction. If `agy` renamed `finish`, the gate would deny the
+consultant its own turn-ending tool and every consultation would run to the bridge's timeout. Barring an
+unknown tool is safe; failing to recognise the control tool is not, and nothing detects it today.
 
 **P26 arm G** re-ran the P25 cascade under all of this: posture row first, both cards opened and
 settled, `pending=0`, the header naming `view_file` and `read_url_content`, and no breach row. The
@@ -2418,6 +2419,63 @@ is exactly the build that runs unattended.
 The breach sentence in the header lost the words *"and returned output"* on the same change, since a breach
 recognised by a clean `DONE` has none, and promising a reader output that is not there sends them looking
 for it.
+
+<a id="ag-r-22-the-permitted-entry"></a>
+
+### The tool the allowlist exists to permit — built 2026-09-14
+
+Everything above is about tools this mechanism *refuses*. The note left standing on the fifth rework was
+about the one it **permits**: `CONTROL_TOOLS = frozenset({"finish"})`, whose failure direction is the
+mirror image. Bar an unknown tool and a consultation loses a capability it should not have had. Fail to
+recognise the control tool and the consultation cannot end its own turn — it runs to the bridge's
+timeout, having spent the tokens, and the user is told Antigravity did not answer in time.
+
+The note stopped there for a good reason, and the reason is the whole difficulty: permitting an unknown
+control tool *because the name has the right shape* is exactly the reasoning this allowlist exists to
+refuse. Any repair that widened the frozenset would be the defect rather than the fix.
+
+**The answer is *report, never permit*, and it is affordable because of where the evidence comes from.**
+Not the gate seeing a name it does not hold — by then the consultation has already been paid for. `agy`'s
+**`init` frame** carries the binary's entire tool inventory by name, and it arrives during the handshake,
+*before any prompt is sent*. No model turn, no subscription spend. So the check runs on every
+consultation instead of living in a probe somebody has to remember to re-run after an upgrade — which is
+the one moment a rename would ever arrive.
+
+`AgySession` keeps the advertisement as `advertised_tools`; `AgyConsultant._run` subtracts it from the
+policy's allowlist immediately after `session.start()`; anything missing is logged at `warning` and
+handed to the translator as **`unadvertised_tools`** — a fourth list beside `ungrounded`, `breached` and
+`unverified`, and the odd one out in that group, which its docstring says out loud: the other three are
+things a tool call *did*, this one is a thing that was true before the first prompt was sent. It lives
+there rather than in a local so that both surfaces obliged to explain a bad outcome read one source and
+cannot disagree. The timeout now says *"This `agy` build does not advertise finish, which this
+consultation was permitted and needs — most likely the CLI renamed it, so the consultation had no way to
+end its turn"*, and `_empty_answer_reason` says the same, with a breach still leading when there is one
+because a withdrawn posture is the more important sentence.
+
+Three things it deliberately does not do.
+
+- **It permits nothing.** A name the policy does not hold stays refused whether the binary advertises it
+  or not — the objection above honoured rather than routed around, and asserted from the other side:
+  a consultation offered an *advertised* `read_url_content` still lands it in `ungrounded_tools`.
+- **It refuses no launch**, and that is measurement rather than nerve. **P24 arm D** answered without
+  making a single tool call, so a missing `finish` makes failure *likely* and not certain; refusing to
+  start would trade a diagnosable failure for a guaranteed one.
+- **An empty inventory means *no claim*, never *no tools***. An `init` frame carrying no list — a binary
+  older than the one measured here — must not make every consultation announce that everything it
+  permits has gone missing. An alarm that fires on a working setup teaches a reader to ignore the next
+  one.
+
+**Measured while building it.** `agy` on this machine is **1.2.2** (this directory's captures say 1.2.0);
+it advertises **57** tools with `finish` among them; `scripts/probe_agy_tool_inventory.py` reports
+`unclassified: []`; and there is **no** tool-listing subcommand, so the `init` frame is the only free
+oracle for the vendor's vocabulary that exists. Nine tests on the consultant and three on the session,
+run against the shipped source first, where the timeout said only *"Antigravity did not answer within 2s.
+The consultation was abandoned and its process stopped."* Written up in
+[`delivery.md` § The two silences at the gate](delivery.md#the-two-silences-at-the-gate-2026-09-14).
+
+**Tripwire.** `unadvertised_tools` is empty on every consultation against a build that still calls it
+`finish`. If it is ever non-empty, the version this app was measured against and the version installed
+have parted company, and the warning names the tool before the timeout does.
 
 ## AG-R-23 — A failed consultation deletes its own evidence
 

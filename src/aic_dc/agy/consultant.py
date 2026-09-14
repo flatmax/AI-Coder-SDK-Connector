@@ -251,6 +251,60 @@ def _no_tools_or_fail(policy: StaticPolicy) -> StaticPolicy:
     return policy
 
 
+def _missing_from_binary(
+    policy: StaticPolicy, advertised: Iterable[str]
+) -> tuple[str, ...]:
+    """Permitted tool names this ``agy`` binary did not advertise.
+
+    The whole of [AG-R-22](../../../specs5/plan-ag/risks.md#ag-r-22)'s
+    renamed-control-tool defence, and it is a set subtraction because
+    that is all the evidence supports. ``agy``'s ``init`` frame lists its
+    tools by name before any prompt is sent, so this costs nothing to
+    compute and nothing to run — no extra turn, no subscription spend, and
+    no probe script anyone has to remember to re-run after an upgrade.
+
+    **Empty ``advertised`` yields nothing**, per
+    :attr:`~aic_dc.agy.session.AgySession.advertised_tools`: a binary that
+    named no tools has told us nothing about its vocabulary, and reading
+    that as *every permitted tool is missing* would fire this on every
+    consultation against an older ``agy`` — an alarm on a working setup,
+    which teaches a reader to ignore the next one.
+
+    Generalised over the policy rather than written against
+    :data:`CONTROL_TOOLS`, so :data:`IMAGE_POLICY` gets the same check for
+    free: a renamed ``generate_image`` strands
+    :meth:`AgyConsultant.generate_image` exactly the way a renamed
+    ``finish`` strands a second opinion, and there is no reason for the
+    first to be diagnosable and the second not.
+    """
+    names = frozenset(advertised)
+    if not names:
+        return ()
+    return tuple(sorted(frozenset(policy.allowed) - names))
+
+
+def _renamed_tool_note(names: Iterable[str]) -> str:
+    """The sentence attached wherever an unadvertised tool explains a failure.
+
+    One wording, two call sites — the timeout and the empty answer — since
+    a reader comparing the consultation's tab against the answer handed
+    back should not have to reconcile two accounts of one fact.
+
+    It names the missing tools and stops. No advice to the asking model
+    about retrying, because a rename is not transient and a retry would
+    spend the same tokens for the same silence; and no guess at what the
+    tool was renamed *to*, because guessing is the thing the allowlist
+    exists to refuse.
+    """
+    return (
+        f" This `agy` build does not advertise {_listed(names)}, which "
+        "this consultation was permitted and needs — most likely the CLI "
+        "renamed it, so the consultation had no way to end its turn. This "
+        "is a version mismatch in AIC-DC rather than anything the "
+        "question did wrong; tell the user."
+    )
+
+
 def _empty_answer_reason(translator: Any) -> str:
     """Why a consultation produced no prose, told with its tool calls in it.
 
@@ -270,6 +324,12 @@ def _empty_answer_reason(translator: Any) -> str:
     """
     escaped = tuple(getattr(translator, "breached_tools", ()) or ())
     unknown = tuple(getattr(translator, "unverified_tools", ()) or ())
+    #: Appended rather than branched on, and last, because it is a fact
+    #: about the *binary* rather than about anything the consultation did:
+    #: a containment failure still leads, since a tool that ran despite the
+    #: policy is worse news than one that was never there to run.
+    missing = tuple(getattr(translator, "unadvertised_tools", ()) or ())
+    note = _renamed_tool_note(missing) if missing else ""
     opening = (
         "Antigravity returned an empty answer. The consultation ran and "
         "produced no prose, which usually means the model spent the turn "
@@ -279,16 +339,17 @@ def _empty_answer_reason(translator: Any) -> str:
         return (
             f"{opening} It is not only that: {_listed(escaped)} ran despite "
             f"the policy that permits no tools, so this consultation had a "
-            f"containment failure as well as an empty answer. Tell the user."
+            f"containment failure as well as an empty answer. Tell the "
+            f"user.{note}"
         )
     if unknown:
         return (
             f"{opening} And {_listed(unknown)} ended in a way this app "
             f"cannot account for — neither a refusal it can recognise as "
             f"its own nor a reported result — so do not treat the empty "
-            f"answer as evidence that nothing happened."
+            f"answer as evidence that nothing happened.{note}"
         )
-    return opening
+    return f"{opening}{note}"
 
 
 def _listed(names: Iterable[str]) -> str:
@@ -807,6 +868,14 @@ class AgyConsultant:
         feed = observer if observer is not None else translator.translate
         frames: list[dict[str, Any]] = []
 
+        # **No `config_root`, deliberately** (AG-24). The master's gate is
+        # given one so that `agy`'s read of its own MCP tool schema is
+        # admitted by policy rather than by nothing having scoped reads yet;
+        # a consultation is given none, so that admission does not exist
+        # here. Two reasons, and either would be enough: a consultation is
+        # offered no MCP server, so it has no schema to read; and a read
+        # granted around the static policy would falsify the header the
+        # asking model is handed — see `_no_tools_or_fail`.
         gate = AgyGateServer(
             self._socket_path(), policy=policy, config_dir=self._config_dir
         )
@@ -846,6 +915,29 @@ class AgyConsultant:
         try:
             async with asyncio.timeout(timeout):
                 await session.start()
+                # **The handshake is the only free look at the vendor's
+                # vocabulary** (AG-R-22). `init` has arrived and no prompt
+                # has been sent, so comparing the allowlist against what
+                # `agy` says it has costs no turn and no subscription
+                # spend. What it buys is a name for the worst silent
+                # failure this transport has: if the CLI renames `finish`,
+                # every consultation runs to the bridge timeout with
+                # nothing to show for the tokens, and neither the tab nor
+                # the answer would have said why.
+                #
+                # Nothing is permitted or refused on the strength of it.
+                # See `_missing_from_binary` and
+                # `AgyTranslator.note_unadvertised`.
+                missing = _missing_from_binary(policy, session.advertised_tools)
+                if missing:
+                    logger.warning(
+                        "This agy build does not advertise %s, which this "
+                        "consultation permits. If it renamed the tool, the "
+                        "consultation cannot end its own turn and will run "
+                        "to the timeout (AG-R-22).",
+                        ", ".join(missing),
+                    )
+                    translator.note_unadvertised(missing)
                 stream = session.stream_frames(prompt)
                 async for frame in stream:
                     frames.append(frame)
@@ -854,9 +946,17 @@ class AgyConsultant:
                     # any reason shortens the answer and not just the tab.
                     feed(frame)
         except TimeoutError as exc:
+            # The one place a renamed control tool actually shows up, and
+            # until 2026-09-14 the place that said least about it: a
+            # consultation with no way to end its turn reaches exactly this
+            # line, and "did not answer within 120s" is indistinguishable
+            # from a slow model. Read off the translator rather than
+            # recomputed, so the tab and the answer cannot disagree.
+            missing = tuple(getattr(translator, "unadvertised_tools", ()) or ())
             raise ConsultationError(
                 f"Antigravity did not answer within {timeout:.0f}s. The "
                 "consultation was abandoned and its process stopped."
+                + (_renamed_tool_note(missing) if missing else "")
             ) from exc
         except AgyNotInstalledError as exc:
             raise ConsultationError(str(exc)) from exc

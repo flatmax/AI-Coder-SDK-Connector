@@ -120,6 +120,37 @@ class PromptNotSentError(RuntimeError):
     """
 
 
+def _tool_names(init: Any) -> frozenset[str]:
+    """The tool names in an ``init`` payload, or nothing if it named none.
+
+    Deliberately unfussy. Every shape that is not a list of names — a frame
+    with no ``tools`` key, a payload that is not a mapping, a binary that
+    starts declaring its inventory as objects instead of strings — reduces
+    to the empty set, which :attr:`AgySession.advertised_tools` defines as
+    *no claim*. The one thing this must never do is raise: it runs inside
+    the handshake, and a session that cannot start because the inventory
+    was shaped unexpectedly would be a far worse failure than not knowing
+    the inventory.
+
+    ``agy`` 1.2.2 sends strings (57 of them). The mapping arm is there
+    because the SDK's own tool descriptions are objects, so a future
+    binary aligning the two would otherwise take the inventory away
+    silently.
+    """
+    if not isinstance(init, dict):
+        return frozenset()
+    names = init.get("tools")
+    if not isinstance(names, (list, tuple)):
+        return frozenset()
+    found: set[str] = set()
+    for name in names:
+        if isinstance(name, dict):
+            name = name.get("name")
+        if isinstance(name, str) and name:
+            found.add(name)
+    return frozenset(found)
+
+
 class AgySession:
     """A conversation held open across turns.
 
@@ -158,6 +189,9 @@ class AgySession:
         self._config_root = Path(config_root) if config_root else None
         self._proc: Any = None
         self._conversation_id: str | None = None
+        #: The tool names ``agy`` advertised in its ``init`` frame. See
+        #: :attr:`advertised_tools`.
+        self._advertised: frozenset[str] = frozenset()
         self._turn_active = False
         self._cancelled = False
         self._clock = clock or time.monotonic
@@ -177,6 +211,34 @@ class AgySession:
     @property
     def started(self) -> bool:
         return self._proc is not None
+
+    @property
+    def advertised_tools(self) -> frozenset[str]:
+        """The vendor's own vocabulary, as its ``init`` frame declared it.
+
+        Free, and that is the whole reason it is kept. The ``init`` frame
+        arrives before any prompt is sent, so reading the inventory out of
+        it costs no model turn and no subscription spend — which is what
+        makes it usable as a check on every launch rather than as something
+        a probe script does occasionally by hand
+        ([AG-R-22](../../../specs5/plan-ag/risks.md#ag-r-22)).
+
+        **Empty means no claim, not "no tools".** A frame that carried no
+        list, an older binary, or a test fixture that does not bother
+        emitting one all land here as ``frozenset()``, and a caller
+        comparing an allowlist against it must read that as *this cannot be
+        checked* rather than as *everything is missing*. Getting that
+        backwards would turn a silent binary into a false alarm on every
+        consultation, which is worse than the silence.
+
+        This is an **observation, never a permission**. Nothing in the app
+        widens an allowlist because a name appeared here; a name the gate
+        does not permit stays refused whether ``agy`` advertises it or not.
+        The one thing the inventory buys is the ability to say *the tool
+        this consultation was allowed to call is not a tool this binary
+        has*, in the message where that fact explains the outcome.
+        """
+        return self._advertised
 
     @property
     def read_only(self) -> bool:
@@ -335,6 +397,7 @@ class AgySession:
                         self._conversation_id = str(
                             frame.get("conversation_id") or ""
                         )
+                        self._advertised = _tool_names(init)
                         break
         except TimeoutError as exc:
             await self.close()

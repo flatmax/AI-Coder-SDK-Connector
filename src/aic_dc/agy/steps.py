@@ -280,6 +280,17 @@ class AgyTranslator:
         #: thing this app cannot know about them. See
         #: :meth:`_note_unverified`.
         self._unverified: dict[str, None] = {}
+        #: Tools this consultation was *permitted* that the binary it ran
+        #: against never advertised. Insertion-ordered, and the odd one out
+        #: in this group of four: the other three are things a tool call
+        #: did, this one is a thing that was true before the first prompt
+        #: was sent. Set by :meth:`note_unadvertised` from what `agy`'s own
+        #: ``init`` frame declared, and read where an empty answer or a
+        #: timeout has to be explained — because "the tool it needed to
+        #: end its turn is not a tool this binary has" is the difference
+        #: between a diagnosis and a shrug.
+        #: [AG-R-22](../../../specs5/plan-ag/risks.md#ag-r-22).
+        self._unadvertised: dict[str, None] = {}
         #: This consultation's refusal-token issuer, from its stamped
         #: policy. ``None`` on the master engine and on a consultation
         #: nobody stamped. See :meth:`note_consultation`.
@@ -1521,6 +1532,46 @@ class AgyTranslator:
         this app cannot say. See :meth:`_outcome`.
         """
         return tuple(self._unverified)
+
+    def note_unadvertised(self, names: Iterable[str]) -> None:
+        """Record permitted tools this ``agy`` binary does not have.
+
+        Called once, from :meth:`AgyConsultant._run`, straight after the
+        handshake and before the prompt goes in — the only moment where the
+        policy's allowlist and the vendor's ``init`` inventory are both in
+        scope. Ordinarily called with nothing, and it stays a no-op then.
+
+        **It records; it does not act.** Nothing here permits a tool,
+        renames one, or refuses a launch. That is the answer to
+        [AG-R-22](../../../specs5/plan-ag/risks.md#ag-r-22)'s open question:
+        a renamed ``finish`` would strand every consultation at the bridge
+        timeout with nothing to show for the tokens, but *guessing* which
+        of a new binary's 57 names is the control tool by the shape of the
+        name is precisely the reasoning the allowlist exists to refuse. So
+        the fact is carried to the message that has to explain the outcome
+        and no further.
+
+        Nor is a launch refused on it, and that is measured rather than
+        cautious: AG-R-22's P24 arm D answered without making a single tool
+        call, so a consultation whose ``finish`` has gone missing is
+        *likely* to fail, not certain to. Refusing would trade a
+        diagnosable failure for a guaranteed one.
+        """
+        for name in names:
+            self._unadvertised.setdefault(name, None)
+
+    @property
+    def unadvertised_tools(self) -> tuple[str, ...]:
+        """Permitted tools absent from this binary's ``init`` inventory.
+
+        Empty whenever the inventory could not be read at all, which is
+        deliberate and is the reason
+        :attr:`~aic_dc.agy.session.AgySession.advertised_tools` defines an
+        empty advertisement as *no claim*: an older binary, or any frame
+        that carried no list, must not make this app announce that every
+        tool it permits has gone missing.
+        """
+        return tuple(self._unadvertised)
 
     def note_cancelled(self) -> None:
         """The user stopped this turn. AG-19.

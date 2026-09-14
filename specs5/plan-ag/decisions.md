@@ -2143,6 +2143,26 @@ today by accident: the day a policy scopes reads to the workspace, MCP discovery
 as *"the model didn't call the tool"* rather than as a denial anybody can see. The schema directory
 belongs on an explicit allowed-read list, admitted by policy rather than by omission.
 
+**Built on 2026-09-14, and it changes no behaviour today.** That is the honest description: a denied-read
+entry can only arrive from the user shift-clicking a repository file, so no path a user can currently name
+is inside the config root, and the schema read is admitted either way. What exists now is the tripwire, so
+the day reads *are* scoped the admission is already stated rather than needing to be rediscovered from a
+consultant that quietly stopped calling tools. `roots.mcp_schema_dir(root)` names the directory,
+`AgyGateServer` takes a `config_root`, and `decide()` allows a `view_file` whose resolved target sits
+**inside** it before the denied-reads check runs.
+
+Three parts of that are choices rather than plumbing. The allowance names
+`…/antigravity-cli/mcp` and **not the vendor directory or the root**, because
+`<root>/.gemini/config/mcp_config.json` holds the bearer token that buys consultations on the user's Claude
+subscription — buying schema reads with a wholesale admission would put that credential inside the same
+grant. The path is **resolved before** the containment test, so `…/mcp/../config/mcp_config.json` is
+denied rather than admitted by string prefix; `strict=False`, because `agy` writes a schema it has not yet
+written and a check that required the file to exist would deny the first call of every session. And the
+admission is gated on `self._policy is None`, so **a consultation gets no `config_root` at all**: the
+static-policy header tells the consultant it has *"no tools and no repository access"*, and a read granted
+around the side of that would make `_no_tools_or_fail`'s promise false in exactly the direction nobody
+would check.
+
 ### Two beliefs refuted, kept because the refutation is the useful part
 
 - **`tools=[]` does not make Claude refuse.** The reviewer predicted the CLI's baked-in prompt would

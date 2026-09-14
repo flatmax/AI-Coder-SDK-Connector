@@ -183,6 +183,34 @@ def brain_dir(root: Path | str) -> Path:
     return vendor_dir(root) / "brain"
 
 
+def mcp_schema_dir(root: Path | str) -> Path:
+    """``<root>/.gemini/antigravity-cli/mcp`` — where ``agy`` files tool schemas.
+
+    Not configuration this app writes. ``agy`` writes one JSON file per MCP
+    tool here, ``<server>/<tool>.json``, and **reads it back with
+    ``view_file`` immediately before every MCP call it makes** — measured
+    across every consultation run through the master engine. So a call to
+    ``second_opinion`` is always two tool calls at the gate: a read of this
+    directory, then the call itself.
+
+    That is [AG-24](../../../specs5/plan-ag/decisions.md#ag-24) § *``agy``
+    does not name MCP tools*, and naming the directory here is what makes
+    the read an admission rather than an accident: ``tools.py`` classifies
+    ``view_file`` as ``read`` with no path scoping, so it works today
+    because nothing scopes reads. The day something does, the consultant
+    stops being reachable and the symptom is *the model didn't call the
+    tool* — no denial to find, nothing in the log, and a feature that
+    silently is not there.
+
+    **The subdirectory, never the root**, and that is the security half of
+    it: :func:`mcp_config_file` sits under ``<root>/.gemini/config`` and
+    holds the consultation listener's bearer token. Admitting the vendor
+    directory wholesale to buy the schema reads would put that token inside
+    the same admission.
+    """
+    return vendor_dir(root) / "mcp"
+
+
 def hooks_file(root: Path | str) -> Path:
     """Where ``agy`` reads hooks inside ``root``.
 

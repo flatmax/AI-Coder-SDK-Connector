@@ -7713,3 +7713,117 @@ against the shipped source for the honest reason that `cancel` had nowhere to pu
 ones in `test_claude_consultant.py`, which spawn the real `claude` CLI at a local capture server.
 This closes migration step 3 — [AG-31](decisions.md#ag-31) claimed that already, and it was
 speaking for the rendering half.
+
+
+## The two silences at the gate (2026-09-14)
+
+Two rows off the list, chosen together because they are the same defect wearing two faces. Both are
+ways the consultation gate can fail *without saying anything* — one by refusing the consultant the
+only tool it was given, the other by refusing a read nobody knew it needed. Neither shows up as an
+error. Both show up as a consultation that produced nothing, which reads exactly like a model with
+nothing to say.
+
+### The tool the allowlist was built to permit
+
+[AG-R-22](risks.md#ag-r-22) is a note about a frozenset with one entry in it. `CONTROL_TOOLS =
+frozenset({"finish"})` is the *permitted* side of a policy whose whole purpose is refusal, and it is
+the one entry with the opposite failure direction: bar an unknown tool and a consultation loses a
+capability it should not have had; fail to recognise the control tool and the consultation cannot end
+its own turn. It runs to the bridge's timeout, having spent the tokens, and the user is told
+Antigravity did not answer in time.
+
+The row had already stated the risk. What it left open was what to *do* about it, and the reason it
+was left open is a good one: permitting an unknown control tool because the name has the right shape
+is precisely the reasoning the allowlist exists to refuse. Any fix that widened the frozenset would
+be the defect, not the repair.
+
+The answer is **report, never permit**, and what makes it affordable is where the evidence comes
+from. Not the gate — by the time the gate sees a name it does not hold, the consultation has been
+paid for. `agy`'s **`init` frame** carries the binary's entire tool inventory by name, and it arrives
+during the handshake, *before any prompt is sent*. No model turn, no subscription spend. So the check
+can run on every consultation instead of living in a probe somebody has to remember to re-run after
+an upgrade — which is the same reason the check exists at all, since an upgrade is exactly when a
+rename would arrive.
+
+`AgySession` keeps the advertisement (`advertised_tools`), `AgyConsultant._run` subtracts it from the
+policy's allowlist immediately after `session.start()`, and anything missing is logged at `warning`
+and handed to the translator. Three things it deliberately does not do:
+
+- **It permits nothing.** A name the policy does not hold stays refused whether the binary advertises
+  it or not. `test_being_advertised_is_not_being_permitted` pins that from the other side: a
+  consultation offered an advertised `read_url_content` still lands it in `ungrounded_tools`. The
+  objection above is honoured rather than routed around.
+- **It refuses no launch**, and that is measurement rather than nerve. P24 arm D is a consultation
+  that made no tool call at all and answered anyway, so a missing `finish` makes failure *likely* and
+  not certain. Refusing to start would trade a diagnosable failure for a guaranteed one.
+- **An empty inventory means *no claim*, never *no tools*.** An `init` frame that carried no list —
+  a binary older than the one measured here — must not make every consultation announce that
+  everything it permits has vanished. An alarm that fires on a working setup teaches a reader to
+  ignore the next one. Two tests hold that direction: `advertises=None` and `advertises=()` both
+  produce silence.
+
+The fact travels on the translator as **`unadvertised_tools`**, a fourth list beside refused,
+breached and unverified — and the odd one out in that group, which the docstring says: the other
+three are things a tool call *did*, this one is a thing that was true before the first prompt was
+sent. It sits there rather than in a local so that both surfaces which have to explain a bad outcome
+read one source and cannot disagree. The timeout message and `_empty_answer_reason` now say the same
+thing, and the breach still leads when there is one, because a withdrawn posture is the more
+important sentence.
+
+Measured while building it: `agy` on this machine is **1.2.2** (the captures in this directory say
+1.2.0), it advertises **57** tools with `finish` among them,
+`scripts/probe_agy_tool_inventory.py` reports `unclassified: []`, and there is **no** tool-listing
+subcommand — the `init` frame is the only free oracle for the vendor's vocabulary that exists.
+
+### The read that works by accident
+
+[AG-24](decisions.md#ag-24)'s § *`agy` does not name MCP tools* ends with a sentence that had never
+been acted on: every MCP call is preceded by a `view_file` of
+`…/antigravity-cli/mcp/<server>/<tool>.json`, a path outside the workspace and under the vendor's
+private config root, and `tools.py` classes `view_file` as `read` with no path scoping — so MCP
+discovery works today **by accident**. The day reads are scoped, it breaks, and it breaks as *"the
+model didn't call the tool"* rather than as a denial anybody can see.
+
+Built, with the honest caveat stated first: **it changes no behaviour today.** A denied-read entry
+can only arrive from the user shift-clicking a repository file, so no path a user can currently name
+is inside the config root. What landed is the tripwire — the admission written down now, while the
+reason for it is understood, rather than rediscovered later from a consultant that quietly stopped
+using its tools. `roots.mcp_schema_dir(root)` names the directory, `AgyGateServer` takes a
+`config_root`, and `decide()` allows a `view_file` whose resolved target sits inside it before the
+denied-reads check runs.
+
+Three parts are choices rather than plumbing, and each has a test whose name is the reason:
+
+- **The allowance names the schema subdirectory, not the vendor directory and not the root.**
+  `<root>/.gemini/config/mcp_config.json` holds the bearer token that buys consultations on the
+  user's Claude subscription. Buying schema reads with a wholesale admission would put that
+  credential inside the same grant — `test_it_does_not_contain_the_bearer_token`, and the gate test
+  that denies the bearer file sitting one directory over.
+- **The path is resolved before the containment test**, so `…/mcp/../config/mcp_config.json` is
+  denied rather than admitted on a string prefix. `strict=False`, because a schema `agy` has not
+  written yet still has to be admitted or the first MCP call of every session is denied.
+- **A consultation is given no `config_root` at all** — the admission is gated on `self._policy is
+  None`. `_no_tools_or_fail`'s header tells the consultant it has *"no tools and no repository
+  access"*, and a read granted around the side of a static policy would make that promise false in
+  the one direction nobody would think to check.
+
+### Fail-first, and where it was worth reworking a test
+
+Against the shipped source, the timeout says only *"Antigravity did not answer within 2s. The
+consultation was abandoned and its process stopped."* — the whole defect in one sentence, and the
+new assertion names `finish` in it. The gate half is thinner by nature: most of its wiring tests fail
+because `AgyGateServer` had nowhere to put a config root, which is an API-shape failure rather than a
+behavioural one. That is not worth pretending about, so it is recorded as such — but the one test
+that *could* be stated in the shipped vocabulary was rewritten until it was. `test_agy_service.py`
+spells the schema path out literally rather than deriving it from `roots.mcp_schema_dir`, and against
+the shipped source it fails with `{'decision': 'deny'}` and *"The user has denied the agent read
+access to …/agy-roots/master"* — the future breakage, reproduced today.
+
+Making the fake `agy` able to hold a consultation open mattered again here: the timeout test parks it
+on a `hold_until` file that never appears, with `timeout_seconds=2.0`, because there is no
+`pytest-timeout` in this suite and the real bridge deadline is minutes long.
+
+**26 new tests across five files; 5,308 passed.** Nine in `test_agy_consultant.py`, three in
+`test_agy_session.py`, eight in `test_agy_gate_server.py`, two in `test_agy_service.py`, four in
+`test_agy_roots.py`. The three failures are the known environmental ones in
+`test_claude_consultant.py`, which spawn the real `claude` CLI at a local capture server.
