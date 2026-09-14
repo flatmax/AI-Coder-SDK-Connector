@@ -26,7 +26,7 @@ import sys
 
 import pytest
 
-from aic_dc.agy import hook, registry
+from aic_dc.agy import hook, registry, roots
 from aic_dc.agy.gate_server import AgyGateServer, Refusals, StaticPolicy
 from aic_dc.antigravity.permissions import AntigravityPermissionGate
 
@@ -532,6 +532,129 @@ def stopped(conversation=OURS, reason="NO_TOOL_CALL"):
     }
 
 
+GUIDANCE = "Call write_to_file without ArtifactMetadata."
+
+
+@pytest.fixture
+def guided(tmp_path):
+    """The same wiring as :func:`wired`, with standing guidance to hand."""
+    recorder = Recorder()
+    gate = AntigravityPermissionGate(
+        tmp_path, broadcast=recorder, localhost_available=lambda: True,
+        config_dir=tmp_path / "cfg",
+    )
+    config_dir = tmp_path / "cfg"
+    server = AgyGateServer(
+        tmp_path / "gate.sock",
+        gate=gate,
+        config_dir=config_dir,
+        guidance=GUIDANCE,
+    )
+    return recorder, gate, server, config_dir
+
+
+class TestTheStandingGuidance:
+    """``standing_guidance`` — AG-32.
+
+    The host end of the channel that replaced prepending
+    ``agy_tools.WRITE_GUIDANCE`` to the user's own prompt. One fixed string,
+    no queue and no dialog, and the assertions below are mostly about what
+    it *does not* do — because everything this method could grow would be
+    state that has to stay in step with the latch beside it.
+    """
+
+    def test_the_guidance_is_offered_at_every_invocation(self, guided):
+        """No latch, and the live probe of 2026-09-14 is why.
+
+        ``agy`` 1.2.2 fires ``PreInvocation`` once per invocation — four
+        times on a four-step turn — and an ``ephemeralMessage`` evaporates
+        with the invocation that received it. A once-per-turn answer would
+        guide the first invocation and leave the rest, including the ones
+        that write, with nothing.
+        """
+        _recorder, _gate, server, _cfg = guided
+        for num in range(4):
+            assert server.standing_guidance(invocation(num=num)) == {
+                "ephemeralMessage": GUIDANCE
+            }
+
+    def test_a_server_with_nothing_to_say_says_nothing(self, wired):
+        """``guidance`` is optional, so the empty answer is a real path.
+
+        Every ``AgyGateServer`` in this file that predates AG-32 takes it,
+        and so does any caller that has not been given words to say.
+        """
+        _recorder, _gate, server, _cfg = wired
+        assert server.standing_guidance(invocation()) == {}
+
+    @pytest.mark.parametrize("blank", [None, "", "   ", "\n\t "])
+    def test_blank_guidance_is_no_guidance(self, tmp_path, blank):
+        gate = AntigravityPermissionGate(
+            tmp_path, broadcast=Recorder(), localhost_available=lambda: True
+        )
+        server = AgyGateServer(
+            tmp_path / "gate.sock", gate=gate, guidance=blank
+        )
+        assert server.standing_guidance(invocation()) == {}
+
+    def test_a_stopped_turn_is_not_guided(self, guided):
+        """Nothing is injected into a turn the user has ended.
+
+        The stop is a *mechanism* since AG-19 — ``decide_invocation``
+        terminates rather than asks — and an ``injectSteps`` answer at the
+        same point would be this app adding to a turn it is simultaneously
+        ending.
+        """
+        _recorder, _gate, server, _cfg = guided
+        server.refuse_all("the user stopped this turn")
+        assert server.standing_guidance(invocation()) == {}
+
+    def test_a_stopped_subagent_is_not_guided_and_its_siblings_still_are(
+        self, guided
+    ):
+        """Per conversation, matching ``decide_invocation``'s own reading.
+
+        ⏹ on one subagent tab refuses that conversation and leaves the
+        parent running (AG-31's family), so guidance follows the same
+        boundary — otherwise stopping one subagent would silently unguide
+        the whole turn.
+        """
+        _recorder, _gate, server, _cfg = guided
+        other = "99999999-8888-7777-6666-555555555555"
+        server.refuse_conversation(other, "stop this subagent")
+        assert server.standing_guidance(invocation(conversation=other)) == {}
+        assert server.standing_guidance(invocation()) == {
+            "ephemeralMessage": GUIDANCE
+        }
+
+    def test_the_frame_is_not_built_here(self, guided):
+        """A string, not an ``injectSteps`` list, and deliberately.
+
+        ``injectSteps`` accepts a ``toolCall``, which would run without the
+        gate seeing it. The hook builds the frame from this string, so no
+        answer this server can give is a step list — a bug here cannot
+        become a tool call. See ``test_agy_gate.py`` for the other half.
+        """
+        _recorder, _gate, server, _cfg = guided
+        answer = server.standing_guidance(invocation())
+        assert set(answer) == {"ephemeralMessage"}
+        assert isinstance(answer["ephemeralMessage"], str)
+
+    def test_no_dialog_is_raised_and_no_request_is_queued(self, guided):
+        recorder, gate, server, _cfg = guided
+        server.standing_guidance(invocation())
+        assert recorder.requests() == []
+        assert gate.broker.pending() == []
+
+    @pytest.mark.parametrize("junk", [{}, {"conversationId": None}, {"x": 1}])
+    def test_a_payload_it_cannot_read_is_still_guided(self, guided, junk):
+        """The fail-open direction. An unreadable ``PreInvocation`` costs a
+        guided invocation at worst; the gate is a separate process and is
+        still reviewing every call on this tree."""
+        _recorder, _gate, server, _cfg = guided
+        assert server.standing_guidance(junk) == {"ephemeralMessage": GUIDANCE}
+
+
 class TestTheStopEndsTheLoop:
     """``decide_invocation`` — AG-19.
 
@@ -616,6 +739,160 @@ class TestTheStopEndsTheLoop:
         assert server.was_terminated("") is False
 
 
+class TestTheDirectoryAgyAnnounces:
+    """``note_paths`` — AG-32, AG-R-32.
+
+    Every payload carries ``transcriptPath`` and
+    ``artifactDirectoryPath``, so the running vendor process states its own
+    directory layout on the first hook of any kind. This reads it, prefers
+    it for subagent transcripts, and **says so when it disagrees** with
+    what :data:`~aic_dc.agy.roots.PRODUCT_DIR` derives — because every
+    symptom of that disagreement is an empty directory rather than an
+    error.
+    """
+
+    def _payload(self, brain, conversation=OURS, *, event=None):
+        directory = brain / conversation
+        sent = {
+            **invocation(conversation=conversation),
+            "artifactDirectoryPath": str(directory),
+            "transcriptPath": str(
+                directory / ".system_generated" / "logs" / "transcript_full.jsonl"
+            ),
+        }
+        if event:
+            sent[hook.EVENT_KEY] = event
+        return sent
+
+    def test_nothing_is_known_before_a_hook_fires(self, wired):
+        """Which is every read of a session that has not called a tool.
+
+        ``None`` is why the derivation stays: it is the answer for a
+        browsed session this process never ran, and for a live one whose
+        first invocation has not happened yet.
+        """
+        _recorder, _gate, server, _cfg = wired
+        assert server.brain_dir is None
+
+    def test_one_payload_is_enough(self, wired, tmp_path):
+        _recorder, _gate, server, cfg = wired
+        brain = roots.brain_dir(roots.master_root(cfg))
+        server.note_paths(self._payload(brain))
+        assert server.brain_dir == brain
+
+    @pytest.mark.parametrize("field", ["artifactDirectoryPath", "transcriptPath"])
+    def test_either_field_alone_answers(self, wired, field):
+        """They differ in depth by three levels and one rule reads both, so
+        a release that stopped sending one would not take the answer with
+        it."""
+        _recorder, _gate, server, cfg = wired
+        brain = roots.brain_dir(roots.master_root(cfg))
+        payload = {
+            k: v for k, v in self._payload(brain).items()
+            if k != ("transcriptPath" if field == "artifactDirectoryPath" else
+                     "artifactDirectoryPath")
+        }
+        server.note_paths(payload)
+        assert server.brain_dir == brain
+
+    @pytest.mark.parametrize("junk", [{}, {"conversationId": OURS}, {"x": 1}])
+    def test_a_payload_that_names_no_path_changes_nothing(self, wired, junk):
+        _recorder, _gate, server, cfg = wired
+        brain = roots.brain_dir(roots.master_root(cfg))
+        server.note_paths(self._payload(brain))
+        server.note_paths(junk)
+        assert server.brain_dir == brain
+
+    def test_agreement_is_silent(self, wired, caplog):
+        """The ordinary case on every machine measured so far. A warning
+        here would be noise on every session rather than a tripwire."""
+        _recorder, _gate, server, cfg = wired
+        brain = roots.brain_dir(roots.master_root(cfg))
+        with caplog.at_level("WARNING"):
+            server.note_paths(self._payload(brain))
+        assert caplog.text == ""
+
+    def test_a_disagreement_names_the_constant_and_what_it_breaks(
+        self, tmp_path, caplog
+    ):
+        """AG-R-32's tripwire, and the wording is the point.
+
+        The announced directory fixes the reads that are threaded for it.
+        The log is what tells a maintainer that the ones which are *not* —
+        generated-image collection and the scratch-diversion check, both
+        still derived — are looking in the wrong place too.
+        """
+        gate = AntigravityPermissionGate(
+            tmp_path, broadcast=Recorder(), localhost_available=lambda: True
+        )
+        root = roots.master_root(tmp_path / "cfg")
+        server = AgyGateServer(
+            tmp_path / "gate.sock", gate=gate, config_root=root
+        )
+        theirs = tmp_path / ".gemini" / "antigravity-ide" / "brain"
+        with caplog.at_level("WARNING"):
+            server.note_paths(self._payload(theirs))
+        assert server.brain_dir == theirs
+        assert roots.PRODUCT_DIR in caplog.text
+        assert str(theirs) in caplog.text
+        assert str(roots.brain_dir(root)) in caplog.text
+
+    def test_the_disagreement_is_reported_once(self, tmp_path, caplog):
+        """Per server, not per payload. ``PreInvocation`` fires once an
+        invocation and the gate once a tool call, so a warning per payload
+        would be the same sentence hundreds of times in one turn — which is
+        how a real finding becomes unreadable."""
+        gate = AntigravityPermissionGate(
+            tmp_path, broadcast=Recorder(), localhost_available=lambda: True
+        )
+        server = AgyGateServer(
+            tmp_path / "gate.sock",
+            gate=gate,
+            config_root=roots.master_root(tmp_path / "cfg"),
+        )
+        theirs = tmp_path / "elsewhere" / "brain"
+        with caplog.at_level("WARNING"):
+            for num in range(5):
+                server.note_paths(self._payload(theirs, conversation=OURS))
+                server.note_paths(invocation(num=num))
+        assert caplog.text.count("keeps this session's conversations in") == 1
+
+    def test_a_server_with_no_root_learns_the_path_and_warns_about_nothing(
+        self, tmp_path, caplog
+    ):
+        """``config_root`` is optional, so there is nothing to compare
+        against — and the announced value is still worth having, because it
+        is the one the reads prefer."""
+        gate = AntigravityPermissionGate(
+            tmp_path, broadcast=Recorder(), localhost_available=lambda: True
+        )
+        server = AgyGateServer(tmp_path / "gate.sock", gate=gate)
+        theirs = tmp_path / "elsewhere" / "brain"
+        with caplog.at_level("WARNING"):
+            server.note_paths(self._payload(theirs))
+        assert server.brain_dir == theirs
+        assert caplog.text == ""
+
+    def test_a_subagents_own_payload_names_the_same_brain_directory(
+        self, wired
+    ):
+        """Why one directory per *process* rather than a map per id.
+
+        One ``agy`` has one ``HOME``, so every conversation it runs —
+        parent and subagents alike — lives under the same brain directory.
+        A per-conversation map would be a second mechanism for a case this
+        already covers, and ``subagents.rows`` computes each row's
+        ``subpath`` with ``relative_to(brain_dir)``, which a per-id path
+        outside it would raise on.
+        """
+        _recorder, _gate, server, cfg = wired
+        brain = roots.brain_dir(roots.master_root(cfg))
+        child = "99999999-8888-7777-6666-555555555555"
+        server.note_paths(self._payload(brain))
+        server.note_paths(self._payload(brain, conversation=child))
+        assert server.brain_dir == brain
+
+
 class TestTheStopEventIsRecordedAndNeverBlocked:
     """``note_stop`` — AG-R-16."""
 
@@ -658,7 +935,7 @@ class TestTheStopEventIsRecordedAndNeverBlocked:
 class TestTheEventRoutesTheAnswer:
     """The dispatch in ``_handle``, over a real socket.
 
-    Everything above calls the three methods directly, which would keep
+    Everything above calls the four methods directly, which would keep
     passing if the router sent every payload to ``decide``. It would not
     fail quietly: a ``Stop`` answered by the gate would come back
     ``{"decision": "deny"}``, which ``agy`` reads as *permit the stop* —
@@ -709,6 +986,68 @@ class TestTheEventRoutesTheAnswer:
         # The side effect the round trip exists for: the host saw the
         # reason, and said so, having never been asked for a decision.
         assert "does not own" in caplog.text
+
+    def test_the_guidance_travels_hook_to_host_and_back(self, tmp_path):
+        """AG-32 over the wire, which is the only test of the whole channel.
+
+        ``standing_guidance`` answers a string and ``inject_guidance``
+        builds the frame, so a mismatch between the two would leave both
+        halves' own tests passing and the model unguided.
+        """
+        gate = AntigravityPermissionGate(
+            tmp_path, broadcast=Recorder(), localhost_available=lambda: True,
+            config_dir=tmp_path / "cfg",
+        )
+        config_dir = tmp_path / "cfg"
+        server = AgyGateServer(
+            tmp_path / "gate.sock",
+            gate=gate,
+            config_dir=config_dir,
+            guidance=GUIDANCE,
+        )
+        result = self._over_the_socket(
+            server,
+            config_dir,
+            lambda: hook.inject_guidance(invocation(), config_dir=config_dir),
+        )
+        assert result == {"injectSteps": [{"ephemeralMessage": GUIDANCE}]}
+
+    def test_an_unguided_invocation_comes_back_empty(self, wired):
+        """``{}`` is what ``agy`` reads as "inject nothing"."""
+        _recorder, _gate, server, config_dir = wired
+        result = self._over_the_socket(
+            server,
+            config_dir,
+            lambda: hook.inject_guidance(invocation(), config_dir=config_dir),
+        )
+        assert result == {}
+
+    def test_every_event_teaches_the_host_where_the_conversations_are(
+        self, wired
+    ):
+        """``note_paths`` runs before the routing, so any event answers.
+
+        A reader that waited for a tool call would learn nothing from a turn
+        that only wrote prose — and ``PreInvocation`` fires before the first
+        tool call of every turn, which is the earliest the question can be
+        answered at all.
+        """
+        _recorder, _gate, server, config_dir = wired
+        brain = roots.brain_dir(roots.master_root(config_dir))
+        directory = brain / OURS
+        sent = {
+            **invocation(),
+            "artifactDirectoryPath": str(directory),
+            "transcriptPath": str(
+                directory / ".system_generated" / "logs" / "transcript_full.jsonl"
+            ),
+        }
+        self._over_the_socket(
+            server,
+            config_dir,
+            lambda: hook.inject_guidance(sent, config_dir=config_dir),
+        )
+        assert server.brain_dir == brain
 
     def test_a_tool_call_is_still_answered_by_the_gate(self, wired):
         """The router's other half: an unstamped payload is the gate.

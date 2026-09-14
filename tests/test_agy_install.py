@@ -87,14 +87,16 @@ def _write_raw_entry(hooks, command, *, events=install.hook.EVENTS):
 
     ``events`` narrows what is written, which is how a **pre-AG-19**
     install is reproduced: a gate and nothing else, in a file that predates
-    the two invocation handlers.
+    the invocation handlers. Any subset is expressible, because since AG-32
+    "an older install" is no longer one shape — an entry can be missing the
+    stop, or the guidance, or both.
     """
     entry = {}
     if install.hook.PRE_TOOL_USE in events:
         entry[install.hook.PRE_TOOL_USE] = [
             {"matcher": "*", "hooks": [{"type": "command", "command": command}]}
         ]
-    for event in (install.hook.POST_INVOCATION, install.hook.STOP):
+    for event in install.hook.INVOCATION_EVENTS:
         if event in events:
             entry[event] = [{"type": "command", "command": command}]
     hooks.write_text(
@@ -514,19 +516,37 @@ class TestTheCliEntryPointTheFrozenBuildNeeds:
         assert "--agy-hook" not in cli._build_parser().format_help()
 
 
-class TestThreeHandlersUnderOneName:
-    """AG-19 added a ``PostInvocation`` handler and AG-R-16 a ``Stop`` one.
+class TestFourHandlersUnderOneName:
+    """AG-19 added a ``PostInvocation`` handler, AG-R-16 a ``Stop`` one and
+    AG-32 a ``PreInvocation`` one.
 
     They go under the same hook name as the gate, because ``agy`` merges
     named hooks per event and one name is what lets ``uninstall`` remove
     exactly what was added — and because a user reading their own
-    ``hooks.json`` should see one thing belonging to this app, not three.
+    ``hooks.json`` should see one thing belonging to this app, not four.
     """
 
     def test_every_event_is_registered(self, hooks, cfg):
         install.install(cfg, path=hooks)
         entry = json.loads(hooks.read_text())[install.HOOK_NAME]
-        assert set(entry) == {"PreToolUse", "PostInvocation", "Stop"}
+        assert set(entry) == {
+            "PreToolUse",
+            "PreInvocation",
+            "PostInvocation",
+            "Stop",
+        }
+
+    def test_the_registered_events_are_the_ones_the_hook_knows(self, hooks, cfg):
+        """One list, in :data:`hook.EVENTS`, and not a second one here.
+
+        An event written into the file that :func:`hook.parse_argv` does
+        not recognise installs a handler that answers as the *gate* — so
+        ``agy`` would be handed a ``decision`` at an event whose vocabulary
+        has none, or worse, the reverse.
+        """
+        install.install(cfg, path=hooks)
+        entry = json.loads(hooks.read_text())[install.HOOK_NAME]
+        assert set(entry) == set(install.hook.EVENTS)
 
     def test_the_gate_is_grouped_and_the_others_are_flat(self, hooks, cfg):
         """Two shapes, and writing the wrong one is a handler that never
@@ -537,7 +557,7 @@ class TestThreeHandlersUnderOneName:
         entry = json.loads(hooks.read_text())[install.HOOK_NAME]
         assert entry["PreToolUse"][0]["matcher"] == "*"
         assert "hooks" in entry["PreToolUse"][0]
-        for event in ("PostInvocation", "Stop"):
+        for event in ("PreInvocation", "PostInvocation", "Stop"):
             assert "matcher" not in entry[event][0]
             assert entry[event][0]["type"] == "command"
             assert entry[event][0]["command"]
@@ -546,6 +566,7 @@ class TestThreeHandlersUnderOneName:
         install.install(cfg, path=hooks)
         entry = json.loads(hooks.read_text())[install.HOOK_NAME]
         assert "--event" not in entry["PreToolUse"][0]["hooks"][0]["command"]
+        assert "--event PreInvocation" in entry["PreInvocation"][0]["command"]
         assert "--event PostInvocation" in entry["PostInvocation"][0]["command"]
         assert "--event Stop" in entry["Stop"][0]["command"]
 
@@ -564,8 +585,10 @@ class TestThreeHandlersUnderOneName:
         The gate's was ``{"decision":"allow"}`` and the invocation hooks'
         was ``{}`` — different verdicts, the same premise, that the entry
         lived in a file shared with sessions this app knows nothing about.
-        AG-21 retired the premise, so all three go rather than the loudest
-        one.
+        AG-21 retired the premise, so all of them go rather than the
+        loudest one. ``PreInvocation`` never had one to lose: it is newer
+        than AG-21, which is why :data:`install.LEGACY_FALLBACKS` has no
+        entry for it and this reads the commands rather than that table.
         """
         for event, command in install.hook_commands(cfg).items():
             assert "||" not in command, event
@@ -578,7 +601,7 @@ class TestThreeHandlersUnderOneName:
         install.install(cfg, path=hooks)
         entry = json.loads(hooks.read_text())[install.HOOK_NAME]
         assert entry["PreToolUse"][0]["hooks"][0]["timeout"] == 3600
-        for event in ("PostInvocation", "Stop"):
+        for event in ("PreInvocation", "PostInvocation", "Stop"):
             assert entry[event][0]["timeout"] == install.INVOCATION_TIMEOUT_SECONDS
             assert entry[event][0]["timeout"] < 3600
 
@@ -609,7 +632,11 @@ class TestAnEntryThatPredatesTheStop:
     def test_it_names_what_is_missing(self, hooks, cfg):
         _write_raw_entry(hooks, install.hook_command(cfg), events=("PreToolUse",))
         report = install.status(cfg, path=hooks)
-        assert report["missing_events"] == ["PostInvocation", "Stop"]
+        assert report["missing_events"] == [
+            "PreInvocation",
+            "PostInvocation",
+            "Stop",
+        ]
 
     def test_the_detail_says_the_gate_still_works(self, hooks, cfg):
         """Two causes reach ``stale`` and a user can act on only one of
@@ -622,6 +649,28 @@ class TestAnEntryThatPredatesTheStop:
         _write_entry(hooks, cfg, "/somewhere/else/python")
         assert "different install" in install.status(cfg, path=hooks)["detail"]
 
+    def test_the_detail_explains_only_the_handlers_that_are_missing(
+        self, hooks, cfg
+    ):
+        """AG-32's cost, and the reason the explanation is per event.
+
+        An entry written the day before AG-32 has both invocation handlers
+        and no ``PreInvocation``. Telling that user their ⏹ would starve a
+        turn would be a confident, false account of a true state — their
+        stop works; what does not is the guidance.
+        """
+        _write_raw_entry(
+            hooks,
+            install.hook_command(cfg),
+            events=("PreToolUse", "PostInvocation", "Stop"),
+        )
+        report = install.status(cfg, path=hooks)
+        assert report["missing_events"] == ["PreInvocation"]
+        detail = report["detail"]
+        assert "ArtifactMetadata" in detail
+        assert "starve" not in detail
+        assert "unrecorded" not in detail
+
     def test_reinstalling_makes_it_current(self, hooks, cfg):
         _write_raw_entry(hooks, install.hook_command(cfg), events=("PreToolUse",))
         install.install(cfg, path=hooks)
@@ -633,29 +682,59 @@ class TestAnEntryThatPredatesTheStop:
         _write_raw_entry(
             hooks,
             install.hook_command(cfg),
-            events=("PreToolUse", "PostInvocation"),
+            events=("PreToolUse", "PreInvocation", "PostInvocation"),
         )
         report = install.status(cfg, path=hooks)
         assert report["state"] == "stale"
         assert report["missing_events"] == ["Stop"]
 
+    def test_yesterdays_complete_install_reads_stale(self, hooks, cfg):
+        """Intended rather than tolerated — AG-32.
+
+        Adding a fourth handler makes every existing install stale, which
+        stops the engine until the user reinstalls. The alternative is an
+        entry that reports itself current while a handler this build
+        registers is absent, which is the untruth :func:`status` exists to
+        refuse. It costs one click and it converges.
+        """
+        _write_raw_entry(
+            hooks,
+            install.hook_command(cfg),
+            events=("PreToolUse", "PostInvocation", "Stop"),
+        )
+        assert install.status(cfg, path=hooks)["state"] == "stale"
+        install.install(cfg, path=hooks)
+        assert install.status(cfg, path=hooks)["state"] == "current"
+
 
 class TestEveryCommandIsProbed:
     """The frozen-binary bug was a correct string naming an unrunnable
-    command. The three commands differ by an argument, which is exactly
-    what that bug got wrong — so probing one and writing three would leave
+    command. The four commands differ by an argument, which is exactly
+    what that bug got wrong — so probing one and writing four would leave
     the same gap one event to the left.
     """
+
+    def test_there_is_a_probe_payload_for_every_event(self, cfg):
+        """A command probed with the wrong payload is barely probed.
+
+        :data:`install._PROBES` is keyed by event and a missing key would
+        make the new handler answer a payload shaped like another event's —
+        which every handler here does answer, harmlessly, so the probe
+        would pass while testing nothing about the shape ``agy`` sends.
+        """
+        assert set(install._PROBES) == set(install.hook.EVENTS)
+        assert "invocationNum" in install._PROBES[install.hook.PRE_INVOCATION]
 
     def test_the_real_commands_all_answer(self, cfg):
         for event, command in install.hook_commands(cfg).items():
             assert install.hook_runs(command, event=event) == ""
 
-    def test_an_invocation_hook_may_answer_with_no_decision(self, cfg):
+    @pytest.mark.parametrize("event", ["PreInvocation", "PostInvocation", "Stop"])
+    def test_an_invocation_hook_may_answer_with_no_decision(self, cfg, event):
         """``{}`` is this event's correct answer and the gate's forbidden
         one, so the probe cannot demand a ``decision`` from both."""
-        command = install.hook_commands(cfg)["PostInvocation"]
-        assert install.hook_runs(command, event="PostInvocation") == ""
+        command = install.hook_commands(cfg)[event]
+        assert install.hook_runs(command, event=event) == ""
         assert install.hook_runs(command, event="PreToolUse") != ""
 
     def test_a_command_that_is_not_an_object_is_refused(self):

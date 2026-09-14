@@ -414,6 +414,10 @@ class AgyService(AntigravityService):
             gate=self._gate,
             config_dir=self._config_dir,
             config_root=config_root,
+            # AG-32. The gate holds the words and hands them to `agy` at
+            # every `PreInvocation`; they are authored in `tools.py`, beside
+            # the tool schema that makes them necessary.
+            guidance=agy_tools.WRITE_GUIDANCE,
         )
         # **Before `exec`, because `agy` reads `mcp_config.json` during
         # startup** — a file that appears afterwards is a file it never
@@ -633,19 +637,17 @@ class AgyService(AntigravityService):
         self._turns[request_id] = translator
         import asyncio
 
-        # Framed here rather than in `_run_agy_turn`, so the *framed* text
-        # is what the mirror records: `agy_tools.WRITE_GUIDANCE` explains
-        # why the guidance is needed at all, and the transcript's job is to
-        # say what the model was actually sent. `history.strip_framing`
-        # removes the block again at read time, so the user sees what they
-        # typed.
+        # **The user's own text, unmodified** (AG-32). This prepended
+        # `agy_tools.WRITE_GUIDANCE` inside a framing block until
+        # 2026-09-14, which put a paragraph the user did not write into the
+        # message the mirror records as theirs — and delivered it once per
+        # turn, to the master only, where the thing it is guarding against
+        # can happen at any invocation and in any subagent. The guidance now
+        # travels on `PreInvocation`, which is the vendor's own channel for
+        # it; `history.strip_framing` stays because transcripts written
+        # before today still carry the block.
         task = asyncio.create_task(
-            self._run_agy_turn(
-                session,
-                translator,
-                request_id,
-                agy_tools.WRITE_GUIDANCE + message,
-            ),
+            self._run_agy_turn(session, translator, request_id, message),
             name=f"agy-turn-{request_id}",
         )
         self._turn_tasks.add(task)
@@ -710,6 +712,47 @@ class AgyService(AntigravityService):
     # a transcript is one file, but they are on the user's disk and the event
     # loop is serving a live turn.
 
+    def _brain_dir_for(self, conversation_id: str) -> Path:
+        """Which directory to read ``conversation_id``'s transcripts out of.
+
+        Two answers are available and they can disagree (AG-R-32):
+
+        * what the running ``agy`` said, learned from the paths on its own
+          hook payloads — :attr:`AgyGateServer.brain_dir`, measured
+          2026-09-14 to be on all three invocation events as well as the
+          gate's;
+        * what :func:`roots.brain_dir` derives from
+          :data:`roots.PRODUCT_DIR`, a constant this build hard-codes as
+          ``antigravity-cli`` while ``hooks.md`` names two other values for
+          the IDE surfaces.
+
+        The announced one is **preferred and the derived one kept**, not
+        replaced by it: the gate has only spoken about conversations from
+        this process, so browsing a session mirrored before a vendor upgrade
+        has nothing announced to go on. :func:`subagents.choose_brain_dir`
+        picks the first that actually holds the conversation, so an
+        announced directory that is stale for *this* id loses to the derived
+        one rather than shadowing it.
+
+        Synchronous, and called on the executor by both readers below, for
+        the reason this section states: it stats the user's disk. Its answer
+        is passed to every read of one request so containment and reading
+        cannot resolve different directories — see
+        :func:`subagents.choose_brain_dir`.
+        """
+        from aic_dc.agy import subagents
+
+        derived = roots.brain_dir(roots.master_root(self._config_dir))
+        announced = self._agy_gate.brain_dir if self._agy_gate is not None else None
+        candidates = [derived]
+        if announced is not None and announced != derived:
+            candidates.insert(0, announced)
+        chosen = subagents.choose_brain_dir(conversation_id, candidates)
+        # `candidates` is never empty, so `choose_brain_dir` cannot answer
+        # `None` here; the fallback keeps the type honest without inventing a
+        # third behaviour.
+        return chosen if chosen is not None else derived
+
     async def list_subagent_transcripts(
         self, session_id: str | None = None
     ) -> list[dict[str, Any]] | dict[str, Any]:
@@ -746,7 +789,7 @@ class AgyService(AntigravityService):
 
         try:
             loop = asyncio.get_running_loop()
-            brain = roots.brain_dir(roots.master_root(self._config_dir))
+            brain = await loop.run_in_executor(None, self._brain_dir_for, target)
             return await loop.run_in_executor(
                 None, functools.partial(subagents.rows, target, brain_dir=brain)
             )
@@ -789,7 +832,12 @@ class AgyService(AntigravityService):
 
         try:
             loop = asyncio.get_running_loop()
-            brain = roots.brain_dir(roots.master_root(self._config_dir))
+            # One directory for both reads, chosen once. See
+            # `subagents.choose_brain_dir`: resolving it separately for the
+            # containment check and the read would let a machine with both
+            # candidates approve an id against one store and hand back a
+            # transcript from the other.
+            brain = await loop.run_in_executor(None, self._brain_dir_for, target)
             owned = await loop.run_in_executor(
                 None, functools.partial(subagents.descendants, target, brain_dir=brain)
             )

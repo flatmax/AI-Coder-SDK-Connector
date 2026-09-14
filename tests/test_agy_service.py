@@ -21,6 +21,7 @@ Offline. No ``agy``; the one lifecycle test uses a fake subprocess.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import inspect
 import json
 import sys
@@ -700,7 +701,7 @@ class TestTheSessionContractTheServiceReadsThrough:
 
 
 class TestTheWriteGuidance:
-    """Why every `agy` prompt carries a framing block.
+    """Why every `agy` *invocation* carries a standing instruction. AG-32.
 
     `agy` declares `write_to_file` as *"Use this tool to create new
     files"*, with `ArtifactMetadata` documented as *"Required when
@@ -717,9 +718,27 @@ class TestTheWriteGuidance:
     around the broken tool with a `run_command` heredoc — and a write that
     arrives as a shell command has no diff to render, no attributable
     file, and no rule "always allow" could ever match twice.
+
+    **It travelled prepended to the user's own prompt until 2026-09-14**,
+    inside the framing block `history.strip_framing` removes at read time.
+    Three things were wrong with that channel and none of them was the
+    words: the mirror stored a paragraph the user had not written as
+    theirs; the guidance arrived **once per turn**, where the failure it
+    guards against can happen at any invocation; and it reached the
+    **master only**, so a subagent — which never sees the parent's prompt —
+    was never told at all. It now travels on `PreInvocation`, which is the
+    vendor's own channel for it, and the tests for delivery are in
+    `test_agy_gate.py` and `test_agy_gate_server.py`.
     """
 
-    def test_every_prompt_carries_it(self, tmp_path, monkeypatch):
+    def test_the_prompt_is_the_users_own_text(self, tmp_path, monkeypatch):
+        """The mirror records what the user typed, and only that.
+
+        This asserted the opposite until AG-32: a browsed transcript stored
+        the framed guidance and stripped it on the way out, which made every
+        reader of the mirror depend on a strip step to tell the truth about
+        who said what.
+        """
         from aic_dc.agy import tools as agy_tools
 
         sent = {}
@@ -739,8 +758,9 @@ class TestTheWriteGuidance:
         svc = service(tmp_path)
         asyncio.run(svc.chat_streaming("r1", "please create a hello world script"))
         asyncio.run(asyncio.sleep(0))
-        assert sent["message"].startswith(agy_tools.WRITE_GUIDANCE)
-        assert sent["message"].endswith("please create a hello world script")
+        assert sent["message"] == "please create a hello world script"
+        assert agy_tools.WRITE_GUIDANCE not in sent["message"]
+        assert "aic-dc-ui-context" not in sent["message"]
 
     def test_it_names_the_field_that_causes_the_failure(self):
         """The guidance has to be specific to work.
@@ -754,19 +774,62 @@ class TestTheWriteGuidance:
         assert "ArtifactMetadata" in agy_tools.WRITE_GUIDANCE
         assert "write_to_file" in agy_tools.WRITE_GUIDANCE
 
-    def test_it_is_wrapped_in_the_framing_the_reader_strips(self):
-        """It is for the model, not for the user.
+    def test_it_no_longer_carries_the_framing_it_used_to(self):
+        """It is a system message now, so there is nothing to disguise.
 
-        `history.strip_framing` removes this block at read time, so a
-        browsed transcript shows what the user typed. Storing the framed
-        text and stripping it on the way out is deliberate — the
-        transcript's job is to say what the model was actually sent.
+        The framing existed to hide guidance inside the user's turn. On
+        `PreInvocation` there is no user turn to hide it in, and leaving the
+        tags on would put markup in front of the model for the benefit of a
+        reader that never sees this string.
         """
         from aic_dc.agy import tools as agy_tools
+
+        assert "aic-dc-ui-context" not in agy_tools.WRITE_GUIDANCE
+
+    def test_a_transcript_written_before_today_still_reads_correctly(self):
+        """The strip stays, because the mirrors on disk still carry it.
+
+        Written as a literal rather than from `WRITE_GUIDANCE`, so the
+        coverage survives the constant changing — what has to keep working
+        is reading **yesterday's** files, and yesterday's shape is fixed.
+        """
         from aic_dc.claude_code.history import strip_framing
 
-        framed = agy_tools.WRITE_GUIDANCE + "do the thing"
+        framed = (
+            "<aic-dc-ui-context>\nThe user is working in AIC-DC. When "
+            "creating or editing files in this workspace, call write_to_file "
+            "WITHOUT the ArtifactMetadata field.\n</aic-dc-ui-context>\n"
+            "do the thing"
+        )
         assert strip_framing(framed) == "do the thing"
+
+    def test_the_gate_is_given_the_words_to_deliver(self, tmp_path, monkeypatch):
+        """The one wiring assertion: the service hands the guidance over.
+
+        `standing_guidance` returns `{}` for a server that was given none,
+        so a service that stopped passing it would leave every invocation
+        unguided with every test in `test_agy_gate_server.py` still passing.
+        """
+        from aic_dc.agy import tools as agy_tools
+        from aic_dc.agy.gate_server import AgyGateServer
+
+        captured = {}
+        real = AgyGateServer.__init__
+
+        def spy(self, *args, **kwargs):
+            captured["guidance"] = kwargs.get("guidance")
+            real(self, *args, **kwargs)
+
+        monkeypatch.setattr(AgyGateServer, "__init__", spy)
+        svc = service(tmp_path)
+        monkeypatch.setattr(
+            svc, "_ensure_gate", lambda: (tmp_path / "root", {"state": "current"})
+        )
+        with contextlib.suppress(Exception):
+            # `_ensure_session` goes on to launch `agy`, which is not here.
+            # Only the constructor call above it is under test.
+            asyncio.run(svc._ensure_session())
+        assert captured.get("guidance") == agy_tools.WRITE_GUIDANCE
 
 
 class TestModelPersistence:
@@ -879,6 +942,21 @@ class _Reader:
         return self._messages
 
 
+def _seed_conversation(brain_dir, conversation_id):
+    """A brain directory that really holds ``conversation_id``.
+
+    ``subagents.choose_brain_dir`` is *not* stubbed by :class:`_Reader`: it
+    is the thing under test in the brain-directory cases, and it decides by
+    looking for a transcript on disk. So these tests write one.
+    """
+    from aic_dc.agy import subagents
+
+    logs = Path(brain_dir) / conversation_id / subagents.LOG_SUBPATH
+    logs.mkdir(parents=True, exist_ok=True)
+    (logs / "transcript_full.jsonl").write_text("{}\n", encoding="utf-8")
+    return Path(brain_dir)
+
+
 def _reading_service(tmp_path, monkeypatch, reader, *, mirrored=("sess",), store=None):
     from aic_dc.agy import subagents
 
@@ -932,6 +1010,72 @@ class TestSubagentTranscripts:
         )
         assert reader.brains == [expected]
         assert Path.home() not in expected.parents
+
+    def test_the_directory_agy_announced_is_preferred(self, tmp_path, monkeypatch):
+        """AG-32's other half, and AG-R-32's mitigation.
+
+        ``roots.PRODUCT_DIR`` is a constant this build hard-codes, and
+        ``hooks.md`` names two other values for it. The running process says
+        where its conversations are on every hook payload, so on a vendor
+        build this app would otherwise mis-derive, the announced directory
+        is the one that has the transcripts in it.
+        """
+        theirs = _seed_conversation(tmp_path / "announced", "sess")
+        reader = _Reader(rows=[{"agent_id": "child"}])
+        svc = _reading_service(tmp_path, monkeypatch, reader)
+        svc._agy_gate = types.SimpleNamespace(brain_dir=theirs)
+        asyncio.run(svc.list_subagent_transcripts("sess"))
+        assert reader.brains == [theirs]
+
+    def test_the_derivation_still_answers_for_a_session_it_never_ran(
+        self, tmp_path, monkeypatch
+    ):
+        """Preferred, not substituted. Nothing is announced before the
+        session's first invocation, and nothing at all is announced about a
+        conversation mirrored by an earlier run of this app — which is
+        exactly the history the browser opens."""
+        reader = _Reader(rows=[])
+        svc = _reading_service(tmp_path, monkeypatch, reader)
+        svc._agy_gate = types.SimpleNamespace(brain_dir=None)
+        asyncio.run(svc.list_subagent_transcripts("sess"))
+        assert reader.brains == [
+            roots.brain_dir(roots.master_root(tmp_path / "cfg"))
+        ]
+
+    def test_an_announced_directory_without_this_conversation_loses(
+        self, tmp_path, monkeypatch
+    ):
+        """Which is what makes browsing survive a vendor upgrade.
+
+        The announced directory is this process's; a session mirrored before
+        the vendor moved its store lives under the old one. Whichever
+        actually holds the conversation is the one read.
+        """
+        derived = _seed_conversation(
+            roots.brain_dir(roots.master_root(tmp_path / "cfg")), "sess"
+        )
+        reader = _Reader(rows=[])
+        svc = _reading_service(tmp_path, monkeypatch, reader)
+        svc._agy_gate = types.SimpleNamespace(brain_dir=tmp_path / "empty" / "brain")
+        asyncio.run(svc.list_subagent_transcripts("sess"))
+        assert reader.brains == [derived]
+
+    def test_containment_and_reading_share_one_directory(
+        self, tmp_path, monkeypatch
+    ):
+        """Chosen once per request, and this is the reason.
+
+        ``get_subagent_transcript`` checks the announcement with
+        ``descendants`` and then reads with ``load``. Two independent
+        resolutions could approve an id against one store and hand back a
+        transcript from the other.
+        """
+        theirs = _seed_conversation(tmp_path / "announced", "sess")
+        reader = _Reader(owned={"child"}, messages=[{"role": "user", "content": "hi"}])
+        svc = _reading_service(tmp_path, monkeypatch, reader)
+        svc._agy_gate = types.SimpleNamespace(brain_dir=theirs)
+        asyncio.run(svc.get_subagent_transcript("child", "sess"))
+        assert reader.brains == [theirs, theirs]
 
     def test_it_lists_the_session_it_was_given(self, tmp_path, monkeypatch):
         reader = _Reader(rows=[{"agent_id": "child"}])

@@ -5,12 +5,13 @@ knows nothing about permissions; it decides *whose* call this is and then
 asks. This is what it asks. One unix socket per session, one connection
 per tool call, newline-delimited JSON each way.
 
-**Three events arrive on it, not one.** ``PreToolUse`` is the dialog and
-everything below is about it; ``PostInvocation`` asks whether the loop
-should end now, and ``Stop`` reports that it did (AG-19, AG-R-16). Those
-two carry no tool and raise no dialog — they read the same latched stop
-the gate reads, which is the whole reason they are here rather than in a
-second socket with a second copy of that state.
+**Four events arrive on it, not one.** ``PreToolUse`` is the dialog and
+everything below is about it; ``PreInvocation`` answers with this session's
+standing guidance (AG-32), ``PostInvocation`` asks whether the loop should
+end now, and ``Stop`` reports that it did (AG-19, AG-R-16). Those three
+carry no tool and raise no dialog — they read the same latched stop the
+gate reads, which is the whole reason they are here rather than in a second
+socket with a second copy of that state.
 
 It owns almost nothing
 ======================
@@ -364,6 +365,7 @@ class AgyGateServer:
         config_dir: Path | str | None = None,
         config_root: Path | str | None = None,
         policy: StaticPolicy | None = None,
+        guidance: str | None = None,
     ) -> None:
         if (gate is None) == (policy is None):
             # Refused at construction rather than at the first tool call.
@@ -382,11 +384,37 @@ class AgyGateServer:
         self._policy = policy
         self._config_dir = config_dir
         #: The private ``HOME`` this session's ``agy`` runs against, or
-        #: ``None``. Held for one purpose — :meth:`_is_mcp_schema_read` —
-        #: and ``None`` admits nothing, so a caller that does not pass it
-        #: gets the behaviour this class had before AG-24's schema
-        #: admission, rather than a wider one.
+        #: ``None``. Held for two purposes — :meth:`_is_mcp_schema_read`,
+        #: and the derived path :meth:`note_paths` compares what ``agy``
+        #: announces against — and ``None`` admits nothing and warns about
+        #: nothing, so a caller that does not pass it gets the behaviour
+        #: this class had before AG-24's schema admission, rather than a
+        #: wider one.
         self._config_root = Path(config_root) if config_root else None
+        #: The standing guidance to put in front of the model at every
+        #: invocation, or ``None`` for a session that wants none. **The
+        #: words are the caller's** (:data:`aic_dc.agy.tools.WRITE_GUIDANCE`)
+        #: rather than this class's: what a model should be told about
+        #: ``write_to_file`` is a fact about the vendor's tool schema, and
+        #: this module's subject is permission. Holding the text here and
+        #: authoring it there is what keeps the socket ignorant of the
+        #: sentence it is delivering. See :meth:`standing_guidance`.
+        #:
+        #: Whitespace-only text is ``None`` and not ``""``: a blank
+        #: ``ephemeralMessage`` would be a step injected into the model's
+        #: context saying nothing, and the caller that passed it meant "no
+        #: guidance". :func:`aic_dc.agy.hook.inject_guidance` drops it too,
+        #: but that is a second reader's defence, not this one's excuse.
+        self._guidance = (guidance or "").strip() or None
+        #: Where the running ``agy`` says it keeps this session's
+        #: conversations, learned from the paths on its own hook payloads
+        #: (:meth:`note_paths`). ``None`` until a hook has fired, which is
+        #: every read before the session's first tool call.
+        self._announced_brain: Path | None = None
+        #: Whether that answer disagreeing with :func:`roots.brain_dir` has
+        #: been reported. Once per server, because it is one fact about the
+        #: install rather than one per tool call.
+        self._brain_warned = False
         self._server: Any = None
         # A set, not one id: this host owns its session's conversation and
         # its subagents' while they run. See `claim`.
@@ -794,6 +822,74 @@ class AgyGateServer:
             return False
         return path != directory and directory in path.parents
 
+    @property
+    def brain_dir(self) -> Path | None:
+        """Where ``agy`` itself says its conversations are, or ``None``.
+
+        Read by :class:`~aic_dc.agy.service.AgyService` as the *first*
+        candidate for a subagent transcript scan, with
+        :func:`~aic_dc.agy.roots.brain_dir` behind it. ``None`` before any
+        hook has fired — which is every read of a session that has not made
+        a tool call yet, and every read of a session this process did not
+        run — so the derivation is not replaced, it is preferred.
+        """
+        return self._announced_brain
+
+    def note_paths(self, payload: dict[str, Any]) -> None:
+        """Learn the vendor's own directory layout from one payload.
+
+        Called for **every** event, before it is routed, because the two
+        fields it reads are common ones and the cheapest correct answer is
+        the earliest one: a ``PreInvocation`` fires before the session's
+        first tool call, so a turn that only reads gets its brain directory
+        from the invocation hooks alone.
+
+        The value it learns is not used to make any decision here. It exists
+        because :data:`~aic_dc.agy.roots.PRODUCT_DIR` is a constant and
+        ``hooks.md`` names two other values it takes on the vendor's other
+        surfaces — see
+        :func:`~aic_dc.agy.roots.announced_brain_dir` for what that costs,
+        and § *What a disagreement means* on the warning below.
+
+        **A disagreement is logged and nothing else**, deliberately. The
+        derived path is what this app has always used; the announced one is
+        what the process actually has open. Preferring the announced one
+        where it is available (:attr:`brain_dir`) fixes the reads that are
+        threaded for it, and the log is what tells a maintainer that the
+        ones which are not — image collection and the scratch-diversion
+        check in :mod:`aic_dc.agy.steps`, both derived from
+        ``config_root`` — are looking in the wrong place too. That is a
+        smaller fix than it looks and it is not this one; what would be
+        unacceptable is the condition being silent, because every symptom of
+        it is an empty directory rather than an error.
+        """
+        conversation_id = str(payload.get("conversationId") or "")
+        announced = roots.announced_brain_dir(
+            conversation_id,
+            payload.get("artifactDirectoryPath"),
+            payload.get("transcriptPath"),
+        )
+        if announced is None or announced == self._announced_brain:
+            return
+        self._announced_brain = announced
+        if self._config_root is None or self._brain_warned:
+            return
+        derived = roots.brain_dir(self._config_root)
+        if announced == derived:
+            return
+        self._brain_warned = True
+        logger.warning(
+            "agy keeps this session's conversations in %s, not the %s this "
+            "build derives. Every path AIC-DC computes from `roots.PRODUCT_DIR` "
+            "(%r) is therefore wrong for this vendor build: subagent "
+            "transcripts prefer the announced directory, but generated-image "
+            "collection and the scratch-diversion check do not, and both fail "
+            "by finding an empty directory rather than by erroring.",
+            announced,
+            derived,
+            roots.PRODUCT_DIR,
+        )
+
     def was_terminated(self, conversation_id: str) -> bool:
         """Whether this server ended that conversation's loop. AG-19.
 
@@ -814,6 +910,52 @@ class AgyGateServer:
         outlasted the user's stop can say *why* rather than only *that*.
         """
         return self._terminations.get(str(conversation_id), 0) > 1
+
+    def standing_guidance(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """The sentence to put in front of the model this invocation. AG-32.
+
+        ``PreInvocation``, and the answer is one fixed string — ``{"
+        ephemeralMessage": …}`` for a session that was given guidance, and
+        ``{}`` for one that was not. **No dialog, no queue and no state
+        that survives the answer**, which is why it is safe to run per
+        invocation on the same socket the gate is using: it costs a hook
+        process and a dictionary lookup.
+
+        **The frame is not built here.** This returns the prose;
+        :func:`aic_dc.agy.hook.inject_guidance` wraps it into
+        ``injectSteps``. The split is deliberate and it is the same one
+        :meth:`decide_invocation` has — ``injectSteps`` also accepts
+        ``{"toolCall": …}``, so a socket answer forwarded verbatim would be
+        a path from this process straight into ``agy``'s step list,
+        bypassing the gate that exists to review exactly that.
+
+        **Every conversation this server owns, subagents included.** A
+        subagent writes files with the same ``write_to_file`` and hits the
+        same ``ArtifactMetadata`` failure, and it never sees the parent's
+        prompt — so guidance that lived on the prompt reached the master
+        alone. That is not a limitation this replaces so much as one it
+        stops having, and it is the second reason the prompt was the wrong
+        channel.
+
+        Nothing is injected into a **stopped** turn or a stopped subagent's
+        conversation. An ephemeral message is documented as a *step* to
+        inject, and putting a new step in front of a model whose loop this
+        app is trying to end is the opposite of stopping it; the guidance is
+        also worth nothing to a loop that will not be making tool calls,
+        because the gate is refusing them all.
+
+        A consultation is given no guidance at all — its gate is built with
+        ``policy`` and no ``guidance``, and it may write nothing, so there
+        is nothing to advise it about.
+        """
+        if self._guidance is None:
+            return {}
+        conversation_id = str(payload.get("conversationId") or "")
+        if self._refusal is not None or (
+            conversation_id in self._refused_conversations
+        ):
+            return {}
+        return {"ephemeralMessage": self._guidance}
 
     def decide_invocation(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Whether this conversation's loop ends here. AG-19.
@@ -927,7 +1069,14 @@ class AgyGateServer:
             # call is allow. An absent key is the gate, which is both the
             # conservative reading and what an older hook process sends.
             event = payload.get(hook.EVENT_KEY) or hook.PRE_TOOL_USE
-            if event == hook.POST_INVOCATION:
+            # Before the routing and outside the per-event branches: the
+            # paths are common fields, so the first payload of any kind
+            # answers the question, and a reader that waited for a tool call
+            # would learn nothing from a turn that only wrote prose.
+            self.note_paths(payload)
+            if event == hook.PRE_INVOCATION:
+                answer = self.standing_guidance(payload)
+            elif event == hook.POST_INVOCATION:
                 answer = self.decide_invocation(payload)
             elif event == hook.STOP:
                 answer = self.note_stop(payload)

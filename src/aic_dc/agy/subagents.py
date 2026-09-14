@@ -38,6 +38,14 @@ did nothing. That is [AG-R-18](../../../specs5/plan-ag/risks.md#ag-r-18),
 and a required argument is the fix, because it is the only version a
 caller cannot forget.
 
+Since 2026-09-14 there is a second reason it cannot be defaulted: there
+are now two candidate answers, because ``agy`` announces the directory on
+every hook payload and this build also derives one from a hard-coded
+:data:`~aic_dc.agy.roots.PRODUCT_DIR` (AG-32,
+[AG-R-32](../../../specs5/plan-ag/risks.md#ag-r-32)). Choosing between
+them is :func:`choose_brain_dir`, called once per request so that the
+containment check and the read cannot land in different stores.
+
 What was measured, on 2026-09-10, at ``agy`` 1.1.28
 ===================================================
 Against the capture the 2026-09-09 subagent probe left on disk. Four
@@ -137,6 +145,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from collections.abc import Iterable
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -271,6 +280,40 @@ MAX_CONVERSATIONS = 200
 # ---------------------------------------------------------------------------
 # Locating and reading
 # ---------------------------------------------------------------------------
+
+
+def choose_brain_dir(conversation_id: str, candidates: Iterable[Path]) -> Path | None:
+    """The first candidate directory that actually holds this conversation.
+
+    ``brain_dir`` is a required argument everywhere in this module because
+    there is no single correct value for it (see the module docstring). This
+    is how a caller with **two** answers picks one: the directory ``agy``
+    announced on its own hook payloads
+    (:attr:`aic_dc.agy.gate_server.AgyGateServer.brain_dir`), and the one
+    :func:`aic_dc.agy.roots.brain_dir` derives from
+    :data:`~aic_dc.agy.roots.PRODUCT_DIR`.
+
+    **Chosen once per request rather than per read**, and that is the whole
+    reason this is a function instead of a fallback inside
+    :func:`transcript_path`. ``get_subagent_transcript`` checks containment
+    with :func:`descendants` and then reads with :func:`load`; if those two
+    resolved a directory independently, a machine where both candidates
+    exist could check the ownership of an id in one tree and hand back a
+    transcript from the other. One choice, used for both, cannot do that.
+
+    Falls back to the first candidate when none of them holds the
+    conversation, so the caller's report is *"no readable transcript"* — the
+    answer this module gave before it had two candidates — rather than
+    ``None`` meaning something new. ``None`` is returned only when there are
+    no candidates at all.
+    """
+    ordered = [Path(candidate) for candidate in candidates if candidate is not None]
+    if not ordered:
+        return None
+    for candidate in ordered:
+        if transcript_path(conversation_id, brain_dir=candidate) is not None:
+            return candidate
+    return ordered[0]
 
 
 def transcript_path(

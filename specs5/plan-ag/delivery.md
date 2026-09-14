@@ -3589,6 +3589,13 @@ Wrapped in `<aic-dc-ui-context>`, the framing block `history.strip_framing` alre
 model reads it and the user does not. The framed text is what the mirror stores, deliberately: a
 transcript's job is to say what the model was actually sent.
 
+> **The channel was replaced on 2026-09-14; the words and the reason above are unchanged.** The
+> guidance now travels as a `PreInvocation` `ephemeralMessage`, once per invocation, and the prompt the
+> mirror stores is the user's own text. The last paragraph is the part that did not survive review:
+> "the model was actually sent" is true and it is not what a reader of a *user* message concludes. See
+> [AG-32](decisions.md#ag-32) and
+> [§ The guidance that stopped pretending the user had typed it](#the-guidance-that-stopped-pretending-the-user-had-typed-it-2026-09-14).
+
 ### Verified live, on the prompt that had failed twice
 
 ```
@@ -7827,3 +7834,153 @@ on a `hold_until` file that never appears, with `timeout_seconds=2.0`, because t
 `test_agy_session.py`, eight in `test_agy_gate_server.py`, two in `test_agy_service.py`, four in
 `test_agy_roots.py`. The three failures are the known environmental ones in
 `test_claude_consultant.py`, which spawn the real `claude` CLI at a local capture server.
+
+
+## The guidance that stopped pretending the user had typed it (2026-09-14)
+
+Two rows, [691 and 692](README.md), built together because they are the same three hook handlers
+learning to carry something. `PreInvocation` had been installed since [AG-19](decisions.md#ag-19) and
+answered `{}` to everything; it now carries the write guidance. And every payload on all four events
+carries `transcriptPath` and `artifactDirectoryPath`, which is the vendor answering a question this app
+had been deriving from a hard-coded constant.
+
+[AG-32](decisions.md#ag-32) holds the reasoning. What follows is what building it found.
+
+### The row named one fault and there were three
+
+The guidance itself has not changed since 2026-09-05 and did not need to: `ArtifactMetadata` on
+`write_to_file` makes the write fail *inside* `agy` while declaring permissions, before any hook runs,
+and the model then routes around the broken tool with a `run_command` heredoc. Row 691's objection was
+to the **channel** — that prepending the sentence to the user's prompt "records guidance as though the
+user typed it".
+
+That is one of three, and the other two are worse.
+
+- **Once per turn.** The prompt is sent once; a turn is many invocations. The failure the guidance
+  guards against can happen at any of them, so from the second invocation onward the turn was
+  running unguided and the mechanism looked like it was working.
+- **Master only.** A subagent never sees the parent's prompt. Every subagent on this transport had
+  never been told at all — and a subagent is exactly the caller least likely to have the context to
+  work it out.
+
+Both fall out of the channel rather than being separate bugs, which is the argument for the row being
+about the channel; it just understated the bill.
+
+### Asking the socket for prose, not for a step
+
+`injectSteps` accepts `{"toolCall": …}` and `{"userMessage": …}` beside `{"ephemeralMessage": …}`. A
+hook that forwarded the host's answer into `agy`'s step list would therefore have a path where a bug in
+this app puts a **tool call** in front of the model — one that passes no gate, because the gate is the
+`PreToolUse` hook installed for calls the *model* emits.
+
+So `AgyGateServer.standing_guidance` returns `{"ephemeralMessage": text}`, the socket carries that, and
+`hook.inject_guidance` builds `{"injectSteps": [{"ephemeralMessage": text}]}` locally. Anything that is
+not one non-empty string becomes `PROCEED`.
+
+The test that earns its place hands back a *correctly shaped* `{"injectSteps": [{"ephemeralMessage":
+…}]}` and asserts nothing is injected. Twelve parameters cover the rest, and one of them is that
+correct shape: a forwarding implementation passes every malformed case and fails only this one, which
+is the only reason the case is worth writing.
+
+### The measurement, and the model's account of it
+
+`scripts/probe_agy_pre_invocation.py`, against the real binary under an isolated `--gemini_dir`, so
+`~/.gemini/config/hooks.json` is neither read nor written.
+
+**Multi-step run**: 4 injections, `invocationNum [0, 1, 2, 3]`, one turn. The armed reply carried the
+nonce and the control's did not. That settles the shape of the handler — an `ephemeralMessage` is
+documented as *transient*, spent by the invocation that received it, so there is no "already sent"
+latch and a latch would have been the natural thing to write.
+
+**Then the model said something checkable and wrong.** Asked where the rule came from:
+
+> *"before starting, I was not given any formatting rule about a token. However, each subsequent tool
+> call output returned an appended instruction stating: …"*
+
+Read at face value, that means the injection at `invocationNum` 0 does not reach a model that has not
+called anything yet — so a write on the **first tool call of a turn** would be unguided, which is
+precisely the call the guidance exists for. It would have been a hole in the delivered feature,
+discovered by reading a model's prose about its own context.
+
+`--first-invocation` answers it without inference: a prompt forbidding tools, so the whole turn is one
+invocation and a nonce in the reply can only have come from the injection that preceded it. Same day,
+`invocationNum [0]`, one invocation, and the armed reply **opened with the token on its own line** and
+quoted the rule; the control's said it had been given none.
+
+There is no gap. The model's report about its own context provenance was wrong, which is
+[AG-16](decisions.md#ag-16)'s *a model's introspective report about its own bias is not evidence*
+turning up for a different question — and it cost one probe run rather than a wrong design, because the
+claim was checkable and the probe already existed to check it in.
+
+### A step that says nothing
+
+`self._guidance = guidance.strip() if guidance else None` looks right and is not: a blank-but-truthy
+string is truthy, strips to `""`, and `""` is not `None`. `standing_guidance` then answered
+`{"ephemeralMessage": ""}` — an injected step, in the model's context, saying nothing, on behalf of a
+caller who had passed whitespace and meant *no guidance*.
+
+Found by parametrising the blank cases `[None, "", "   ", "\n\t "]` rather than testing `None` and
+calling it covered. `hook.inject_guidance` would have dropped it on the other side, and the fix carries
+a comment saying so — a second reader's defence is not this one's excuse.
+
+### One directory, chosen once
+
+Row 692 asked for the payload's path to be read. The work was in what happens after.
+
+`AgyService.get_subagent_transcript` checks that an id belongs to this session with
+`subagents.descendants` and then reads it with `subagents.load`. Both take a `brain_dir`, and each call
+site knows how to ask for one — so the obvious implementation resolves it twice. On a machine where the
+announced directory and the derived one both exist and differ, that lets the containment check approve
+an id against one store while the read returns a transcript from the other. The permission answer and
+the bytes come from different places, and nothing in the types objects.
+
+`subagents.choose_brain_dir(conversation_id, candidates)` returns the first candidate that actually
+holds the conversation and falls back to the first candidate when none does; `_brain_dir_for` calls it
+**once per request** on the executor and both reads take the answer. The test stages an impostor child
+transcript in the announced store and asserts the containment check, the chosen directory, and the
+bytes all agree — with `"impostor" not in load(CHILD, brain_dir=derived)` as the other half, because
+otherwise the test passes on a machine where the two directories happen to hold the same thing.
+
+Three smaller things came out of the same reading. The inversion must take the **nearest** enclosing
+match — `/data/<cid>/brain/<cid>/.system_generated/…` resolves the brain dir too high under a
+first-match scan, and to a real directory, so the error is silent. `note_paths` runs on **every** event
+rather than in the tool-call branch, because a turn that writes only prose fires three hooks and no
+tool call. And the disagreement warning fires **once**: `caplog.text.count(...) == 1` is asserted,
+since after the first it is the same fact repeating.
+
+A **per-conversation** map of announced paths was considered first and rejected on two counts: one
+`agy` process has one `HOME` and therefore one brain dir, and `subagents.rows` computes
+`path.relative_to(brain_dir)`, which a per-id path outside the tree would raise on rather than degrade.
+
+### Fail-first, and the two failures that were not regressions
+
+`git stash push -- src/ scripts/`, then the six agy test files against the shipped source: **93 failed,
+414 passed, 8 errors**. Restored: **515 passed**.
+
+Two of those 93 are pre-existing tests, and the reason is worth recording rather than filing under
+noise. `test_agy_install.py`'s `_write_raw_entry` helper writes a partial `hooks.json` to stage the
+stale-install cases, and it had been hard-coding the two invocation events that existed when it was
+written — so a test asking for a missing `PreInvocation` silently got a file that never mentioned it,
+and `test_a_missing_stop_alone_is_enough` reported `['PreInvocation', 'Stop']` for a `Stop`-only gap.
+The helper now iterates `install.hook.INVOCATION_EVENTS`, which is why it fails against the old
+`install` module: the test file is coupled to the source's own list on purpose, and that coupling is
+what makes the fixture unable to go stale a second time.
+
+The same reasoning gave `test_agy_gate.py` a test with no subject of its own —
+`set(hook.INVOCATION_EVENTS) == set(hook.EVENTS) - {hook.PRE_TOOL_USE}` — because the fail-open
+asymmetry is enforced by which list an event is on, and a new event added to one list and not the other
+is the failure that would ship quietly.
+
+**94 new tests across six files; 5,402 passed.** Thirty-one in `test_agy_gate.py`, 28 in
+`test_agy_gate_server.py`, 15 in `test_agy_roots.py`, 8 in `test_agy_subagents.py`, 6 each in
+`test_agy_install.py` and `test_agy_service.py`. The three failures are the known environmental ones in
+`test_claude_consultant.py`, which spawn the real `claude` CLI at a local capture server.
+
+What this leaves open is [AG-R-32](risks.md#ag-r-32): `roots.PRODUCT_DIR` is still a hard-coded
+`"antigravity-cli"` for `steps.locate_generated_image` and `steps.scratch_dir`, neither of which has a
+payload to learn from, and both of which fail by reporting nothing rather than by raising. And one
+thing found while reading and deliberately not built, because it is a row of its own and not part of
+either of these: `AgyService._viewer` is assigned at `service.py:609` and read nowhere, and
+`AntigravityService._viewer` is the same — declared, assigned in two places, never read. So the
+viewer state the browser pushes reaches the model on the Claude transport, where
+`claude_code/service.py` forwards `_viewer_state` into the turn, and on **neither** Antigravity one.

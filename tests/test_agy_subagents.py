@@ -217,6 +217,94 @@ class TestWhichFileIsRead:
         assert subagents.transcript_path("", brain_dir=tmp_path) is None
 
 
+class TestChoosingBetweenTwoBrainDirectories:
+    """``choose_brain_dir`` — AG-32, AG-R-32.
+
+    ``brain_dir`` is a required argument here because there is no single
+    correct value; this is how a caller holding *two* candidates — the one
+    ``agy`` announced on its hook payloads and the one
+    :data:`~aic_dc.agy.roots.PRODUCT_DIR` derives — picks one. The order
+    matters and so does the fallback, and the reason it is a function
+    rather than a fallback inside :func:`subagents.transcript_path` is the
+    last test in this class.
+    """
+
+    def test_the_first_candidate_that_holds_the_conversation_wins(self, tmp_path):
+        announced, derived = tmp_path / "announced", tmp_path / "derived"
+        a_child(derived)
+        assert subagents.choose_brain_dir(CHILD, [announced, derived]) == derived
+
+    def test_the_announced_one_is_preferred_when_both_hold_it(self, tmp_path):
+        """Preferred, not merely used: the announced directory is the one the
+        running process actually has open."""
+        announced, derived = tmp_path / "announced", tmp_path / "derived"
+        a_child(announced)
+        a_child(derived)
+        assert subagents.choose_brain_dir(CHILD, [announced, derived]) == announced
+
+    def test_a_conversation_no_candidate_holds_falls_back_to_the_first(
+        self, tmp_path
+    ):
+        """So the caller's report is "no readable transcript" — the answer
+        this module gave before it had two candidates — rather than a new
+        third outcome for the browser to render."""
+        announced, derived = tmp_path / "announced", tmp_path / "derived"
+        assert subagents.choose_brain_dir(CHILD, [announced, derived]) == announced
+
+    def test_one_candidate_is_returned_without_being_consulted(self, tmp_path):
+        """The ordinary case: nothing announced, or it agrees with the
+        derivation, so the caller passes a single directory."""
+        derived = tmp_path / "derived"
+        assert subagents.choose_brain_dir(CHILD, [derived]) == derived
+
+    def test_no_candidates_is_no_answer(self):
+        assert subagents.choose_brain_dir(CHILD, []) is None
+        assert subagents.choose_brain_dir(CHILD, [None, None]) is None
+
+    def test_a_string_candidate_is_accepted_as_a_path(self, tmp_path):
+        derived = tmp_path / "derived"
+        a_child(derived)
+        assert subagents.choose_brain_dir(CHILD, [str(derived)]) == derived
+
+    def test_an_empty_id_still_answers_a_directory(self, tmp_path):
+        """It is asked before the id is known to be readable, and the
+        caller's next call refuses the empty id on its own."""
+        first = tmp_path / "first"
+        assert subagents.choose_brain_dir("", [first, tmp_path / "second"]) == first
+
+    def test_the_chosen_directory_serves_containment_and_reading_alike(
+        self, tmp_path
+    ):
+        """Why one choice per request rather than a fallback per read.
+
+        ``get_subagent_transcript`` checks containment with
+        :func:`descendants` and then reads with :func:`load`. If each
+        resolved a directory of its own, a machine where both candidates
+        exist could approve an id against one store and hand back a
+        transcript from the other — here, approve the parent's real child
+        and return the *impostor's* transcript.
+        """
+        announced, derived = tmp_path / "announced", tmp_path / "derived"
+        a_delegating_parent(derived)
+        a_child(derived)
+        # The same id, a different conversation, in the other store.
+        a_delegating_parent(announced)
+        a_child(
+            announced,
+            records=[record(0, "USER_INPUT", content="I am the impostor.")],
+        )
+
+        brain = subagents.choose_brain_dir(PARENT, [announced, derived])
+        assert brain == announced
+        assert CHILD in subagents.descendants(PARENT, brain_dir=brain)
+        # Both reads landed in the store the choice named, so the transcript
+        # is the one whose announcement was checked.
+        assert "impostor" in json.dumps(subagents.load(CHILD, brain_dir=brain))
+        assert "impostor" not in json.dumps(
+            subagents.load(CHILD, brain_dir=derived)
+        )
+
+
 class TestAnIdIsNotAPath:
     """The check that holds even if a caller forgets the ownership one.
 

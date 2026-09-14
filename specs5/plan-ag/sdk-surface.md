@@ -1140,26 +1140,39 @@ asks.
 `hooks.md` is 330 lines and it is the contract `aic_dc.agy.hook` implements. Reading it confirms the
 probed behaviour and adds four things the probe never saw.
 
-### There are five lifecycle events and this app wires one
+### There are five lifecycle events and this app wires four
 
-| Event | Fires | Structure | Returns |
-|---|---|---|---|
-| `PreToolUse` | before a tool step | grouped, `matcher` on tool name | `decision`, `reason`, `overwrite`, `permissionOverrides` |
-| `PostToolUse` | after a tool step | grouped | `{}` |
-| `PreInvocation` | **before the model is called** | flat | `injectSteps` |
-| `PostInvocation` | **after tool calls finish** | flat | `injectSteps`, `terminationBehavior` |
-| `Stop` | when the execution loop terminates | flat | `decision`, `reason` |
+| Event | Fires | Structure | Returns | Wired as |
+|---|---|---|---|---|
+| `PreToolUse` | before a tool step | grouped, `matcher` on tool name | `decision`, `reason`, `overwrite`, `permissionOverrides` | the gate — `AgyGateServer.decide` |
+| `PostToolUse` | after a tool step | grouped | `{}` | **not wired**; nothing to say after the fact |
+| `PreInvocation` | **before the model is called** | flat | `injectSteps` | standing guidance — `standing_guidance`, [AG-32](decisions.md#ag-32) |
+| `PostInvocation` | **after tool calls finish** | flat | `injectSteps`, `terminationBehavior` | the aimed stop — `decide_invocation`, [AG-19](decisions.md#ag-19) |
+| `Stop` | when the execution loop terminates | flat | `decision`, `reason` | read-only — `note_stop`, [AG-R-16](risks.md#ag-r-16) |
 
 `PostInvocation`'s `terminationBehavior` takes `"force_continue"`, `"terminate"` or `""`, and
 `"terminate"` is documented as *"Forces the loop to stop"*. `Stop`'s `decision: "continue"` is its
 mirror: it *blocks* a stop and re-enters the loop with `reason` injected as a system message. Both
-matter to the ⏹ button and neither is wired — see § *What this changes* below and
-[AG-R-16](risks.md#ag-r-16).
+matter to the ⏹ button, and the two are wired asymmetrically on purpose: `"terminate"` is what makes
+the aimed stop reach a subagent that asks for nothing, and `"continue"` is a string this app
+guarantees never to send — `note_stop` answers `{}` unconditionally and
+[`hook.report_stop`](../../../src/aic_dc/agy/hook.py) does not forward its return value either. That
+guarantee protects nothing on its own; a hook this app does not own can still answer `continue` and
+hold the turn open. See § *What this changes* below and [AG-R-16](risks.md#ag-r-16).
 
 `PreInvocation` returns `injectSteps`, each one of `{"toolCall": …}`, `{"userMessage": …}` or
 `{"ephemeralMessage": …}`, the last being a transient system message. That is a supported channel
-for putting a sentence in front of the model before every invocation, which is what
-`agy_tools.WRITE_GUIDANCE` currently does by prepending text to the user's own prompt.
+for putting a sentence in front of the model before every invocation, and since 2026-09-14 it is the
+channel the write guidance travels on: `AgyGateServer.standing_guidance` answers
+`{"injectSteps": [{"ephemeralMessage": …}]}` on every `invocationNum`, where `agy_tools.WRITE_GUIDANCE`
+used to be prepended to the user's own prompt. [AG-32](decisions.md#ag-32) records why the prompt
+channel was wrong on three counts and what the switch cost.
+
+**The hook builds that frame, not the host.** `injectSteps` can carry a `toolCall`, so a socket
+answer trusted verbatim would let a host bug put a tool call into `agy`'s step list — one that no
+`PreToolUse` matcher sees, because it did not come from the model. The socket protocol therefore
+carries only the prose string, and `hook.inject_guidance` wraps it locally; anything that is not one
+non-empty string injects nothing.
 
 ### Four details the probe did not have
 
@@ -1176,8 +1189,14 @@ for putting a sentence in front of the model before every invocation, which is w
   dialog a human read slowly.
 - **`transcriptPath` and `artifactDirectoryPath` are common fields on every payload**, and the doc
   names the per-product directory that differs: `antigravity-cli/` for the CLI, `antigravity/` for
-  Antigravity 2.0, `antigravity-ide/` for the IDE. `aic_dc.agy.subagents` derives that path by hand;
-  the payload carries it.
+  Antigravity 2.0, `antigravity-ide/` for the IDE. `aic_dc.agy.subagents` derived that path by hand;
+  since 2026-09-14 the payload's answer is preferred and the derivation kept behind it
+  ([AG-32](decisions.md#ag-32), [AG-R-32](risks.md#ag-r-32)). Both fields are read, on **every** event
+  rather than only tool calls, so a turn that writes nothing but prose still teaches the host where
+  the conversations are. The geometry the reader inverts is
+  `<brain_dir>/<conversation_id>/.system_generated/logs/transcript_full.jsonl` and
+  `<brain_dir>/<conversation_id>`, with the *nearest* enclosing match winning — a conversation id that
+  also names a parent directory otherwise resolves the brain dir too high.
 
 **`workspacePaths` is documented as a common field and was recorded empty here.** § *Two limits that
 remain* recorded it empty in every captured payload and called `conversationId` the sound isolation
@@ -1270,8 +1289,15 @@ streaming — the hole in § *Cancellation is where this transport is genuinely 
 `SIGINT` does not close it. What `"terminate"` does close is the *loop*: today ⏹ starves a turn and
 then depends on the agent choosing to wind down after reading the refusals, which is a model's
 judgement standing where a mechanism should be. A `PostInvocation` handler consulting the same gate
-state would end the loop whatever the agent concluded. That is a strictly better stop and it is
-unbuilt.
+state would end the loop whatever the agent concluded. That is a strictly better stop.
+
+**It was built** — [AG-19](decisions.md#ag-19), `AgyGateServer.decide_invocation`, no new state and no
+dialog: the same latch ⏹ already sets is read at the one moment `agy` acts on it mechanically. Two
+things the section above did not anticipate. The stop now reaches a subagent that emits **only prose**,
+which starvation could never touch, because its loop ends at the end of the invocation it is in. And
+the lever is not exclusive: measured 2026-09-12, a third-party `Stop` hook answering `continue` revives
+a loop this handler ended, eight times in sixteen seconds, bounded only by `--print-timeout` —
+[AG-R-16](risks.md#ag-r-16).
 
 ---
 

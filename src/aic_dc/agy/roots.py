@@ -183,6 +183,51 @@ def brain_dir(root: Path | str) -> Path:
     return vendor_dir(root) / "brain"
 
 
+def announced_brain_dir(conversation_id: str, *paths: object) -> Path | None:
+    """:func:`brain_dir` read backwards, out of paths ``agy`` itself sent.
+
+    Every hook payload carries ``transcriptPath`` and
+    ``artifactDirectoryPath`` — measured 2026-09-11 on all three events this
+    app wired then, and documented as common fields. Both name the
+    conversation's own directory, ``<brain_dir>/<conversation_id>``, so the
+    directory *above* the component matching ``conversation_id`` is the
+    brain directory as the running vendor process understands it. ``None``
+    when no path does, which is the ordinary answer for a payload that
+    carried neither and for a conversation whose id is empty.
+
+    **Why read it rather than keep deriving it.** :data:`PRODUCT_DIR` is a
+    constant, and ``hooks.md`` names two other values for it —
+    ``antigravity/`` for Antigravity 2.0 and ``antigravity-ide/`` for the
+    IDE. A build of ``agy`` that used either would leave every derived path
+    in this package pointing at a directory nothing writes to, and the
+    symptom is not an error: subagent tabs would report, accurately and
+    uselessly, that the subagent did nothing. That is
+    [AG-R-18](../../../specs5/plan-ag/risks.md#ag-r-18)'s failure shape
+    arriving from a direction a required argument cannot fix, because the
+    caller would be passing the wrong value confidently.
+
+    Matched on the id rather than by counting path components, so it holds
+    whatever the vendor nests the logs under: the two payload fields differ
+    in depth by three levels
+    (``<dir>`` against ``<dir>/.system_generated/logs/transcript_full.jsonl``)
+    and one rule reads both.
+    """
+    if not conversation_id:
+        return None
+    for raw in paths:
+        if not isinstance(raw, str) or not raw:
+            continue
+        candidate = Path(raw)
+        # Deepest first, so a match nearest the file wins. The vendor's own
+        # `brain` directory could in principle sit inside a tree that
+        # repeats the id; the conversation's directory is the one adjacent
+        # to the transcript.
+        for step in (candidate, *candidate.parents):
+            if step.name == conversation_id and step.parent != step:
+                return step.parent
+    return None
+
+
 def mcp_schema_dir(root: Path | str) -> Path:
     """``<root>/.gemini/antigravity-cli/mcp`` — where ``agy`` files tool schemas.
 

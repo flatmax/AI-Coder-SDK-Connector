@@ -97,22 +97,30 @@ Two changes close it, and they are deliberately at different layers:
   user an error message at the moment they asked for a gate, which is the
   cheapest place to spend it.
 
-Three handlers, one entry (2026-09-11)
-======================================
-This wrote one ``PreToolUse`` handler until AG-19. It now writes three
-under the same name — the gate, a ``PostInvocation`` that ends a stopped
+Four handlers, one entry (2026-09-11, and a fourth on 2026-09-14)
+================================================================
+This wrote one ``PreToolUse`` handler until AG-19. It now writes four
+under the same name — the gate, a ``PreInvocation`` that carries this
+app's standing guidance (AG-32), a ``PostInvocation`` that ends a stopped
 loop, and a ``Stop`` that always permits the stop — because ``agy`` merges
 named hooks per event and one name is what makes :func:`uninstall` able to
 remove exactly what we added.
 
-The cost to a stranger's session is not three times the old one. The
+The cost to a stranger's session is not four times the old one. The
 per-tool-call tax is unchanged, since only the gate fires per tool call;
-what is added is two more hook processes **per invocation**, which is a
+what is added is three more hook processes **per invocation**, which is a
 much coarser unit — measured at 4 invocations for a turn that ran three
 tools, against one hook process per tool call.
 
-Governing spec: ``specs5/plan-ag/`` — AG-14, AG-5, AG-19; ``risks.md``
-AG-R-16.
+**Adding an event makes every existing install read ``stale``**, which is
+intended rather than tolerated: :func:`_stale_detail` has a branch that
+names the handlers an entry is missing, and the alternative — treating an
+entry without the new handler as ``current`` — is a mechanism that reports
+itself installed while being absent, which is the untruth :func:`status`
+exists to refuse. It costs an upgrading user one click.
+
+Governing spec: ``specs5/plan-ag/`` — AG-14, AG-5, AG-19, AG-32;
+``risks.md`` AG-R-16.
 """
 
 from __future__ import annotations
@@ -146,11 +154,12 @@ HOOK_NAME = "aic-dc-gate"
 #: the user was slow.
 HOOK_TIMEOUT_SECONDS = 3600
 
-#: The deadline on the two *invocation* handlers, which wait on no human.
+#: The deadline on the three *invocation* handlers, which wait on no human.
 #: A minute rather than an hour, and rather than the documented default of
-#: 30 seconds: the question is answered from a latch the host already
-#: holds, so a minute is pure headroom, and leaving the default in place
-#: would mean a value we never chose bounding the stop.
+#: 30 seconds: each question is answered from state the host already holds
+#: — a latch, or one fixed string — so a minute is pure headroom, and
+#: leaving the default in place would mean a value we never chose bounding
+#: the stop.
 INVOCATION_TIMEOUT_SECONDS = 60
 
 
@@ -181,6 +190,13 @@ INVOCATION_TIMEOUT_SECONDS = 60
 #: caught inside the runner and answered with a real ``deny``; faults
 #: outside it — missing interpreter, killed process, bad path — are the
 #: vendor's to fail closed on, and it does.
+#:
+#: **``PreInvocation`` is deliberately absent**, and so is any other event
+#: registered after the clause was deleted: there is no install of it old
+#: enough to carry one. :func:`_stale_detail` reads this with ``.get`` and
+#: a sentinel for that reason, rather than by iterating
+#: :data:`~aic_dc.agy.hook.EVENTS` — a fabricated entry here would be a
+#: claim about history that is not true.
 LEGACY_FALLBACKS = {
     hook.PRE_TOOL_USE: " || printf '{\"decision\":\"allow\"}'",
     hook.POST_INVOCATION: " || printf '{}'",
@@ -260,10 +276,10 @@ def hook_commands(
 def hook_entry(config_dir: Path | str, python: str | None = None) -> dict[str, Any]:
     """Our whole entry in the user's hooks file.
 
-    Three handlers under one name, which is how ``agy`` groups them:
+    Four handlers under one name, which is how ``agy`` groups them:
     ``PreToolUse`` is *grouped* — a ``matcher`` wrapping a ``hooks`` list —
-    and the two invocation events are **flat**, a list of handlers with no
-    matcher, because there is no tool to match on. Writing the grouped
+    and the three invocation events are **flat**, a list of handlers with
+    no matcher, because there is no tool to match on. Writing the grouped
     shape for a flat event is the kind of mistake that produces a handler
     which simply never fires, so the shapes are written out here rather
     than generated from one template.
@@ -287,6 +303,13 @@ def hook_entry(config_dir: Path | str, python: str | None = None) -> dict[str, A
                         "timeout": HOOK_TIMEOUT_SECONDS,
                     }
                 ],
+            }
+        ],
+        hook.PRE_INVOCATION: [
+            {
+                "type": "command",
+                "command": commands[hook.PRE_INVOCATION],
+                "timeout": INVOCATION_TIMEOUT_SECONDS,
             }
         ],
         hook.POST_INVOCATION: [
@@ -313,6 +336,9 @@ def hook_entry(config_dir: Path | str, python: str | None = None) -> dict[str, A
 #: socket.
 _PROBES: dict[str, dict[str, Any]] = {
     hook.PRE_TOOL_USE: {"toolCall": {"name": "aic-dc-install-probe"}},
+    # The two invocation events share a payload shape, per `hooks.md`:
+    # `invocationNum` and `initialNumSteps` beside the common fields.
+    hook.PRE_INVOCATION: {"invocationNum": 0, "initialNumSteps": 0},
     hook.POST_INVOCATION: {"invocationNum": 0, "initialNumSteps": 0},
     hook.STOP: {"executionNum": 1, "terminationReason": "model_stop"},
 }
@@ -456,15 +482,16 @@ def status(
       own sessions would not be gated by *this* build.
 
       **Also an entry that is ours and incomplete** (2026-09-11). AG-19
-      added a ``PostInvocation`` handler and AG-R-16 a ``Stop`` one, and an
-      entry written before them has a working gate and no stop mechanism —
-      ⏹ would starve a turn and call itself a halt. That reads as a small
-      difference and is not: a control that reports itself a mechanism
-      while being a request is the same shape of untruth as an ungated
-      agent reporting itself gated, which is what this state exists to
-      refuse. It costs an upgrading user one click on a panel that says
-      what is missing (``detail``), and it converges; treating it as
-      ``current`` would leave the mechanism unarmed and silent forever.
+      added a ``PostInvocation`` handler, AG-R-16 a ``Stop`` one and AG-32
+      a ``PreInvocation`` one, and an entry written before them has a
+      working gate and no stop mechanism — ⏹ would starve a turn and call
+      itself a halt. That reads as a small difference and is not: a control
+      that reports itself a mechanism while being a request is the same
+      shape of untruth as an ungated agent reporting itself gated, which is
+      what this state exists to refuse. It costs an upgrading user one
+      click on a panel that says what is missing (``detail``), and it
+      converges; treating it as ``current`` would leave the mechanism
+      unarmed and silent forever.
 
       **Different, not differently spelled** (2026-09-10). This compared
       command strings, so one venv's ``bin/python3`` and ``bin/python`` —
@@ -524,6 +551,25 @@ def status(
     return report
 
 
+#: What an entry missing one of our handlers costs, clause by clause, for
+#: :func:`_stale_detail`. Per event rather than one sentence about "the
+#: stop", because since AG-32 the missing handler is not always the stop —
+#: an entry written yesterday has both invocation handlers and no
+#: ``PreInvocation``, and telling that user their ⏹ would starve a turn
+#: would be a false explanation of a true state.
+_MISSING_COSTS = {
+    hook.PRE_INVOCATION: (
+        "this app's standing guidance would not reach the model, so a write "
+        "carrying ArtifactMetadata would fail inside agy and be retried as a "
+        "shell command"
+    ),
+    hook.POST_INVOCATION: "stopping a turn would starve it rather than end it",
+    hook.STOP: (
+        "a loop ended by a hook this app does not own would go unrecorded"
+    ),
+}
+
+
 def _stale_detail(differs: list[str], found: dict[str, str]) -> str:
     """Why an entry of ours is not this build's, in a sentence.
 
@@ -547,12 +593,14 @@ def _stale_detail(differs: list[str], found: dict[str, str]) -> str:
         )
     absent = [event for event in differs if event not in found]
     if absent and hook.PRE_TOOL_USE not in differs:
+        costs = [_MISSING_COSTS[event] for event in absent if event in _MISSING_COSTS]
         return (
             "The permission gate is installed and is still reviewing every "
             "tool call, but this build also registers "
             + ", ".join(absent)
-            + ", which this entry does not have — so stopping a turn would "
-            "starve it rather than end it. Reinstalling adds them."
+            + ", which this entry does not have"
+            + (f" — so {', and '.join(costs)}" if costs else "")
+            + ". Reinstalling adds them."
         )
     return (
         "This entry names a different install of AIC-DC, so your own "
@@ -654,7 +702,7 @@ def _installed_commands(entry: dict[str, Any]) -> dict[str, str]:
         if command:
             found[hook.PRE_TOOL_USE] = command
             break
-    for event in (hook.POST_INVOCATION, hook.STOP):
+    for event in hook.INVOCATION_EVENTS:
         command = _handler_command(entry.get(event))
         if command:
             found[event] = command

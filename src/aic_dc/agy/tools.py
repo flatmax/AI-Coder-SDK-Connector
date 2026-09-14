@@ -288,9 +288,11 @@ ARG_ALIASES: dict[str, dict[str, str]] = {
     "find_by_name": {"SearchDirectory": "file_path"},
 }
 
-#: Guidance prepended to every ``agy`` prompt, and the one thing it says.
+#: The standing guidance every ``agy`` invocation carries, and the one
+#: thing it says.
 #:
-#: **Why a prompt and not a config setting: there is no setting.** ``agy``
+#: **Why prose at the model and not a config setting: there is no
+#: setting.** ``agy``
 #: declares ``write_to_file`` as *"Use this tool to create new files"* with
 #: ``ArtifactMetadata`` documented as *"Required when creating an artifact
 #: file"* — optional, by its own schema, for anything else. But the
@@ -319,10 +321,19 @@ ARG_ALIASES: dict[str, dict[str, str]] = {
 #: it named the presence of ``ArtifactMetadata`` as the trigger and
 #: clarifying the system instructions as the host's remedy.
 #:
-#: Wrapped in the framing tag the transcript reader already strips
-#: (``history.strip_framing``), so it reaches the model and not the user.
+#: **It travels on ``PreInvocation``, not on the user's prompt** — AG-32,
+#: 2026-09-14. It was prepended to every message the user sent, wrapped in
+#: the ``<aic-dc-ui-context>`` block ``history.strip_framing`` removes at
+#: read time. That worked and cost three things: the mirror stored a
+#: paragraph the user had not written as part of what they typed; the
+#: guidance arrived **once per turn**, where the failure it prevents can
+#: happen at any invocation; and it reached the **master only**, because a
+#: subagent never sees the parent's prompt and writes files with the same
+#: tool. ``agy`` documents ``injectSteps`` on ``PreInvocation`` for exactly
+#: this, so the disguise is gone with the smuggling — this is a system
+#: message on its own channel now, and it needs no tag to keep it out of
+#: the transcript.
 WRITE_GUIDANCE = (
-    "<aic-dc-ui-context>\n"
     "When creating or editing files in this workspace, call write_to_file "
     "WITHOUT the ArtifactMetadata field. That field marks the call as an "
     "artifact document, and agy then rejects any TargetFile outside its "
@@ -330,8 +341,7 @@ WRITE_GUIDANCE = (
     "fail and is not recoverable by retrying. Supply ArtifactMetadata only "
     "for a genuine artifact written into that directory. Prefer "
     "write_to_file and replace_file_content over shell redirection for "
-    "file changes, so the edit can be reviewed as a diff.\n"
-    "</aic-dc-ui-context>\n\n"
+    "file changes, so the edit can be reviewed as a diff."
 )
 
 

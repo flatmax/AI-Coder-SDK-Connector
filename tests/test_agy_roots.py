@@ -116,6 +116,110 @@ class TestEveryPathHangsOffTheRoot:
                 assert root.is_relative_to(roots.roots_dir(tmp_path))
 
 
+class TestTheDirectoryAgyAnnounces:
+    """``announced_brain_dir`` — AG-32, AG-R-32.
+
+    :func:`roots.brain_dir` read backwards out of a path the vendor sent,
+    so a build whose :data:`roots.PRODUCT_DIR` is not ``antigravity-cli``
+    is read rather than mis-derived. Everything here is arithmetic on
+    strings: no tree is created, because the payload's paths are the
+    subject and they name directories on the *vendor's* disk.
+    """
+
+    CONVERSATION = "cd4edb7f-6de3-468f-9815-e76b310a920a"
+
+    def _paths(self, brain: Path) -> tuple[str, str]:
+        """The two fields, in the geometry measured on 2026-09-11."""
+        directory = brain / self.CONVERSATION
+        return (
+            str(directory),
+            str(directory / ".system_generated" / "logs" / "transcript_full.jsonl"),
+        )
+
+    def test_it_recovers_the_directory_our_own_derivation_produces(self, tmp_path):
+        """The agreeing case, which is every machine measured so far.
+
+        If this did not hold, the function would be reporting a
+        disagreement on every payload and the warning it feeds would be
+        noise rather than a tripwire.
+        """
+        brain = roots.brain_dir(roots.master_root(tmp_path))
+        artifact, transcript = self._paths(brain)
+        assert roots.announced_brain_dir(self.CONVERSATION, artifact) == brain
+        assert roots.announced_brain_dir(self.CONVERSATION, transcript) == brain
+
+    def test_one_rule_reads_both_fields_despite_three_levels_between_them(
+        self, tmp_path
+    ):
+        artifact, transcript = self._paths(tmp_path / "brain")
+        assert roots.announced_brain_dir(self.CONVERSATION, artifact, transcript) == (
+            roots.announced_brain_dir(self.CONVERSATION, transcript, artifact)
+        )
+
+    def test_a_product_directory_we_do_not_derive_is_still_read(self, tmp_path):
+        """The whole point. ``hooks.md`` names two other values for
+        :data:`roots.PRODUCT_DIR`, and a build using either would leave
+        every derived path in this package pointing at a directory nothing
+        writes to — with an empty listing, not an error, as the symptom."""
+        theirs = tmp_path / ".gemini" / "antigravity-ide" / "brain"
+        _artifact, transcript = self._paths(theirs)
+        assert roots.announced_brain_dir(self.CONVERSATION, transcript) == theirs
+        assert theirs != roots.brain_dir(tmp_path)
+
+    def test_it_holds_whatever_the_vendor_nests_the_logs_under(self, tmp_path):
+        """Matched on the id, not by counting components, so a release that
+        moved the transcript one directory deeper would not silently return
+        the conversation's own directory as the brain."""
+        brain = tmp_path / "brain"
+        deeper = brain / self.CONVERSATION / "a" / "b" / "c" / "transcript.jsonl"
+        assert roots.announced_brain_dir(self.CONVERSATION, str(deeper)) == brain
+
+    def test_the_nearest_match_wins(self):
+        """A tree that repeats the id above the conversation's directory.
+
+        The conversation's directory is the one adjacent to the transcript,
+        so the search runs deepest-first — otherwise a repeated component
+        higher up would name a brain directory that does not exist.
+        """
+        cid = self.CONVERSATION
+        path = f"/data/{cid}/brain/{cid}/.system_generated/logs/transcript.jsonl"
+        assert roots.announced_brain_dir(cid, path) == Path(f"/data/{cid}/brain")
+
+    @pytest.mark.parametrize(
+        "paths",
+        [
+            (),
+            (None,),
+            ("",),
+            (7,),
+            ([],),
+            ({"transcriptPath": "/x"},),
+            ("/not/this/conversation/at/all",),
+            (None, "", 7),
+        ],
+    )
+    def test_anything_it_cannot_read_is_no_answer(self, paths):
+        """``None`` means "keep deriving", which is what this app did
+        before it read these fields — so an unreadable payload costs
+        nothing rather than producing a confident wrong directory."""
+        assert roots.announced_brain_dir(self.CONVERSATION, *paths) is None
+
+    def test_a_conversation_with_no_id_is_no_answer(self, tmp_path):
+        """Otherwise a path component matching ``""`` would match the root."""
+        _artifact, transcript = self._paths(tmp_path / "brain")
+        assert roots.announced_brain_dir("", transcript) is None
+
+    def test_the_first_readable_path_answers(self, tmp_path):
+        """Positional, so the caller decides which field it trusts more."""
+        first = tmp_path / "one"
+        second = tmp_path / "two"
+        assert roots.announced_brain_dir(
+            self.CONVERSATION,
+            str(first / self.CONVERSATION),
+            str(second / self.CONVERSATION),
+        ) == first
+
+
 class TestTheSeed:
     """228 KB instead of 17 MB, and where the links point."""
 

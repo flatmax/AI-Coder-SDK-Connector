@@ -2962,3 +2962,52 @@ is read from its on-disk transcript, and whether those reconstructed blocks carr
 dropping the guard changes a blank tab into a blank tab. That is why the one-line fix review
 endorsed is not applied here: it is cheap, but shipping it blind would mean claiming a fix that
 has never been seen to work.
+
+---
+
+<a id="ag-r-32"></a>
+
+## AG-R-32 — Two readers still derive the vendor's product directory, and getting it wrong reports nothing rather than failing
+
+Left by [AG-32](decisions.md#ag-32), which fixed this for the transcript mirror and could not fix it
+for the rest.
+
+`roots.PRODUCT_DIR` is the string `"antigravity-cli"`, hard-coded, and `hooks.md` names two other
+values for the same slot: `antigravity/` for Antigravity 2.0 and `antigravity-ide/` for the IDE. Every
+path this package computes from `roots.vendor_dir` therefore rests on one constant matching the binary
+actually installed. AG-32 removed that dependency for the one reader that had somewhere better to
+look — the hook payload announces `<brain_dir>/<conversation_id>` on every event, so
+`roots.announced_brain_dir` reads the directory back out of a path the running vendor process itself
+sent, and `AgyService._brain_dir_for` prefers it.
+
+**Two readers have no payload to learn from, and both fail the same quiet way.**
+
+- **`steps.locate_generated_image`** resolves `brain_dir(root)/<conversation_id>/<name>_<epoch>.jpg`.
+  Its `brain_dir` comes from the caller, and on the consultant path
+  (`agy/consultant.py`) that caller has no gate and no hook, so there is no announcement to prefer.
+  A wrong directory does not raise: the file is simply not found and the image is not collected.
+- **`steps.scratch_dir`** resolves `vendor_dir(root)/scratch`, and it is the diverted-write detector
+  from [AG-R-3](#ag-r-3). Its own docstring already records the twist: this is a diagnostic that fires
+  only when something has gone wrong, so a wrong directory does not misreport — **it reports
+  nothing**. A detector that has quietly stopped detecting is the exact failure the directory exists
+  to catch.
+
+Neither is derivable from the announcement, and that is the honest position rather than an oversight.
+The payload names the *brain* directory; `scratch` is its sibling and nothing sends it. Inferring
+`scratch` by taking the announced brain dir's parent would work on today's layout and is a second
+hard-coded assumption wearing a measurement's clothes — the geometry
+`vendor_dir/brain` beside `vendor_dir/scratch` is no better attested than `PRODUCT_DIR` itself.
+
+**The tripwire is the resolved path for a given root**, which is where [AG-R-18](#ag-r-18) put its own
+and for the same reason: a test that asserts on the constant asserts that the constant is the
+constant. What would make this real is a machine running one of the other two products, which is not
+this machine — `agy` here is `antigravity-cli` 1.2.2. So this is recorded as a tripwire for a change
+that has not happened, not as a fault with a symptom anyone has seen.
+
+**What raises the odds rather than lowering them.** AG-32 makes the brain directory come from the
+payload, so on a mismatched build the transcript mirror would now work while image collection and the
+diverted-write check silently would not — the three used to be wrong together, which at least made one
+of them a witness for the others. `AgyGateServer.note_paths` warns, once, when the announced directory
+and the derived one disagree, and that warning is the only signal this condition has: it names
+`roots.PRODUCT_DIR` explicitly and says every path computed from it is suspect, because by the time it
+fires the mirror has already routed around the problem and will not complain again.

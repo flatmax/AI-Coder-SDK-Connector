@@ -1,11 +1,16 @@
 """The hooks ``agy`` runs, and the one of them that must never fail open.
 
-Three lifecycle events reach this module, from three entries
+Four lifecycle events reach this module, from four entries
 :mod:`~aic_dc.agy.install` writes into one hooks file. They are here
 together because they share a socket, an owner lookup and a process:
 
 - ``PreToolUse`` — **the gate**, before every tool call. The subject of
   most of what follows, and the only one with the tree behind it.
+- ``PreInvocation`` — **the standing guidance**, before the model is
+  called. Injects one ephemeral system message per invocation
+  ([AG-32](../../../specs5/plan-ag/decisions.md#ag-32)), which is where
+  the ``ArtifactMetadata`` warning lives now that it is no longer
+  smuggled in front of the user's own prompt.
 - ``PostInvocation`` — **the stop**, after each invocation's tool calls
   finish. Answers ``terminationBehavior: "terminate"`` while ⏹ is latched,
   which ends the loop whatever the agent concluded
@@ -16,8 +21,9 @@ together because they share a socket, an owner lookup and a process:
   not, and short-circuits ours entirely when it runs first
   ([AG-R-16](../../../specs5/plan-ag/risks.md#ag-r-16)).
 
-**The three fail in opposite directions, deliberately** — see § *Every
-path prints* and § *An invocation hook fails open*.
+**The gate fails in the opposite direction from the other three,
+deliberately** — see § *Every path prints* and § *An invocation hook
+fails open*.
 
 The gate
 --------
@@ -55,12 +61,13 @@ unexpected exception — goes through a print.
 
 An invocation hook fails open, and that is not the same mistake
 ---------------------------------------------------------------
-``{}`` is the *correct* answer for ``PostInvocation`` and ``Stop`` — it is
-the documented "no opinion", and it is what this module prints whenever it
-cannot get one. So the invocation hooks fail in the direction the gate
-must never fail in, and AG-19 says so rather than leaving it to be
-noticed: **what a failure there costs is a loop that keeps running, not a
-write that goes unreviewed.** The tree is protected by ``PreToolUse``,
+``{}`` is the *correct* answer for ``PreInvocation``, ``PostInvocation``
+and ``Stop`` — it is the documented "no opinion", and it is what this
+module prints whenever it cannot get one. So the invocation hooks fail in
+the direction the gate must never fail in, and AG-19 says so rather than
+leaving it to be noticed: **what a failure there costs is a loop that
+keeps running, or one invocation the guidance did not reach, not a write
+that goes unreviewed.** The tree is protected by ``PreToolUse``,
 which is still refusing every call, so a stop that fails to end the loop
 mechanically degrades to the starvation it replaced. Ending a stranger's
 loop because we could not reach our own host would be the worse error, and
@@ -120,9 +127,18 @@ logger = logging.getLogger(__name__)
 #: docstring introduces them, and iterated by :mod:`~aic_dc.agy.install`
 #: so a new one cannot be added to the writer and forgotten by the reader.
 PRE_TOOL_USE = "PreToolUse"
+PRE_INVOCATION = "PreInvocation"
 POST_INVOCATION = "PostInvocation"
 STOP = "Stop"
-EVENTS = (PRE_TOOL_USE, POST_INVOCATION, STOP)
+EVENTS = (PRE_TOOL_USE, PRE_INVOCATION, POST_INVOCATION, STOP)
+
+#: The events whose handlers ``agy`` reads as a **flat** list, with no
+#: ``matcher`` — everything except the gate, because there is no tool to
+#: match on. Named here rather than in :mod:`~aic_dc.agy.install` so that
+#: the writer and the reader of the hooks file cannot disagree about which
+#: shape an event takes: a grouped entry written for a flat event produces
+#: a handler that simply never fires.
+INVOCATION_EVENTS = (PRE_INVOCATION, POST_INVOCATION, STOP)
 
 #: The flag :mod:`~aic_dc.agy.install` writes to name the event. Absent on
 #: the gate's own command, which is left in the exact shape it has always
@@ -177,7 +193,7 @@ def _owner(
 ) -> dict[str, Any] | None:
     """The registry entry gating this payload's conversation, or ``None``.
 
-    Shared by all three events, because *whose call is this* is one
+    Shared by all four handlers, because *whose call is this* is one
     question and two copies of the answer is how the gate and the stop
     would quietly start disagreeing about which sessions are ours.
     """
@@ -258,6 +274,62 @@ def decide(
             "not a refusal by the user."
         )
     return answer
+
+
+def inject_guidance(
+    payload: Any,
+    *,
+    config_dir: Path | str | None = None,
+    ask: Any = None,
+) -> dict[str, Any]:
+    """One ephemeral system message, before the model is called. AG-32.
+
+    ``PreInvocation`` is the vendor's own channel for putting a sentence in
+    front of the model, and it fires **once per invocation** — which is why
+    the host is asked every time rather than once per turn. An
+    ``ephemeralMessage`` is documented as *transient*: it is spent by the
+    invocation that received it, so a handler that answered only the first
+    one would deliver standing guidance to the first invocation of a turn
+    and nothing after it, which is the failure shape this event is easiest
+    to get wrong in. See :meth:`aic_dc.agy.gate_server.AgyGateServer.standing_guidance`.
+
+    **The frame is built here rather than forwarded**, for the same reason
+    :func:`decide_invocation`'s is: ``injectSteps`` accepts
+    ``{"toolCall": …}`` and ``{"userMessage": …}`` beside the ephemeral
+    message, so a host that could put its answer straight into ``agy``'s
+    hands could put a *tool call* there — one that never passes the gate,
+    because the gate is the hook this app installs for calls the **model**
+    emits. So the socket is asked for prose and nothing else: a non-empty
+    string is wrapped, and anything else becomes :data:`PROCEED`.
+
+    Every failure returns :data:`PROCEED`, and the cost of one is an
+    invocation the guidance did not reach — see the module docstring
+    § *An invocation hook fails open*. It is not nothing: the guidance
+    exists because a write carrying ``ArtifactMetadata`` fails *inside*
+    ``agy`` before any hook runs, and the model then routes around it with
+    a shell heredoc (:data:`aic_dc.agy.tools.WRITE_GUIDANCE`). But it is
+    recoverable at the next invocation, where refusing the invocation
+    would not be.
+    """
+    asker = ask if ask is not None else ask_host
+
+    if not isinstance(payload, dict):
+        return dict(PROCEED)
+
+    entry = _owner(payload, config_dir)
+    if entry is None:
+        return dict(PROCEED)
+
+    try:
+        answer = asker(entry["socket"], {**payload, EVENT_KEY: PRE_INVOCATION})
+    except Exception:  # noqa: BLE001 - a hook must not raise
+        logger.exception("The AIC-DC gate could not be asked for its guidance")
+        return dict(PROCEED)
+
+    text = answer.get("ephemeralMessage") if isinstance(answer, dict) else None
+    if not isinstance(text, str) or not text.strip():
+        return dict(PROCEED)
+    return {"injectSteps": [{"ephemeralMessage": text}]}
 
 
 def decide_invocation(
@@ -397,7 +469,7 @@ def parse_argv(argv: list[str] | None) -> tuple[str | None, str]:
     index = 0
     while index < len(args):
         if args[index] == EVENT_FLAG and index + 1 < len(args):
-            if args[index + 1] in (POST_INVOCATION, STOP):
+            if args[index + 1] in INVOCATION_EVENTS:
                 event = args[index + 1]
             index += 2
             continue
@@ -413,13 +485,16 @@ def main(argv: list[str] | None = None) -> int:
     An uncaught exception would end the process with a traceback on stderr
     and **nothing on stdout**, which is the one shape ``agy`` reads as
     allow on a tool call. So the last thing that can go wrong here still
-    prints — a denial for the gate, and ``{}`` for the two events where
+    prints — a denial for the gate, and ``{}`` for the three events where
     ``{}`` is what "no opinion" means.
     """
     config_dir, event = parse_argv(argv)
-    if event == POST_INVOCATION:
-        handler: Any = decide_invocation
+    if event == PRE_INVOCATION:
+        handler: Any = inject_guidance
         fallback: dict[str, Any] = dict(PROCEED)
+    elif event == POST_INVOCATION:
+        handler = decide_invocation
+        fallback = dict(PROCEED)
     elif event == STOP:
         handler = report_stop
         fallback = dict(PROCEED)

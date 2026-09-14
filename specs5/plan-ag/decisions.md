@@ -3213,3 +3213,136 @@ The strip now grows only when the user asks it to, a consultation is one tab whe
 opened, and that tab is still there when the answer is being acted on. 4,572 webapp tests pass,
 16 of them covering this directly — including the live-open-then-settle probe review asked for,
 which refuted review's own claim.
+
+---
+
+<a id="ag-32"></a>
+
+## AG-32 — Standing guidance travels on `PreInvocation`, and the hook payload says where the conversations are **(measured and built 2026-09-14)**
+
+Two of `hooks.md`'s five lifecycle events had a job here and neither was wired. `PreInvocation`
+returns `injectSteps`, which is the vendor's own channel for putting a sentence in front of the
+model; every payload of every event carries `transcriptPath` and `artifactDirectoryPath`, which is
+the vendor's own answer to a question this app was deriving. Both were built together because both
+are the same three handlers learning to carry something, and because the second one is only
+reachable once the first has given the invocation events a reason to exist.
+
+### The guidance was in the user's own prompt, and that was wrong three ways
+
+`agy_tools.WRITE_GUIDANCE` exists for a measured reason that has not changed. `agy` declares
+`write_to_file` with `ArtifactMetadata` documented as *"Required when creating an artifact file"* —
+optional by its own schema for anything else — but the **presence** of that field is what makes it
+enforce `artifacts must be in <appDataDir>/brain/<conversation-id>`. A model that fills it in for an
+ordinary source file gets the write refused *inside* `agy`, while declaring permissions, before any
+hook runs; the gate never sees the call and cannot amend it. The model then routes around the broken
+tool with a `run_command` heredoc, and a write that arrives as a shell command has no diff to render,
+no attributable file, and no rule "always allow" that could ever match twice.
+
+Until 2026-09-14 the sentence was **prepended to the user's prompt**, inside the framing block
+`history.strip_framing` removes at read time. [README row 691](README.md) named one fault. There were
+three, and none of them was the words:
+
+- **The mirror stored a paragraph as the user's that the user had not written.** Every reader of the
+  transcript depended on a strip step to tell the truth about who said what — and one that fails
+  silently, since a missed strip produces plausible prose rather than an error.
+- **It arrived once per turn.** The write it guards against can happen at any invocation, and a turn
+  is many invocations.
+- **It reached the master only.** A subagent never sees the parent's prompt, so the transport's
+  subagents were never told at all.
+
+`AgyGateServer.standing_guidance` now answers the sentence on **every** `invocationNum` and
+`chat_streaming` passes the user's text through untouched. There is no "already sent" latch, and that
+is a measurement rather than caution — see below.
+
+### The hook builds the frame; the socket carries prose
+
+`injectSteps` accepts `{"toolCall": …}` and `{"userMessage": …}` beside `{"ephemeralMessage": …}`. A
+host answer forwarded verbatim into `agy`'s step list could therefore put a **tool call** there — and
+that call would pass no gate, because the gate is the `PreToolUse` hook this app installs for calls
+the *model* emits. Nothing in this app would do that today; the point is that no bug in it could.
+
+So the socket protocol carries a bare string and `hook.inject_guidance` wraps it locally: a non-empty
+string becomes `{"injectSteps": [{"ephemeralMessage": text}]}` and anything else becomes `PROCEED`.
+The test that matters hands back a *correctly shaped* `{"injectSteps": [{"ephemeralMessage": …}]}`
+and asserts it is rejected, because the shape being right is exactly what would make a forwarding
+implementation look correct.
+
+This is the same construction [AG-19](#ag-19) already used for `PostInvocation`'s
+`terminationBehavior`, and the reason it generalises is the reason the whole invocation channel is
+built this way: **an invocation hook fails open**, `{}` is the correct "no opinion" for it, and `{}`
+on a *tool* call is allow. The event is therefore stamped from the hook's own **argv** and never read
+off the payload, and `parse_argv` treats anything it does not recognise as the gate — the
+conservative reading, and also what an older hook process sends.
+
+### Delivery was measured twice, and the model's account of it was wrong
+
+`scripts/probe_agy_pre_invocation.py`, against the real binary under an isolated `--gemini_dir`.
+
+**Multi-step run**: 4 injections at `invocationNum [0, 1, 2, 3]` on one turn, the armed reply
+carrying the nonce and the control's not. That is why `standing_guidance` holds no latch — an
+`ephemeralMessage` is documented as *transient*, spent by the invocation that received it, so a
+handler answering only the first would guide the first invocation of a turn and nothing after it.
+
+**Then the model said something checkable and wrong.** Asked where the rule came from, the armed
+model answered *"before starting, I was not given any formatting rule about a token. However, each
+subsequent tool call output returned an appended instruction…"* — which, if true, would mean the
+first tool call of every turn was unguided, and that is precisely the call this decision exists to
+guide. `--first-invocation` settled it: a prompt with no tool calls, so the whole turn is one
+invocation and a nonce in the reply can only have come from the injection that preceded it. The
+armed reply **opened with the token on its own line** and quoted the rule; the control's said it had
+been given none.
+
+There is no first-invocation gap. The model's report about its own context provenance was simply
+wrong, which is [AG-16](#ag-16)'s *a model's introspective report about its own bias is not
+evidence* arriving for a different question — and it cost nothing, because the claim was checkable
+and was checked.
+
+### The path is announced, and the derivation is kept behind it
+
+`hooks.md` names the per-product directory that differs — `antigravity-cli/` for the CLI,
+`antigravity/` for Antigravity 2.0, `antigravity-ide/` for the IDE — and `roots.PRODUCT_DIR` is one
+of them, hard-coded. `AgyGateServer.note_paths` now inverts the payload's `transcriptPath`
+(`<brain_dir>/<conversation_id>/.system_generated/logs/transcript_full.jsonl`) or its
+`artifactDirectoryPath` (`<brain_dir>/<conversation_id>`) and keeps the result.
+
+Four things about how, each of which was a wrong first answer:
+
+- **On every event, not on tool calls.** Both fields are common to every payload, so the first hook
+  call of any kind answers the question. A reader that waited for a `PreToolUse` would learn nothing
+  from a turn that wrote only prose — and this app now installs three events that fire on such a
+  turn.
+- **Preferred, not substituted.** `roots.brain_dir(roots.master_root(config_dir))` stays, behind the
+  announced answer, because it is what answers for a conversation this process never ran — a mirror
+  read after a restart has no live hook to have learned anything from.
+- **Nearest enclosing match wins.** A conversation id that also names one of its own ancestors —
+  `/data/<cid>/brain/<cid>/.system_generated/…` — resolves the brain dir too high under a
+  first-match scan, and the resulting directory is a real one, so the error is silent.
+- **The disagreement is warned about once.** After the first, it is the same fact repeating and the
+  log is the one place it is legible.
+
+A **per-conversation map** of announced paths was rejected. One `agy` process has one `HOME` and
+therefore one brain dir, so the map's extra key buys nothing; and `subagents.rows` computes
+`path.relative_to(brain_dir)`, which a per-id path outside the tree would raise on rather than
+degrade.
+
+### One directory per request, because two readers can disagree
+
+The fault neither row contained, and where most of the work went. `get_subagent_transcript` checks
+that an id belongs to this session with `subagents.descendants` and *then* reads it with
+`subagents.load`. Both take a `brain_dir`. Resolving it independently in each — the obvious shape,
+since each call site knows how to ask — means that on a machine where both candidates exist, the
+containment check can approve an id against one store while the read hands back a transcript from
+the other.
+
+`subagents.choose_brain_dir` takes the ordered candidates and returns the first that actually holds
+the conversation, falling back to the first candidate when none does; `AgyService._brain_dir_for`
+calls it **once per request** on the executor, and both reads use the answer. The test stages an
+impostor child transcript in the announced store and asserts the containment check, the read, and
+the returned bytes all come from there.
+
+### What this is worth
+
+Four of five lifecycle events are wired, the guidance reaches every invocation of every conversation
+including a subagent's, the transcript mirror follows the directory `agy` says it is using, and the
+user's prompt in the mirror is the user's prompt. `roots.PRODUCT_DIR` is still hard-coded for two
+readers that had no payload to learn from — [AG-R-32](risks.md#ag-r-32).
