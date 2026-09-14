@@ -52,19 +52,31 @@ class FakeConsultant:
         #: :class:`TestNoSinkIsLoadBearing`. The parameter keeps its
         #: ``None`` default because a direct caller may still omit it.
         self.observers: list = []
+        #: The consultation id each call was handed, which is what a real
+        #: consultant registers the run under so ⏹ can name it.
+        self.consultation_ids: list = []
 
-    async def second_opinion(self, question, context="", observer=None):
+    async def second_opinion(
+        self, question, context="", observer=None, consultation_id=None
+    ):
         self.calls.append(("second_opinion", question, context))
         self.observers.append(observer)
+        self.consultation_ids.append(consultation_id)
         if self._raises:
             raise self._raises
         return self._answer
 
     async def generate_image(
-        self, prompt, output_name="", aspect_ratio="", observer=None
+        self,
+        prompt,
+        output_name="",
+        aspect_ratio="",
+        observer=None,
+        consultation_id=None,
     ):
         self.calls.append(("generate_image", prompt, output_name, aspect_ratio))
         self.observers.append(observer)
+        self.consultation_ids.append(consultation_id)
         if self._raises:
             raise self._raises
         return self._image
@@ -926,18 +938,25 @@ class TestTheConsultationGetsATab:
         )
 
     @pytest.mark.asyncio
-    async def test_stop_reaches_the_consultation(self):
-        """AG-13's ⏹ is real, not decorative."""
-        consultant = FakeConsultant(answer="ok")
-        consultant.cancelled = False
+    async def test_stop_reaches_the_consultation_by_name(self):
+        """AG-13's ⏹ is real, not decorative — and it is aimed.
 
-        async def cancel():
-            consultant.cancelled = True
+        The id ``stop_task`` was given is what reaches the consultant, so a
+        turn holding two consultations stops the row the user clicked. The
+        bridge used to call ``cancel()`` with nothing, which was correct
+        only while a consultant could hold one consultation at a time.
+        """
+        consultant = FakeConsultant(answer="ok")
+        consultant.cancelled = []
+
+        async def cancel(consultation_id=None):
+            consultant.cancelled.append(consultation_id)
             return True
 
         consultant.cancel = cancel
-        assert await ConsultantBridge(consultant).cancel() is True
-        assert consultant.cancelled
+        bridge = ConsultantBridge(consultant)
+        assert await bridge.cancel("consultation-7") is True
+        assert consultant.cancelled == ["consultation-7"]
 
     @pytest.mark.asyncio
     async def test_a_failed_consultation_settles_as_failed_not_completed(self):
@@ -1029,7 +1048,9 @@ class TestTheConsultationGetsATab:
         monkeypatch.setattr(mod, "HEARTBEAT_SECONDS", 0.01)
 
         class Slow(FakeConsultant):
-            async def second_opinion(self, question, context="", observer=None):
+            async def second_opinion(
+                self, question, context="", observer=None, consultation_id=None
+            ):
                 await asyncio.sleep(0.05)
                 return "late"
 
@@ -1069,7 +1090,9 @@ class TestTheConsultationGetsATab:
         monkeypatch.setattr(mod, "HEARTBEAT_SECONDS", 0.01)
 
         class Stalled(FakeConsultant):
-            async def second_opinion(self, question, context="", observer=None):
+            async def second_opinion(
+                self, question, context="", observer=None, consultation_id=None
+            ):
                 await asyncio.sleep(0.05)  # never calls the observer
                 return "late"
 
@@ -1098,7 +1121,9 @@ class TestTheConsultationGetsATab:
         monkeypatch.setattr(mod, "HEARTBEAT_SECONDS", 0.01)
 
         class Streaming(FakeConsultant):
-            async def second_opinion(self, question, context="", observer=None):
+            async def second_opinion(
+                self, question, context="", observer=None, consultation_id=None
+            ):
                 if observer:
                     observer(_step("hello"))
                 await asyncio.sleep(0.05)
@@ -1189,6 +1214,50 @@ class TestTheRowNestsInsideItsToolCard:
         row = self.rows(seen)[0]
         assert row["agent_id"] == row["task_id"]
         assert row["agent_id"].startswith("consultation-")
+
+    @pytest.mark.asyncio
+    async def test_the_consultant_is_keyed_by_the_id_stop_will_send(self):
+        """The trap this class exists to describe, from the ⏹ side.
+
+        Three ids are in scope inside ``_tab`` and only one of them is ever
+        pressed: the row's ``task_id``. ``scope`` is the borrowed
+        ``toolu_``, and it is the one the observer carries and every block
+        is stamped with — so keying the consultant off the observer's scope
+        would file the consultation under an id the stop path never sends,
+        and ⏹ would answer ``not_running`` for a consultation plainly
+        running in front of the user.
+        """
+        consultant = FakeConsultant(answer="ok")
+        bridge, seen = self.bridge_with_emit(consultant)
+        self.note(bridge, "Well?", "toolu_01ABC")
+        await bridge.second_opinion("Well?")
+        assert consultant.consultation_ids == [self.rows(seen)[0]["task_id"]]
+        assert consultant.consultation_ids[0].startswith("consultation-")
+
+    @pytest.mark.asyncio
+    async def test_an_image_consultation_is_keyed_the_same_way(self):
+        """Both tools get a row, so both need to be findable by its id."""
+        consultant = FakeConsultant(image=TestGenerateImage.IMAGE)
+        bridge, seen = self.bridge_with_emit(consultant)
+        self.note(bridge, "a duck", "toolu_01ABC", tool="generate_image")
+        await bridge.generate_image("a duck")
+        assert consultant.consultation_ids == [self.rows(seen)[0]["task_id"]]
+
+    @pytest.mark.asyncio
+    async def test_two_consultations_are_keyed_apart(self):
+        """One id each, and each one its own row's.
+
+        The bridge mints per consultation, so this only holds if the id
+        travels with the call rather than being read off the bridge — which
+        is shared by every consultation in the turn.
+        """
+        consultant = FakeConsultant(answer="ok")
+        bridge, seen = self.bridge_with_emit(consultant)
+        await bridge.second_opinion("First?")
+        await bridge.second_opinion("Second?")
+        opened = [r["task_id"] for r in self.rows(seen) if not r.get("terminal")]
+        assert consultant.consultation_ids == opened
+        assert len(set(consultant.consultation_ids)) == 2
 
     @pytest.mark.asyncio
     async def test_what_the_row_holds_is_stamped_on_its_blocks(self):
@@ -1444,7 +1513,9 @@ class TestTheTabAndTheAnswerAgree:
             def make_translator(self, request_id, agent_id):
                 return translator
 
-            async def second_opinion(self, question, context="", observer=None):
+            async def second_opinion(
+                self, question, context="", observer=None, consultation_id=None
+            ):
                 if body is not None:
                     body(observer, live)
                 return translator.answer or "ok"
@@ -1588,7 +1659,9 @@ class TestNoSinkIsLoadBearing:
         def make_translator(self, request_id, agent_id=""):
             return TestNoSinkIsLoadBearing.Accumulating()
 
-        async def second_opinion(self, question, context="", observer=None):
+        async def second_opinion(
+            self, question, context="", observer=None, consultation_id=None
+        ):
             self.observers.append(observer)
             translator = getattr(observer, "translator", None)
             assert translator is not None, "no observer, no accumulator"
@@ -1674,6 +1747,22 @@ class TestNoSinkIsLoadBearing:
         assert quoted(result) == self.ANSWER, (
             f"a browserless consultation returned {body(result)!r}"
         )
+
+    @pytest.mark.asyncio
+    async def test_a_browserless_consultation_is_still_named(self):
+        """Absence, applied to ⏹ rather than to the answer.
+
+        The consultation id travels *with the call* for this reason. It is
+        held on the observer, which is the object a missing browser would be
+        the natural thing to switch off — and had the consultant been left
+        to read it there, "no sink is load-bearing" would have held for the
+        reply and quietly failed for the stop. There is nothing to press ⏹
+        with here, and the consultation is registered under a name anyway,
+        because whether one is stoppable is not the browser's to decide.
+        """
+        consultant = FakeConsultant(answer="ok")
+        await ConsultantBridge(consultant).second_opinion("Well?")
+        assert consultant.consultation_ids[0].startswith("consultation-")
 
     @pytest.mark.asyncio
     async def test_absence_still_costs_nothing(self):

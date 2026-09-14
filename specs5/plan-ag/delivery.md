@@ -7623,3 +7623,93 @@ and the label function already renders a keyword alone when there is no ordinal.
 **16 tests in one file; 4,572 webapp passed.** What is left is written down rather than built:
 there is still no way to close one of these tabs by hand, and a consultation asked *by* a
 delegated subagent would open blank, both [AG-R-31](risks.md#ag-r-31).
+
+
+## The stop that was aimed and then unaimed (2026-09-14)
+
+The ⏹ on a consultation row worked, in the sense that something stopped. Which consultation it
+was, nobody had asked.
+
+The path is short and the id survives almost all of it. `_stopSubagent` sends the row's
+`task_id`; `stop_task` routes on its `consultation-` prefix, because a consultation is not a CLI
+task and the CLI has never heard of the id; and then the last line threw it away —
+`await bridge.cancel()`, with nothing. Both consultants took the hint and were built to match: one
+`self._conversation` on the SDK transport, one `self._session` on `agy`, set by whichever
+consultation had reached the driver most recently and cleared by its own `finally`. With one
+consultation running that is exactly right and reads as deliberate. With two, ⏹ on either row
+stopped the younger one, and the elder could not be stopped at all.
+
+Two in flight is not a hypothetical. A consultation is an MCP tool call, `allowed_tools` is never
+narrowed, and the shipped agent types carry `Tools: *` — so a Task subagent can ask for a second
+opinion while the main turn is already waiting on one. That reachability was already written
+down, from the other side: [AG-R-31](risks.md#ag-r-31)'s open row about a subagent's consultation
+opening its own tab is the same fact seen from the renderer.
+
+### Two more of the same mistake, one layer in
+
+The row on the list named the slot. Reading its neighbours found two more pieces of
+per-consultant state that belong to a consultation, and both were worse than the one specified.
+
+`AgyConsultant` kept a single `_cancelled` flag beside its session, reset at the top of every run
+and read by all of them. Stop one consultation and any sibling already past that reset — a
+consultation that ran to completion, got its prose, and cost the subscription for it — reached its
+last line, found the flag another row's ⏹ had set, and raised *"The consultation was stopped
+before it answered."* The answer was in hand and discarded. A mis-aimed stop wastes a call; this
+throws away one that succeeded.
+
+The SDK consultant kept one `_last_connection`, retained past the agent's teardown so that a
+timeout could quote the harness's own last words — the diagnosis added on 2026-09-02, when two
+consultations sat at the full 180 s and the reason (`context canceled`) was only ever on the root
+logger. With two consultations that attribute holds whichever harness started last, so a
+consultation timing out would explain itself with a *working* harness's stderr. A diagnosis
+pointing at the wrong process is worse than none, and it looks authoritative.
+
+### One record per consultation, named by the row
+
+Both transports now hold a `_Flight` per consultation in a dict keyed by the id the bridge minted
+for its row: the conversation and the retained connection on the SDK side, the session and its own
+`cancelled` flag on `agy`. `cancel(consultation_id)` halts that one and returns `False` for an id
+it does not hold — which `stop_task` renders as `not_running`, the honest answer for a
+consultation that finished or was never here. `None` still means every live one, for a probe or a
+shutdown that holds no row; the bridge never sends it.
+
+Two decisions inside that are not obvious from the diff.
+
+**The id arrives as an argument, not off the observer.** The observer is threaded through the same
+calls and carries the id already, and reading it there would have saved a parameter on four
+methods. It is the wrong source: no sink in this bridge is load-bearing, and a consultation with
+nothing watching must still be stoppable. Identity that arrives as a property of who happens to be
+watching is identity that disappears when nobody is.
+
+**A caller with no row gets a minted key.** Filing every unnamed consultation under one `None`
+would be the single slot again wearing a dict, down to the same failure — the first one's `finally`
+dropping the second one's entry. `_key()` mints `local-<consultant>-<n>` instead, so two direct
+callers coexist and `cancel()` finds both.
+
+The trap is in `_tab`, where three ids are in scope and only one of them is ever pressed. `scope`
+is [AG-28](decisions.md#ag-28)'s borrowed `tool_use_id`, and it is the right value for everything
+presentational — the row's pointer, every block's `agent_id`, every scoped notice. `task_id` is
+the row's own identity and the only thing ⏹ sends. Keying the consultant off the observer's scope
+would have filed each consultation under a `toolu_` the stop path never mentions, and every ⏹
+would have answered `not_running` about a consultation visibly running in front of the user.
+
+### What the tests had to do first
+
+The suite could not hold two consultations at once, which is why none of this was caught: every
+double in `test_antigravity_consultant.py` answers the moment it is asked, and the fake `agy` emits
+its result frame in the same loop iteration that reads the prompt. A consultant that can only be
+observed running one consultation cannot be observed aiming a stop. So both harnesses grew a way
+to be held mid-answer — a conversation that blocks until its `cancel()` releases it, and a fake
+`agy` that waits for a file to appear before its result — and the new tests are the first in the
+file to have two consultations in flight at the same time.
+
+Where the defect can be stated in the *shipped* vocabulary, it is, so the failure is behavioural
+rather than a missing parameter. Two unnamed consultations and one timeout: against the shipped
+source the message carries `the other harness is fine`. Two held `agy` processes and `cancel()`
+with no id: the elder is still holding when the assertion's ten seconds run out. The rest fail
+against the shipped source for the honest reason that `cancel` had nowhere to put a row id at all.
+
+**17 new tests across four files; 5,282 passed.** The three failures are the known environmental
+ones in `test_claude_consultant.py`, which spawn the real `claude` CLI at a local capture server.
+This closes migration step 3 — [AG-31](decisions.md#ag-31) claimed that already, and it was
+speaking for the rendering half.

@@ -1939,7 +1939,13 @@ class ClaudeCodeService:
         # (it maps to the `subagent_stop` surface for exactly this reason).
         bridge = getattr(self, "consultant_bridge", None)
         if bridge is not None and str(task_id).startswith("consultation-"):
-            stopped = await bridge.cancel()
+            # Passed on, because the row it came from is one of possibly
+            # several: a turn can hold two consultations at once — its own
+            # and a `Task` subagent's — and this id is the only thing that
+            # says which row the ⏹ was pressed on. It used to be dropped
+            # here, so the bridge stopped whichever consultation had started
+            # most recently and answered `stopping` either way.
+            stopped = await bridge.cancel(task_id)
             return {
                 "status": "stopping" if stopped else "not_running",
                 "task_id": task_id,

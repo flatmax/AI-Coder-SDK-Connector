@@ -234,7 +234,7 @@ change.
 |---|---|---|
 | 1 — every sink an observer | ~~2–3 d~~ 4–6 d | The shipped bridge fix is two-thirds of the test set already. **Consultation half done 2026-09-11**; the master-turn half is [AG-R-19](../plan-ag/risks.md#ag-r-19), and **revised upward the same day** when consulting it added [AG-R-20](../plan-ag/risks.md#ag-r-20) as a prerequisite |
 | 2 — a Claude consultant through `query()` | 3–5 d | Included [R-14](../plan/risks.md#r-14--two-refreshes-race-for-one-single-use-refresh-token)'s lock, which it must not ship without — **built 2026-09-11, ahead of the step**, so the remainder is the headless resolver and `max_turns` |
-| 3 — inline rendering as the default surface | 3–5 d | Webapp work, and the read-only tab it replaces already exists |
+| 3 — inline rendering as the default surface | 3–5 d | Webapp work, and the read-only tab it replaces already exists. **Built 2026-09-12 to 09-14**, and its last piece was server-side rather than webapp work: a ⏹ that could only reach the newest consultation |
 | 4 — reach the consultant from `agy` | 4–6 d | **Down.** A spawned stdio server and a third credential holder were both deleted by measurement — see below |
 | 5 — formalise `ApprovalResolver` | 1–2 d | **Down hard, from 1–2 weeks.** Its ~3,000-line premise was refuted by the import graph |
 
@@ -292,11 +292,18 @@ roughly 40% of the estimate**. A costing exercise that only ever adds is not mea
    deliberately raises no toast; it became **framing on the container**, read from a severity-monotonic
    store so that a retraction cannot be overwritten by the assurance it retracted —
    [AG-29](../plan-ag/decisions.md#ag-29), with [AG-R-29](../plan-ag/risks.md#ag-r-29) on the two places
-   a breach is still quiet for a human skimming a restored session. What remains of step 3: stop
-   creating the strip tab eagerly, now unblocked because the notices no longer need a mounted tab to
-   have somewhere to be; make the full view a projection of retained blocks rather than a disk read,
-   which a consultation has nothing to answer; and key the consultant's live conversation by
-   consultation id so two in flight can be stopped independently.
+   a breach is still quiet for a human skimming a restored session. **Step 3 is closed, 2026-09-14.**
+   Its last three pieces went in that order: the strip tab is no longer created eagerly, the card's own
+   button opening one on demand ([AG-31](../plan-ag/decisions.md#ag-31)); the full view is a projection
+   of retained blocks rather than a disk read a consultation has nothing to answer
+   ([AG-30](../plan-ag/decisions.md#ag-30)); and the consultant's live conversation is keyed by
+   consultation id, so two in flight are stopped independently. AG-31's own entry says it closed this
+   step, which was true of the *rendering* half and is the discrepancy this line settles — the last
+   piece was not a rendering change but a shipped ⏹ defect, and the two faults found beside it were
+   worse than the one specified: a shared cancellation flag made a consultation that got its answer
+   report itself stopped, and a shared connection handle made a failing one quote a working harness's
+   stderr. See
+   [§ The stop that was aimed and then unaimed](../plan-ag/delivery.md#the-stop-that-was-aimed-and-then-unaimed-2026-09-14).
 4. **Provision `agy`'s MCP root as a build step.** It has no MCP servers configured today, so this is
    construction, not configuration — the correction that turned a claimed half-day into a build task.
    **The mechanism has since left this layer**: `agy mcp add` documents `--type http` with repeatable

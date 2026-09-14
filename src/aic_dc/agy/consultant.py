@@ -94,6 +94,7 @@ Governing spec: ``specs5/plan-ag/`` — AG-16, AG-7, AG-13, AG-5, AG-R-3.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
 import os
 import shutil
@@ -300,6 +301,32 @@ def _listed(names: Iterable[str]) -> str:
     return f"{', '.join(items[:-1])} and {items[-1]}"
 
 
+@dataclasses.dataclass
+class _Flight:
+    """One consultation in flight, and what stopping it needs.
+
+    A record per consultation rather than a slot per consultant. The
+    shipped shape held one ``_session`` and one ``_cancelled`` flag for
+    every consultation at once, and both were wrong for two in flight: ⏹
+    on either row closed whichever process had started most recently, and
+    the flag it set was then read by *both* runs, so a consultation that
+    completed normally reported itself stopped.
+
+    The caller keeps its own reference, which is what lets ``_run`` read
+    ``cancelled`` after the registry entry has been dropped — the check
+    that turns a closed process into "stopped before it answered" runs
+    after the teardown that drops it.
+    """
+
+    #: The live session, while there is one. ``None`` until the process is
+    #: up and again once it is closed.
+    session: AgySession | None = None
+    #: Set by :meth:`AgyConsultant.cancel`, read by the run it belongs to.
+    #: Per consultation because it is the difference between a stopped
+    #: answer and a finished one.
+    cancelled: bool = False
+
+
 class AgyConsultant:
     """One-shot ``agy`` calls, from inside a Claude Code turn.
 
@@ -350,10 +377,14 @@ class AgyConsultant:
         self._executable = executable
         self._timeout = timeout_seconds
         self._image_timeout = image_timeout_seconds
-        #: The live session, while a consultation is running. Held so
-        #: :meth:`cancel` has something to stop.
-        self._session: AgySession | None = None
-        self._cancelled = False
+        #: Consultations in flight, by the id their caller gave them. Held
+        #: so :meth:`cancel` has something to stop, and keyed rather than
+        #: slotted so that ⏹ on one row cannot close another
+        #: consultation's process.
+        self._live: dict[str, _Flight] = {}
+        #: Only for a caller that supplied no id of its own — see
+        #: :meth:`_key`.
+        self._minted = 0
         self._counter = 0
         # Litter from a process that was killed mid-consultation, taken out
         # here because this is the first place in the program that knows
@@ -467,8 +498,32 @@ class AgyConsultant:
     # Consultations
     # ------------------------------------------------------------------
 
+    def _key(self, consultation_id: str | None) -> str:
+        """The registry key for one consultation.
+
+        The caller's own id whenever there is one, because that is what ⏹
+        sends: the bridge mints it for the row, so a stop can only reach
+        the right process if both sides agree on the name. A direct caller
+        — a probe, a test — has no row and no id, and gets a minted key so
+        that two of them still cannot collide in the registry.
+
+        **Not read off the observer**, though the observer is threaded
+        through the same calls and could carry it. The observer is a sink,
+        and no sink here is load-bearing: a consultation with no browser
+        attached must still be stoppable, so identity arrives as an
+        argument rather than as a property of who happens to be watching.
+        """
+        if consultation_id:
+            return str(consultation_id)
+        self._minted += 1
+        return f"local-{id(self):x}-{self._minted}"
+
     async def second_opinion(
-        self, question: str, context: str = "", observer: Any = None
+        self,
+        question: str,
+        context: str = "",
+        observer: Any = None,
+        consultation_id: str | None = None,
     ) -> str:
         """Ask Antigravity one question and return its answer as text.
 
@@ -476,6 +531,10 @@ class AgyConsultant:
         supplies what it already read. Two independent agents disagreeing
         about a diff is information; one agent given a second chance to
         browse the repository is not.
+
+        ``consultation_id`` is what :meth:`cancel` will be given for this
+        call, and omitting it means "nothing will ask for this one by
+        name".
         """
         question = (question or "").strip()
         if not question:
@@ -494,6 +553,7 @@ class AgyConsultant:
                 observer=observer,
                 timeout=self._timeout,
                 config_root=config_root,
+                consultation_id=consultation_id,
             )
         answer = translator.response_text().strip()
         if not answer:
@@ -506,6 +566,7 @@ class AgyConsultant:
         output_name: str = "",
         aspect_ratio: str = "",
         observer: Any = None,
+        consultation_id: str | None = None,
     ) -> ImageResult:
         """Generate an image, collect it into the repository, and verify it.
 
@@ -556,6 +617,7 @@ class AgyConsultant:
                 observer=observer,
                 timeout=self._image_timeout,
                 config_root=config_root,
+                consultation_id=consultation_id,
             )
             summary = translator.response_text().strip()
             call = _image_call(frames)
@@ -631,7 +693,7 @@ class AgyConsultant:
             ) from exc
         return str(destination)
 
-    async def cancel(self) -> bool:
+    async def cancel(self, consultation_id: str | None = None) -> bool:
         """Stop a running consultation. Safe when there is none.
 
         **This kills the process, where the engine's ⏹ deliberately does
@@ -646,17 +708,40 @@ class AgyConsultant:
         would be exactly useless here since a second opinion is prose by
         construction and is already allowed nothing. Killing is the only
         thing that stops it, and it stops it completely.
+
+        **Named, because a row is named.** ⏹ is pressed on one row and
+        sends that row's task id, so this kills that consultation's process
+        and no other — which matters more here than on the SDK transport,
+        because what is stopped is a subprocess and stopping the wrong one
+        loses an answer the user was waiting for. An unknown id returns
+        ``False``, which ``stop_task`` renders as ``not_running``.
+
+        ``None`` stops every live consultation, which is what a caller
+        holding no id means: a probe or a test drives one at a time. The
+        bridge never sends it.
         """
-        session = self._session
-        if session is None:
-            return False
-        self._cancelled = True
-        try:
-            await session.close()
-        except Exception:  # noqa: BLE001 - a cancel that fails is not fatal
-            logger.exception("Stopping the agy consultation failed")
-            return False
-        return True
+        if consultation_id is None:
+            flights = list(self._live.values())
+        else:
+            flight = self._live.get(str(consultation_id))
+            flights = [flight] if flight is not None else []
+        stopped = False
+        for flight in flights:
+            session = flight.session
+            if session is None:
+                continue
+            # Flagged before the close, and on the flight rather than on
+            # the consultant: the run this belongs to reads it to tell a
+            # process that was killed from one that finished, and a shared
+            # flag told every concurrent run the same story.
+            flight.cancelled = True
+            try:
+                await session.close()
+            except Exception:  # noqa: BLE001 - a cancel that fails is not fatal
+                logger.exception("Stopping the agy consultation failed")
+                continue
+            stopped = True
+        return stopped
 
     # ------------------------------------------------------------------
     # The single call site
@@ -670,6 +755,7 @@ class AgyConsultant:
         observer: Any,
         timeout: float,
         config_root: Path,
+        consultation_id: str | None = None,
     ) -> tuple[AgyTranslator, list[dict[str, Any]]]:
         """Spawn, ask one thing, drain it, and shut down.
 
@@ -693,7 +779,6 @@ class AgyConsultant:
         if not self.available:
             raise ConsultationError(self._unavailable_reason())
 
-        self._cancelled = False
         translator = (
             getattr(observer, "translator", None) or self.make_translator("")
         )
@@ -748,7 +833,15 @@ class AgyConsultant:
             executable=self._executable,
             config_root=config_root,
         )
-        self._session = session
+        # This consultation's own record, registered from here rather than
+        # from the top of the method because until there is a process there
+        # is nothing for ⏹ to stop — which is what the cleared slot used to
+        # say, and it said it for every consultation at once. Held locally
+        # as well: the two `cancelled` checks below read it, and one of them
+        # runs after the teardown has dropped the entry.
+        key = self._key(consultation_id)
+        flight = _Flight(session=session)
+        self._live[key] = flight
         stream: Any = None
         try:
             async with asyncio.timeout(timeout):
@@ -774,7 +867,7 @@ class AgyConsultant:
         except ConsultationError:
             raise
         except Exception as exc:  # noqa: BLE001 - reported as prose, always
-            if self._cancelled:
+            if flight.cancelled:
                 raise ConsultationError(
                     "The consultation was stopped before it answered."
                 ) from exc
@@ -782,7 +875,10 @@ class AgyConsultant:
                 f"The consultation failed: {' '.join(str(exc).split())[:400]}"
             ) from exc
         finally:
-            self._session = None
+            # Dropped before the teardown, so ⏹ cannot aim a close at a
+            # session that is already closing — and cannot report
+            # `stopping` for a consultation that is over.
+            self._live.pop(key, None)
             if stream is not None:
                 # A timeout abandons the loop mid-frame, and an async
                 # generator left suspended runs its `finally` whenever the
@@ -795,7 +891,7 @@ class AgyConsultant:
             # on a socket nobody is listening to.
             await session.close()
 
-        if self._cancelled:
+        if flight.cancelled:
             raise ConsultationError("The consultation was stopped before it answered.")
         return translator, frames
 

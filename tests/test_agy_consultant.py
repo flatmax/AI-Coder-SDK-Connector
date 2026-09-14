@@ -59,6 +59,7 @@ def _fake_agy(
     denied_error: str = "",
     answer: str = "It depends.",
     log: str = "",
+    hold_until: str = "",
 ) -> str:
     """A fake ``agy``: init, prose, optionally an image tool call, result.
 
@@ -83,9 +84,31 @@ def _fake_agy(
     this process against — so if that plumbing breaks, this writes
     somewhere the collector does not look, and the test fails for the
     reason a user would.
+
+    **``hold_until`` is what lets two consultations be in flight at once.**
+    Every other mode here answers the moment the prompt lands, which is why
+    nothing in this file ever held two — and a consultant that can only be
+    caught running one at a time is one whose ⏹ nobody can aim. A prompt
+    containing ``hold`` waits for that path to appear before its result
+    frame, so a test decides when each consultation finishes: the one it
+    releases answers, and the one it does not is still running when ⏹ is
+    pressed.
     """
     tool = ""
-    if denied:
+    if hold_until:
+        # Not a tool call: a pause placed exactly where the answer would be.
+        # ``time.sleep`` rather than anything cleverer because this is a
+        # separate process with one job, and the interval is only how fast
+        # the release is noticed.
+        tool = textwrap.dedent(
+            f'''
+            if "hold" in line:
+                import time
+                while not os.path.exists({hold_until!r}):
+                    time.sleep(0.01)
+            '''
+        )
+    elif denied:
         # The gate's own refusal, as `agy` reports it back: an ERROR step
         # whose message is the pre-tool hook's, transcribed from the P20
         # live capture (2026-09-12). `output` is absent, which is the
@@ -256,6 +279,7 @@ def gated(tmp_path, monkeypatch):
         denied_error: str = "",
         answer: str = "It depends.",
         log: str = "",
+        hold_until: str = "",
     ):
         fake = tmp_path / "fake_agy.py"
         fake.write_text(
@@ -266,6 +290,7 @@ def gated(tmp_path, monkeypatch):
                 denied_error=denied_error,
                 answer=answer,
                 log=log,
+                hold_until=hold_until,
             ),
             "utf-8",
         )
@@ -569,6 +594,176 @@ class TestASecondOpinion:
 
         assert with_tab == without == "I would not merge this."
         assert recorder.frames, "the observer was never fed, so this proves nothing"
+
+
+class TestTwoConsultationsAreStoppedIndependently:
+    """AG-31, on the transport where stopping the wrong one kills a process.
+
+    A Claude turn can hold two consultations at once — a subagent's tools
+    are never narrowed, so one can ask for a second opinion while the main
+    turn is already waiting on one. The shipped consultant kept a single
+    ``_session`` and a single ``_cancelled`` flag for all of them, and both
+    were wrong in that state:
+
+    - ⏹ closed whichever process had started most recently, whatever row
+      it was pressed on, and the other consultation could not be stopped
+      at all;
+    - the flag was then read by *every* run, so a consultation that got its
+      answer reported itself "stopped before it answered" because somebody
+      else's had been.
+
+    The second is the worse one and it is specific to this transport: on
+    the SDK side a mis-aimed stop wastes a call, here it kills a
+    subprocess and loses prose the user was waiting for.
+
+    Slower than the rest of this file, and deliberately so: two real
+    ``agy`` processes, held mid-answer by the fake, is the only state in
+    which either claim can be made.
+    """
+
+    async def in_flight(self, *recorders, tries: int = 200) -> None:
+        """Wait until every consultation has emitted something.
+
+        The fake sends its prose frame and *then* holds, so a recorded
+        frame means the process is up, the prompt was sent and ⏹ has
+        something to aim at. Spawning a process, installing a hook and
+        starting a gate is not instant, hence the patience.
+        """
+        for _ in range(tries):
+            if all(r.frames for r in recorders):
+                return
+            await asyncio.sleep(0.05)
+        raise AssertionError("the consultations never both reached the fake agy")
+
+    def held_pair(self, gated, tmp_path):
+        """One consultant, two consultations, both stopped mid-answer."""
+        build, _repo, _cfg = gated
+        release = tmp_path / "go"
+        consultant = build(
+            hold_until=str(release), answer="I would not merge this."
+        )
+        first = Recorder(consultant.make_translator("r1", "consultation-1"))
+        second = Recorder(consultant.make_translator("r2", "consultation-2"))
+        return consultant, release, first, second
+
+    def test_the_named_consultation_is_the_one_that_dies(self, gated, tmp_path):
+        """And the answer the other one was owed still arrives.
+
+        Both halves in one test because they are one event: under the
+        single-slot shape this ⏹ killed ``consultation-2``'s process and
+        left ``consultation-1`` running, and then the shared flag made
+        ``consultation-2`` — had it survived — report itself stopped.
+        """
+        consultant, release, first, second = self.held_pair(gated, tmp_path)
+
+        async def scenario():
+            one = asyncio.create_task(
+                consultant.second_opinion(
+                    "hold this one?", "", first, "consultation-1"
+                )
+            )
+            two = asyncio.create_task(
+                consultant.second_opinion(
+                    "hold that one?", "", second, "consultation-2"
+                )
+            )
+            try:
+                await self.in_flight(first, second)
+                assert await consultant.cancel("consultation-1") is True
+                # Bounded rather than awaited outright: the failure this
+                # guards against is the *other* task dying, which would
+                # leave this one running to the consultation timeout.
+                with pytest.raises(ConsultationError, match="stopped before"):
+                    await asyncio.wait_for(one, 10)
+                assert not two.done(), "the other consultation was killed too"
+                release.write_text("go", "utf-8")
+                assert await asyncio.wait_for(two, 10) == "I would not merge this."
+            finally:
+                release.write_text("go", "utf-8")
+                await consultant.cancel()
+                await asyncio.gather(one, two, return_exceptions=True)
+
+        asyncio.run(scenario())
+
+    def test_an_unknown_id_stops_nothing_and_says_so(self, gated, tmp_path):
+        """``False``, which ``stop_task`` renders as ``not_running``.
+
+        The id names a consultation that finished or was never here.
+        Killing whatever process happens to be live instead would lose a
+        stranger's answer *and* report success for it.
+        """
+        consultant, release, first, second = self.held_pair(gated, tmp_path)
+
+        async def scenario():
+            one = asyncio.create_task(
+                consultant.second_opinion(
+                    "hold this one?", "", first, "consultation-1"
+                )
+            )
+            two = asyncio.create_task(
+                consultant.second_opinion(
+                    "hold that one?", "", second, "consultation-2"
+                )
+            )
+            try:
+                await self.in_flight(first, second)
+                assert await consultant.cancel("consultation-nobody") is False
+                assert not one.done() and not two.done()
+            finally:
+                release.write_text("go", "utf-8")
+                await consultant.cancel()
+                await asyncio.gather(one, two, return_exceptions=True)
+
+        asyncio.run(scenario())
+
+    def test_stopping_with_no_id_stops_every_one_of_them(self, gated, tmp_path):
+        """The caller with no row: a probe, or a shutdown, or a test.
+
+        Written without ``consultation_id`` on purpose, so it is the
+        *shipped* call that runs and the failure is behavioural rather than
+        a missing parameter: against the single-slot consultant this closes
+        the younger process and leaves the elder holding, which is the
+        defect stated in the only vocabulary that version has.
+        """
+        consultant, release, first, second = self.held_pair(gated, tmp_path)
+
+        async def scenario():
+            one = asyncio.create_task(
+                consultant.second_opinion("hold this one?", "", first)
+            )
+            two = asyncio.create_task(
+                consultant.second_opinion("hold that one?", "", second)
+            )
+            try:
+                await self.in_flight(first, second)
+                assert await consultant.cancel() is True
+                for task in (one, two):
+                    with pytest.raises(ConsultationError, match="stopped before"):
+                        await asyncio.wait_for(task, 10)
+            finally:
+                release.write_text("go", "utf-8")
+                await consultant.cancel()
+                await asyncio.gather(one, two, return_exceptions=True)
+
+        asyncio.run(scenario())
+
+    def test_a_finished_consultation_cannot_be_stopped(self, gated):
+        """The registry empties, so ⏹ on a stale row is honest.
+
+        A row outlives its consultation in the browser — its answer is
+        there to read — and an entry left behind would answer ``stopping``
+        for a process that has already exited.
+        """
+        build, _repo, _cfg = gated
+        consultant = build()
+
+        async def scenario():
+            await consultant.second_opinion(
+                "well?", "", None, "consultation-1"
+            )
+            return await consultant.cancel("consultation-1")
+
+        assert asyncio.run(scenario()) is False
 
 
 class TestARefusalIsNotAFailure:

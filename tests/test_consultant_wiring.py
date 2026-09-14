@@ -342,10 +342,14 @@ class TestStopReachesTheConsultation:
     class Bridge:
         def __init__(self, stopped=True):
             self._stopped = stopped
-            self.cancels = 0
+            #: Every id this bridge was asked to stop, in order. A count
+            #: was enough while the bridge stopped "the" consultation;
+            #: which one it was asked for is the whole question now that a
+            #: turn can hold two.
+            self.cancels: list = []
 
-        async def cancel(self):
-            self.cancels += 1
+        async def cancel(self, consultation_id=None):
+            self.cancels.append(consultation_id)
             return self._stopped
 
     def service_with_bridge(self, stopped=True):
@@ -355,11 +359,18 @@ class TestStopReachesTheConsultation:
         return service
 
     def test_a_consultation_id_reaches_the_bridge(self):
+        """And it reaches it *as an id*, not as a bare "stop something".
+
+        ``stop_task`` had the row's id in hand and dropped it, so the
+        bridge stopped whichever consultation had started most recently.
+        With two in flight that is the wrong one half the time, and the
+        other one could not be stopped at all.
+        """
         import asyncio
 
         service = self.service_with_bridge()
         result = asyncio.run(service.stop_task("consultation-abc-1"))
-        assert service.consultant_bridge.cancels == 1
+        assert service.consultant_bridge.cancels == ["consultation-abc-1"]
         assert result["status"] == "stopping"
 
     def test_stopping_one_that_is_not_running_says_so(self):
@@ -386,7 +397,7 @@ class TestStopReachesTheConsultation:
 
         service.session = Session()
         asyncio.run(service.stop_task("toolu_01ABC"))
-        assert service.consultant_bridge.cancels == 0
+        assert service.consultant_bridge.cancels == []
         assert service.session.stopped == ["toolu_01ABC"]
 
     def test_the_prefix_matches_what_the_bridge_mints(self):

@@ -421,11 +421,20 @@ class _Observer:
     with no observer at all; this object never means "no tab".
     """
 
-    def __init__(self, feed: Any, translator: Any) -> None:
+    def __init__(
+        self, feed: Any, translator: Any, consultation_id: str = ""
+    ) -> None:
         self._feed = feed
         #: The pump this tab's events came out of, for a consultant that
         #: needs to read the turn back off it.
         self.translator = translator
+        #: The id this consultation's row carries, which is the id ⏹ sends
+        #: back. Held here because :meth:`ConsultantBridge._tab` mints it
+        #: and the handler needs it to *pass to the consultant* — the
+        #: consultant is told rather than left to read it off this object,
+        #: since no sink here may be load-bearing and a consultation with
+        #: no browser still has to be stoppable.
+        self.consultation_id = consultation_id
 
     def __call__(self, raw: Any) -> None:
         self._feed(raw)
@@ -772,6 +781,7 @@ class ConsultantBridge:
         translator: Any,
         progress: dict | None = None,
         pending: set | None = None,
+        consultation_id: str = "",
     ) -> Any:
         """Feed each step through the shared pump, tagged with our id.
 
@@ -873,7 +883,7 @@ class ConsultantBridge:
                     agent_id,
                 )
 
-        return _Observer(observe, translator)
+        return _Observer(observe, translator, consultation_id)
 
     async def _push(self, event: Any, request_id: str) -> None:
         try:
@@ -1018,7 +1028,14 @@ class ConsultantBridge:
         # that distinction is the whole of what it has to say.
         progress = {"steps": 0, "text": 0}
         pending: set[Any] = set()
-        observer = self._observer(scope, translator, progress, pending)
+        # `task_id`, not `scope`. The two are the same until the `PreToolUse`
+        # hook catches the spawning call's id, and then they are not: the
+        # row's own identity stays minted precisely so ⏹ routes here rather
+        # than to the CLI, and ⏹ sends `task_id`. Handing the consultant
+        # `scope` would key it under a `toolu_` the stop path never sends.
+        observer = self._observer(
+            scope, translator, progress, pending, consultation_id=task_id
+        )
 
         if self._emit is None or self._turn() is None:
             # Built above the gate, deliberately: the observer is how the
@@ -1184,8 +1201,8 @@ class ConsultantBridge:
             agent_id, {self._schedule(reason, request_id)}, "the failure's reason"
         )
 
-    async def cancel(self) -> bool:
-        """Stop a running consultation. AG-13's ⏹, and it is real.
+    async def cancel(self, consultation_id: str | None = None) -> bool:
+        """Stop one running consultation. AG-13's ⏹, and it is real.
 
         Reached from ``stop_task``, which is why that method belongs to
         the ``subagent_stop`` surface. A button that did nothing would
@@ -1194,8 +1211,17 @@ class ConsultantBridge:
         method decorative: a consultation is stopped here, by the bridge,
         without ever reaching the CLI — what is unbuilt is stopping a
         subagent *`agy` itself* spawned.
+
+        **The id is the row's, and it is not optional in practice.** ⏹ on a
+        consultation row sends the ``task_id`` this bridge minted for it,
+        and ``stop_task`` passes it straight through, so a turn holding two
+        consultations stops the one the user clicked. It could not before:
+        the consultant held one handle for all of them, so ⏹ reached
+        whichever had started most recently and the other could not be
+        stopped at all. ``None`` reaches every live consultation and exists
+        for a caller with no row — a probe, or a test.
         """
-        return await self._consultant.cancel()
+        return await self._consultant.cancel(consultation_id)
 
     @property
     def available(self) -> bool:
@@ -1231,7 +1257,15 @@ class ConsultantBridge:
             # green "completed". See `_tab`.
             async with self._tab("Second opinion", anchor=anchor) as observer:
                 answer = await self._consultant.second_opinion(
-                    question, context, observer=observer
+                    question,
+                    context,
+                    observer=observer,
+                    # The row's id, passed rather than left to be read off
+                    # the observer: what a consultant registers under has to
+                    # work with no browser attached, and the observer is a
+                    # sink. `_tab` minted it; this is the same value ⏹ will
+                    # send back to `cancel`.
+                    consultation_id=observer.consultation_id,
                 )
         except (ConsultationError, MissingCredentialsError) as exc:
             return _text(f"The second opinion could not be obtained: {exc}")
@@ -1291,6 +1325,7 @@ class ConsultantBridge:
                     output_name=output_name,
                     aspect_ratio=aspect_ratio,
                     observer=observer,
+                    consultation_id=observer.consultation_id,
                 )
         except (ConsultationError, MissingCredentialsError) as exc:
             return _text(f"The image could not be generated: {exc}")

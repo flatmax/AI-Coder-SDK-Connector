@@ -25,6 +25,7 @@ Offline: no harness process, no credentials, no network.
 from __future__ import annotations
 
 import ast
+import asyncio
 import inspect
 from pathlib import Path
 
@@ -94,6 +95,63 @@ class FakeConversation:
 
     async def cancel(self):
         self.cancels += 1
+
+
+class Blocking(FakeConversation):
+    """A conversation that stays in flight until something stops it.
+
+    Every other double in this file answers immediately, which is why
+    nothing here ever held two consultations at once — and the shipped
+    consultant could not tell them apart, because it kept one
+    ``conversation`` slot for all of them. Two of these, started and left
+    unanswered, is the state ⏹ Stop is pressed in.
+
+    ``stderr`` is here rather than in a second subclass because the same
+    two-in-flight setup is what
+    :class:`TestAFailureCarriesTheHarnessesOwnWords` needs to show a
+    failure quoting its *own* harness.
+    """
+
+    def __init__(self, text: str = "ok", steps: list | None = None, stderr=()):
+        super().__init__(text, steps)
+        #: Set by :meth:`cancel`, and by a test that wants this one to
+        #: finish normally — the two ways a consultation ends.
+        self.released = asyncio.Event()
+        self._stderr = list(stderr)
+
+    @property
+    def connection(self):
+        return type("Conn", (), {"_stderr_lines": list(self._stderr)})()
+
+    async def receive_steps(self):
+        await self.released.wait()
+        for step in self._steps:
+            yield step
+
+    async def cancel(self):
+        self.cancels += 1
+        self.released.set()
+
+
+async def both_in_flight(*conversations):
+    """Wait until every conversation has been sent its prompt.
+
+    ``_drive`` registers the flight, sends, and then blocks on the stream,
+    so a recorded prompt means "this consultation is running and ⏹ can
+    reach it" without a test reading the consultant's private registry.
+    """
+    for _ in range(500):
+        if all(c.sent for c in conversations):
+            return
+        await asyncio.sleep(0.001)
+    raise AssertionError("the consultations never both reached the harness")
+
+
+async def settle(*tasks):
+    """Let the started consultations end, however they were going to."""
+    for task in tasks:
+        task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
 
 
 class FakeAgent:
@@ -791,6 +849,17 @@ class TestAFailureCarriesTheHarnessesOwnWords:
     def connection_with(self, lines):
         return type("Conn", (), {"_stderr_lines": list(lines)})()
 
+    def flight_with(self, connection):
+        """A finished consultation's record, which is what the tail reads.
+
+        The connection lives on the flight rather than on the consultant
+        since consultations became individually stoppable: two of them in
+        flight means two harnesses, and a failure has to quote its own.
+        """
+        from aic_dc.antigravity.consultant import _Flight
+
+        return _Flight(connection=connection)
+
     @pytest.mark.asyncio
     async def test_a_timeout_names_what_the_harness_said(self, repo, fake_agent):
         class Slow(FakeConversation):
@@ -820,17 +889,17 @@ class TestAFailureCarriesTheHarnessesOwnWords:
         self, consultant, fake_agent
     ):
         """An empty deque must not append a dangling header."""
-        assert consultant._stderr_tail() == ""
+        assert consultant._stderr_tail(self.flight_with(None)) == ""
 
     @pytest.mark.asyncio
     async def test_only_the_tail_is_quoted(self, consultant):
         """The deque holds 100 lines; a tool result is not a log file."""
         from aic_dc.antigravity.consultant import STDERR_TAIL_LINES
 
-        consultant._last_connection = self.connection_with(
-            [f"line-{i}" for i in range(40)]
+        flight = self.flight_with(
+            self.connection_with([f"line-{i}" for i in range(40)])
         )
-        tail = consultant._stderr_tail()
+        tail = consultant._stderr_tail(flight)
         assert "line-39" in tail and "line-0" not in tail
         assert tail.count("line-") == STDERR_TAIL_LINES
 
@@ -842,5 +911,201 @@ class TestAFailureCarriesTheHarnessesOwnWords:
             def _stderr_lines(self):
                 raise RuntimeError("gone")
 
-        consultant._last_connection = Exploding()
-        assert consultant._stderr_tail() == ""
+        assert consultant._stderr_tail(self.flight_with(Exploding())) == ""
+
+    @pytest.mark.asyncio
+    async def test_a_failure_quotes_its_own_harness_not_a_sibling_s(
+        self, repo, fake_agent
+    ):
+        """Two harnesses, and the words belong to the one that failed.
+
+        The tail used to be read off a single ``_last_connection`` on the
+        consultant, set by whichever consultation had most recently reached
+        ``_drive``. That is the right object exactly while one runs at a
+        time. With two, the timeout below would have been explained with
+        the *other* consultation's stderr — a diagnosis pointing at a
+        harness that is working, which is worse than no diagnosis.
+
+        No ids, because none are needed to state it: two consultations and
+        one timeout is the whole setup, and leaving them unnamed is what
+        lets this assertion run against the version that had the bug.
+        """
+        mine = Blocking(stderr=["Post ...: context canceled"])
+        theirs = Blocking(stderr=["the other harness is fine"])
+        fake_agent.responses = [mine, theirs]
+        target = Consultant(repo, credentials=KEYED, timeout_seconds=0.4)
+
+        one = asyncio.create_task(target.second_opinion("Well?"))
+        two = asyncio.create_task(target.second_opinion("And?"))
+        await both_in_flight(mine, theirs)
+
+        with pytest.raises(ConsultationError) as exc:
+            await one
+        assert "context canceled" in str(exc.value)
+        assert "the other harness is fine" not in str(exc.value)
+        await settle(two)
+
+
+class TestTwoConsultationsAreStoppedIndependently:
+    """AG-31: one ⏹, one consultation — the row's own.
+
+    A turn can hold two consultations at once. Nothing in the tool
+    definitions prevents it: a subagent's ``allowed_tools`` is never
+    narrowed, so a Claude subagent can ask for a second opinion while the
+    main turn is already waiting on one.
+
+    The shipped consultant kept a single ``conversation`` handle, so
+    whichever consultation had started most recently owned it and each
+    one's ``finally`` cleared it. ⏹ on either row therefore stopped the
+    younger consultation, and the older one could not be stopped at all —
+    while ``stop_task`` had the row's id in hand and dropped it. The
+    registry is what makes the button mean the row it is on.
+    """
+
+    async def start_two(self, consultant, fake_agent):
+        first, second = Blocking("the first answer"), Blocking("the second answer")
+        fake_agent.responses = [first, second]
+        tasks = (
+            asyncio.create_task(
+                consultant.second_opinion("Well?", consultation_id="consultation-1")
+            ),
+            asyncio.create_task(
+                consultant.second_opinion("And?", consultation_id="consultation-2")
+            ),
+        )
+        await both_in_flight(first, second)
+        return (first, second), tasks
+
+    @pytest.mark.asyncio
+    async def test_stop_reaches_the_named_one_and_no_other(
+        self, consultant, fake_agent
+    ):
+        """The whole defect, in three lines.
+
+        ``consultation-1`` started first, so under the single-slot shape
+        the handle belonged to ``consultation-2`` and this stopped that
+        one instead.
+        """
+        (first, second), tasks = await self.start_two(consultant, fake_agent)
+        assert await consultant.cancel("consultation-1") is True
+        assert (first.cancels, second.cancels) == (1, 0)
+        await settle(*tasks)
+
+    @pytest.mark.asyncio
+    async def test_stopping_the_younger_one_leaves_the_elder_running(
+        self, consultant, fake_agent
+    ):
+        """The same claim from the other side.
+
+        Stopping the most recently started consultation is the one case
+        the old shape got right, so on its own it proves nothing. What it
+        must also do is leave the first one alone.
+        """
+        (first, second), tasks = await self.start_two(consultant, fake_agent)
+        assert await consultant.cancel("consultation-2") is True
+        assert (first.cancels, second.cancels) == (0, 1)
+        await settle(*tasks)
+
+    @pytest.mark.asyncio
+    async def test_the_survivor_still_answers(self, consultant, fake_agent):
+        """A stop is not a turn-wide abort.
+
+        The other consultation belongs to somebody else's tool call, and
+        it returns its own answer rather than the stopped one's.
+        """
+        (first, second), tasks = await self.start_two(consultant, fake_agent)
+        await consultant.cancel("consultation-1")
+        second.released.set()
+        assert await tasks[1] == "the second answer"
+        await settle(tasks[0])
+
+    @pytest.mark.asyncio
+    async def test_an_unknown_id_stops_nothing_and_says_so(
+        self, consultant, fake_agent
+    ):
+        """``False``, which ``stop_task`` renders as ``not_running``.
+
+        The id names a consultation that finished or was never here.
+        Cancelling whatever happens to be live instead would stop a
+        stranger's consultation *and* report success for it.
+        """
+        (first, second), tasks = await self.start_two(consultant, fake_agent)
+        assert await consultant.cancel("consultation-nobody") is False
+        assert (first.cancels, second.cancels) == (0, 0)
+        await settle(*tasks)
+
+    @pytest.mark.asyncio
+    async def test_no_id_stops_all_of_them(self, consultant, fake_agent):
+        """The caller with no row: a probe, or a test, or a shutdown.
+
+        It holds no id, means "whatever is running", and gets all of it
+        rather than the most recent one.
+        """
+        (first, second), tasks = await self.start_two(consultant, fake_agent)
+        assert await consultant.cancel() is True
+        assert (first.cancels, second.cancels) == (1, 1)
+        await settle(*tasks)
+
+    @pytest.mark.asyncio
+    async def test_a_finished_consultation_cannot_be_stopped(
+        self, consultant, fake_agent
+    ):
+        """The registry empties, so ⏹ on a stale row is honest.
+
+        A row outlives its consultation in the browser — the answer is
+        there to read — and an entry left behind would answer ``stopping``
+        for a conversation that has already gone.
+        """
+        fake_agent.responses = [FakeConversation("an answer")]
+        await consultant.second_opinion("Well?", consultation_id="consultation-1")
+        assert await consultant.cancel("consultation-1") is False
+
+    @pytest.mark.asyncio
+    async def test_an_image_consultation_is_named_too(self, consultant, fake_agent):
+        """Both tools, because both get a row and both get a ⏹.
+
+        ``generate_image`` is the longer of the two calls and so the more
+        likely one to be stopped.
+        """
+        drawing = Blocking("drawing")
+        talking = Blocking("talking")
+        fake_agent.responses = [drawing, talking]
+        tasks = (
+            asyncio.create_task(
+                consultant.generate_image("a duck", consultation_id="consultation-1")
+            ),
+            asyncio.create_task(
+                consultant.second_opinion("Well?", consultation_id="consultation-2")
+            ),
+        )
+        await both_in_flight(drawing, talking)
+        assert await consultant.cancel("consultation-1") is True
+        assert (drawing.cancels, talking.cancels) == (1, 0)
+        await settle(*tasks)
+
+    @pytest.mark.asyncio
+    async def test_two_unnamed_consultations_do_not_collide(
+        self, consultant, fake_agent
+    ):
+        """A caller with no id must not evict another caller's flight.
+
+        The keys are minted per call for exactly this: a shared ``None``
+        key would put both consultations at the same entry, which is the
+        single slot back again under a different name — and the first
+        one's ``finally`` would drop the second one's entry.
+
+        Written without ``consultation_id`` on purpose, so it is the
+        *shipped* call that runs: against the single-slot consultant this
+        cancels the younger consultation only, which is the defect stated
+        in the one vocabulary that version has.
+        """
+        first, second = Blocking(), Blocking()
+        fake_agent.responses = [first, second]
+        tasks = (
+            asyncio.create_task(consultant.second_opinion("Well?")),
+            asyncio.create_task(consultant.second_opinion("And?")),
+        )
+        await both_in_flight(first, second)
+        assert await consultant.cancel() is True
+        assert (first.cancels, second.cancels) == (1, 1)
+        await settle(*tasks)
