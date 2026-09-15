@@ -1,4 +1,4 @@
-"""The authenticated HTTP MCP listener that makes ``claude`` a consultant.
+"""The authenticated HTTP MCP listener ``agy`` reaches this process through.
 
 ``specs5/plan-ag/decisions.md`` AG-1 wants both directions and only ever
 had one: ``agy`` can be consulted by a Claude master through an in-process
@@ -6,6 +6,19 @@ SDK MCP tool, and ``claude`` could not be consulted by anything, because
 ``agy`` reaches outside tools over MCP and nothing here spoke it. This
 module is the other direction — one ``second_opinion`` tool, served over
 authenticated HTTP on loopback, from *this* process.
+
+**Two servers on it now, not one** (AG-34). A CLI subprocess cannot be
+handed a Python callable, so once the ``agy`` transport needed the six
+``aic-dc`` repo-intelligence tools this socket was the only route they
+had. They are a *second* MCP server on the same socket rather than six more
+tools on the consultation server, and the split is load-bearing three
+times over: ``agy``'s standing-rule grammar is ``mcp(<server>/<tool>)``, so
+one name is what a user grants or denies; the gate ungates ``aic-dc`` and
+must not thereby ungate ``second_opinion``; and the consultation server is
+offered only when this install has a Claude CLI to run, while repo
+intelligence is offered always. One socket because the port, the bearer,
+the gate and the shutdown path are all already here — a second listener
+would buy nothing and cost each of them twice.
 
 Serving it from this process is the decision AG-22 turned on, and the
 reason is the credential rather than the convenience: this process is the
@@ -59,11 +72,14 @@ from typing import Any
 # install that cannot exist.
 import uvicorn
 from mcp.server.fastmcp import Context, FastMCP
-from mcp.types import CallToolResult, TextContent
+from mcp.types import CallToolResult, TextContent, ToolAnnotations
+from starlette.applications import Starlette
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse, PlainTextResponse
+from starlette.routing import Route
 
+from aic_dc import index_tools
 from aic_dc.claude_code.consultant import ConsultationError
 
 logger = logging.getLogger(__name__)
@@ -82,6 +98,19 @@ SERVER_NAME = "aic-dc-claude"
 #: Streamable HTTP is mounted here by the SDK's own app factory. The path
 #: is part of the URL written into the config, so it is named once.
 MCP_PATH = "/mcp"
+
+#: The second server on this socket: AIC⚡DC's own six read-only tools, under
+#: the one name every transport files them under. Spelled from
+#: :mod:`aic_dc.index_tools` rather than repeated, because it is also what
+#: ungates them — ``antigravity.permissions.is_index_read`` reads this string
+#: out of ``args.ServerName``, and a name that disagreed with the config
+#: written here would turn each of the six into a permission dialog.
+INDEX_SERVER_NAME = index_tools.SERVER_NAME
+
+#: Where that server is mounted. A path of its own, because ``agy`` is
+#: given one ``serverUrl`` per server and the two must be distinguishable
+#: on the wire.
+INDEX_PATH = "/index"
 
 #: Loopback, always. There is no deployment of this that wants a second
 #: machine to reach an endpoint that spends the account's subscription.
@@ -234,6 +263,36 @@ class _Grant:
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
+@dataclass(frozen=True)
+class _Served:
+    """One MCP server on this socket: its name, its path, its transports.
+
+    The name is here for the log line that names which server's session
+    table the SDK stopped exposing; the path is what the bearer gate
+    answers on and what :meth:`ConsultationListener.config_entry` writes.
+    """
+
+    name: str
+    path: str
+    manager: Any
+
+
+class _ManagerApp:
+    """A session manager as an ASGI app.
+
+    The same one line ``mcp.server.fastmcp.server.StreamableHTTPASGIApp``
+    is, written here so that both servers are mounted by one code path —
+    one is a ``FastMCP`` and the other a low-level ``Server``, and the only
+    thing they need to have in common is this.
+    """
+
+    def __init__(self, manager: Any) -> None:
+        self._manager = manager
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        await self._manager.handle_request(scope, receive, send)
+
+
 @dataclass(eq=False)
 class _InFlight:
     """One running consultation, and how it came to stop.
@@ -257,33 +316,81 @@ class ConsultationListener:
     Not one listener per ``agy`` spawn: the port is written into each
     spawn's own config anyway, so a second socket would buy nothing and
     cost a shutdown path per spawn.
+
+    Parameters
+    ----------
+    consultant_factory:
+        Called with no arguments for each consultation. A factory rather
+        than one shared consultant because ``ClaudeConsultant`` holds the
+        running task on itself for its own ``cancel()``, so a shared
+        instance would let one session's stop reach another's consultation.
+        ``None`` serves no consultation server at all, which is what an
+        install with no Claude CLI gets — and is why it is optional:
+        the repo-intelligence server below has to be reachable on that
+        install too, and it used to go missing with it.
+    index_bridge:
+        The :class:`~aic_dc.claude_code.mcp_server.McpBridge` whose six
+        read-only tools become the second MCP server on this socket
+        (AG-34). One object rather than a factory, unlike the consultant:
+        it is stateless between calls and holds only callables into indexes
+        this process already owns. ``None`` serves no index server.
+
+    At least one of the two must be given; a listener with nothing to serve
+    raises on :meth:`start` rather than binding a port that answers 404 to
+    everything.
     """
 
     def __init__(
         self,
-        consultant_factory: Callable[[], Any],
+        consultant_factory: Callable[[], Any] | None = None,
         *,
+        index_bridge: Any = None,
         budget: int = TURN_BUDGET,
         attempts: int = TURN_ATTEMPTS,
         idle_timeout: float = SESSION_IDLE_TIMEOUT,
         host: str = HOST,
     ) -> None:
-        #: Called with no arguments for each consultation. A factory
-        #: rather than one shared consultant because ``ClaudeConsultant``
-        #: holds the running task on itself for its own ``cancel()``, so a
-        #: shared instance would let one session's stop reach another's
-        #: consultation.
         self._consultant_factory = consultant_factory
+        self._index_bridge = index_bridge
         self._budget = int(budget)
         self._attempts = max(int(budget), int(attempts))
         self._host = host
         self._idle_timeout = float(idle_timeout)
         self._grants: dict[str, _Grant] = {}
-        self._mcp: Any = None
+        #: Every MCP server this listener serves, in mount order. A list
+        #: rather than one attribute because the session tables this module
+        #: reclaims from are per-manager, and a reclamation that only
+        #: reached the first would be the leak U1 and P8 were about,
+        #: reintroduced by the change that added the second server.
+        self._served: list[_Served] = []
         self._server: Any = None
         self._serving: asyncio.Task[Any] | None = None
         self._sock: socket.socket | None = None
         self._port: int | None = None
+
+    # ------------------------------------------------------------------
+    # What is served
+    # ------------------------------------------------------------------
+
+    @property
+    def serves_consultation(self) -> bool:
+        """Whether ``second_opinion`` is on this socket."""
+        return self._consultant_factory is not None
+
+    @property
+    def serves_index(self) -> bool:
+        """Whether the six ``aic-dc`` tools are on this socket."""
+        return self._index_bridge is not None
+
+    @property
+    def paths(self) -> tuple[str, ...]:
+        """The mounted paths, and the only ones the bearer gate answers on."""
+        paths: list[str] = []
+        if self.serves_consultation:
+            paths.append(MCP_PATH)
+        if self.serves_index:
+            paths.append(INDEX_PATH)
+        return tuple(paths)
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -356,10 +463,11 @@ class ConsultationListener:
                 self._sock.close()
             self._sock = None
 
-    def _build_app(self) -> Any:
+    def _build_consultation_mcp(self) -> Any:
+        """``second_opinion``, the server AG-22 built this listener for."""
         # Stateful. See the module docstring: this single argument is what
         # makes cancellation route at all.
-        mcp = FastMCP(SERVER_NAME, stateless_http=False)
+        mcp = FastMCP(SERVER_NAME, stateless_http=False, streamable_http_path=MCP_PATH)
 
         # **Annotated ``-> CallToolResult``, and that is load-bearing.**
         # The refusals below have to travel with ``isError`` set correctly,
@@ -380,53 +488,195 @@ class ConsultationListener:
             """
             return await self._consult(ctx, question, context)
 
-        app = mcp.streamable_http_app()
-        # Kept because the SDK's session table is the only place that knows
-        # how many transports are alive, and a listener that cannot answer
-        # that cannot be shown not to leak.
-        self._mcp = mcp
-        # Set here rather than passed to ``FastMCP``, which has no
-        # settings key for it, and set before any traffic because the
-        # deadline is read when a session is created.
-        mcp.session_manager.session_idle_timeout = self._idle_timeout
-        # Both tables this module reclaims from are private to the SDK. A
-        # rename in a later release would turn eviction into a silent
-        # no-op, which is the one failure this module keeps being bitten
-        # by, so the check is made once here where saying so still helps.
-        absent = [
-            name
-            for name in ("_server_instances", "_session_owners")
-            if not hasattr(mcp.session_manager, name)
-        ]
-        if absent:  # pragma: no cover - a future SDK, not a reachable state
-            logger.warning(
-                "The MCP SDK no longer exposes %s: consultation transports "
-                "cannot be reclaimed and will accumulate for the life of "
-                "the host.",
-                ", ".join(absent),
+        return mcp
+
+    def _build_index_server(self) -> Any:
+        """The six ``aic-dc`` tools, from their shared specs.
+
+        Every name, description and schema comes from
+        :data:`aic_dc.index_tools.SPECS` — the same strings the Claude
+        engine's ``@tool`` calls render, which is the whole point of AG-34:
+        a model asked the same question is told about the same tool in the
+        same words whichever engine the user picked.
+
+        **The low-level ``Server`` rather than ``FastMCP``, because of the
+        schemas.** ``FastMCP.add_tool`` has no explicit-schema argument at
+        all: it derives ``inputSchema`` from the handler's *signature*, so
+        six tools sharing one handler shape would advertise one schema
+        between them, and the per-argument prose — *"e.g.
+        'src/aic_dc/claude_code'"*, the language list — would not reach the
+        model on this transport. ``list_tools`` here returns the spec
+        verbatim, and ``call_tool`` validates the arguments against that
+        same schema before the bridge sees them, which is the check the
+        Claude CLI performs on the other transport.
+        """
+        from mcp.server.lowlevel import Server
+        from mcp.types import Tool as McpTool
+
+        server = Server(INDEX_SERVER_NAME)
+
+        @server.list_tools()
+        async def list_tools() -> list[McpTool]:
+            return [
+                McpTool(
+                    name=spec.name,
+                    description=spec.description,
+                    inputSchema=spec.schema,
+                    # The declaration that makes ungating these six a
+                    # narrowing rather than a hole, stated to the client as
+                    # well as to our own gate.
+                    annotations=ToolAnnotations(readOnlyHint=True),
+                )
+                for spec in index_tools.SPECS
+            ]
+
+        @server.call_tool()
+        async def call_tool(name: str, arguments: dict[str, Any]) -> CallToolResult:
+            spec = index_tools.by_name(name)
+            if spec is None:  # pragma: no cover - the client read list_tools
+                return _no_answer(f"{INDEX_SERVER_NAME} has no tool called {name!r}.")
+            # Plain text, not the bridge's MCP envelope. The bridge answers
+            # in ``{"content": [...]}`` because that is what the Claude SDK
+            # path passes straight through; wrapping it again here would
+            # show the model a content array nested inside a content array.
+            return _answer(await spec.invoke_text(self._index_bridge, arguments))
+
+        return server
+
+    def _build_app(self) -> Any:
+        """The one ASGI app, over however many MCP servers are configured.
+
+        **One app with both routes, never a ``Mount`` per server.** A
+        session manager is started by its app's ``lifespan``, and Starlette
+        does not run a *mounted* sub-app's lifespan — lifespan scope carries
+        no path, so nothing routes it there. Mounting would therefore serve
+        two endpoints whose session managers had never been entered, and
+        every request to either would fail. One lifespan entering every
+        manager is what makes two servers on one socket work at all.
+        """
+        served: list[_Served] = []
+        if self.serves_consultation:
+            mcp = self._build_consultation_mcp()
+            # Built through ``FastMCP`` for the reason AG-22 chose it: the
+            # decorator's derived schema is right for ``second_opinion``,
+            # whose two arguments are what its signature says. Calling the
+            # app factory is also what constructs its session manager.
+            mcp.streamable_http_app()
+            manager = mcp.session_manager
+            # Set here rather than passed to ``FastMCP``, which has no
+            # settings key for it, and set before any traffic because the
+            # deadline is read when a session is created.
+            manager.session_idle_timeout = self._idle_timeout
+            served.append(_Served(SERVER_NAME, MCP_PATH, manager))
+        if self.serves_index:
+            from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
+
+            served.append(
+                _Served(
+                    INDEX_SERVER_NAME,
+                    INDEX_PATH,
+                    StreamableHTTPSessionManager(
+                        app=self._build_index_server(),
+                        # Stateful here too, and for AG-22's measured reason:
+                        # a cancellation arriving on its own POST has no
+                        # session to be routed in without one. These calls
+                        # are fast, so the cancellation matters less than it
+                        # does next door — but a second answer to "is this
+                        # transport stateful?" on one socket is a difference
+                        # nothing here wants to reason about.
+                        stateless=False,
+                        session_idle_timeout=self._idle_timeout,
+                    ),
+                )
             )
+        if not served:
+            raise RuntimeError(
+                "The listener has neither a consultant nor an index bridge, "
+                "so it has nothing to serve"
+            )
+
+        for entry in served:
+            # Both tables this module reclaims from are private to the SDK.
+            # A rename in a later release would turn eviction into a silent
+            # no-op, which is the one failure this module keeps being bitten
+            # by, so the check is made once here where saying so still helps.
+            absent = [
+                name
+                for name in ("_server_instances", "_session_owners")
+                if not hasattr(entry.manager, name)
+            ]
+            if absent:  # pragma: no cover - a future SDK, not a reachable state
+                logger.warning(
+                    "The MCP SDK no longer exposes %s on %s: its transports "
+                    "cannot be reclaimed and will accumulate for the life of "
+                    "the host.",
+                    ", ".join(absent),
+                    entry.name,
+                )
+
+        @contextlib.asynccontextmanager
+        async def lifespan(_app: Any) -> Any:
+            async with contextlib.AsyncExitStack() as stack:
+                for entry in served:
+                    await stack.enter_async_context(entry.manager.run())
+                yield
+
+        app = Starlette(
+            routes=[Route(entry.path, endpoint=_ManagerApp(entry.manager)) for entry in served],
+            lifespan=lifespan,
+        )
+        # Kept because the SDK's session tables are the only place that know
+        # how many transports are alive, and a listener that cannot answer
+        # that cannot be shown not to leak. Assigned after the app is built
+        # so that a half-built listener does not look like a serving one.
+        self._served = served
         app.add_middleware(_BearerGate, listener=self)
         return app
 
     @property
+    def managers(self) -> dict[str, Any]:
+        """Each served server's session manager, by MCP server name.
+
+        Empty before :meth:`start`, because the managers are built with the
+        app. Here so that a caller wanting one server's transport state —
+        the idle deadline, the live session table — can name the server it
+        means instead of reaching into :attr:`_served` and indexing by a
+        position that changes the moment one half is not served.
+        """
+        return {entry.name: entry.manager for entry in self._served}
+
+    @property
     def sessions(self) -> dict[str, Any]:
-        """The SDK's live transports, keyed by MCP session id."""
-        if self._mcp is None:
-            return {}
-        return getattr(self._mcp.session_manager, "_server_instances", {})
+        """The SDK's live transports, keyed by MCP session id.
+
+        Merged across every served server, and therefore a **copy** — which
+        is why :meth:`_forget` reaches for the real tables instead of
+        popping from this.
+        """
+        merged: dict[str, Any] = {}
+        for entry in self._served:
+            merged.update(getattr(entry.manager, "_server_instances", {}))
+        return merged
 
     def _forget(self, sid: str) -> None:
-        """Drop one session from both of the SDK's private tables.
+        """Drop one session from both of the SDK's private tables, on every server.
 
         Guarded, because a failed lookup here would otherwise propagate out
         of a subprocess teardown; announced at startup rather than silently,
         because a reclamation that quietly stops happening is a leak that
         says nothing.
+
+        Every server, and popping from the managers rather than from
+        :attr:`sessions`: that property merges into a new dict now, so
+        popping from it would discard an entry from a copy and leave the
+        transport exactly where it was — the leak this module exists to
+        avoid, spelled as a one-line no-op.
         """
-        self.sessions.pop(sid, None)
-        owners = getattr(getattr(self._mcp, "session_manager", None), "_session_owners", None)
-        if owners is not None:
-            owners.pop(sid, None)
+        for entry in self._served:
+            getattr(entry.manager, "_server_instances", {}).pop(sid, None)
+            owners = getattr(entry.manager, "_session_owners", None)
+            if owners is not None:
+                owners.pop(sid, None)
 
     # ------------------------------------------------------------------
     # Tokens and turns — all driven by the host, never by the model
@@ -552,19 +802,28 @@ class ConsultationListener:
         return cancelled
 
     def config_entry(self, token: str) -> dict[str, Any]:
-        """This server as ``agy``'s ``mcp_config.json`` wants it.
+        """Every server on this socket, as ``agy``'s ``mcp_config.json`` wants it.
 
         ``serverUrl`` rather than ``url`` — measured; ``url`` is not read
         — with the credential in a sibling ``headers`` object.
+
+        **One entry per server actually served**, which is what keeps an
+        install with no Claude CLI from losing its repo intelligence to an
+        unrelated absence. The document is written whole and this method is
+        the whole of it, so a config that named only ``aic-dc-claude`` would
+        make the six ``aic-dc`` tools conditional on a consultant they have
+        nothing to do with.
         """
         if self._port is None:
             raise RuntimeError("The consultation listener is not running")
+        base = f"http://{self._host}:{self._port}"
         return {
             "mcpServers": {
-                SERVER_NAME: {
-                    "serverUrl": f"http://{self._host}:{self._port}{MCP_PATH}",
+                entry.name: {
+                    "serverUrl": f"{base}{entry.path}",
                     "headers": {"Authorization": f"Bearer {token}"},
                 }
+                for entry in self._served
             }
         }
 
@@ -768,7 +1027,7 @@ class _EmbeddedServer(uvicorn.Server):
 
 
 class _BearerGate(BaseHTTPMiddleware):
-    """Bearer on ``/mcp``; everything else is not this server's business.
+    """Bearer on the served paths; everything else is not this server's business.
 
     Two paths, deliberately separated. ``agy`` probes
     ``/.well-known/oauth-protected-resource`` — twice, and with no
@@ -787,7 +1046,12 @@ class _BearerGate(BaseHTTPMiddleware):
         self._listener = listener
 
     async def dispatch(self, request: Request, call_next: Any) -> Any:
-        if not request.url.path.startswith(MCP_PATH):
+        # Every served path, not just the consultation one. A gate that
+        # still named `/mcp` alone would 404 the index server before the
+        # router ever saw it, and the six tools would be advertised in the
+        # config and unreachable on the wire.
+        path = request.url.path
+        if not any(path.startswith(served) for served in self._listener.paths):
             return PlainTextResponse("Not Found", status_code=404)
         header = request.headers.get("authorization", "")
         grant = self._listener.resolve(header.removeprefix("Bearer ").strip())
@@ -829,19 +1093,27 @@ class _BearerGate(BaseHTTPMiddleware):
         if session_id and session_id not in grant.sessions:
             grant.sessions.add(session_id)
             # And this set is the tripwire for the filter above. One spawn
-            # is measured to open exactly one session, so a second one
-            # under the same bearer means the filter stopped matching — a
-            # later ``agy`` that no longer sends the header — or that
-            # ``agy`` re-initialised. Both are worth hearing about at the
-            # moment they happen rather than inferring, months later, from
-            # a transport count that grew.
-            if len(grant.sessions) > 1:
+            # is measured to open exactly one session **per server**, so
+            # more than that under the same bearer means the filter stopped
+            # matching — a later ``agy`` that no longer sends the header —
+            # or that ``agy`` re-initialised. Both are worth hearing about
+            # at the moment they happen rather than inferring, months
+            # later, from a transport count that grew.
+            #
+            # Counted against the servers served rather than against one,
+            # because AG-34 put a second server on this socket: `agy` opens
+            # a session on each, so a fixed ceiling of one would have turned
+            # this tripwire into a warning on every single spawn — which is
+            # a tripwire nobody reads.
+            expected = max(len(self._listener.paths), 1)
+            if len(grant.sessions) > expected:
                 logger.warning(
                     "The bearer for agy session %s now holds %d MCP sessions; "
-                    "one spawn should open one. The %r filter may no longer "
+                    "one spawn should open %d. The %r filter may no longer "
                     "be matching.",
                     grant.session_id,
                     len(grant.sessions),
+                    expected,
                     DISCOVER_METHOD,
                 )
         return response

@@ -128,6 +128,21 @@ class AntigravityService:
         is: there is one index over one tree, so there is one queue of
         files owed a re-parse. ``None`` leaves the index unfed, which is
         what this engine did until 2026-09-06.
+    index_sources:
+        ``ClaudeCodeService.index_sources`` — the five of
+        :class:`~aic_dc.claude_code.mcp_server.McpBridge`'s callables that
+        describe the working tree rather than an engine. Given them, this
+        adapter builds its own :attr:`mcp_bridge` and serves the same six
+        repo-intelligence tools the Claude engine has served since phase 4
+        (AG-34). ``None`` leaves :attr:`mcp_bridge` ``None`` and the tools
+        unserved, which is what this engine did until 2026-09-15.
+
+        The bridge is built here and not shared, though five of its seven
+        arguments are, because the other two must not be: ``review_state``
+        and ``ui_state`` are read off *this* adapter's ``ReviewMode`` and
+        ``_viewer``. A shared bridge would answer ``review_state`` with
+        whichever engine built it, which is a wrong answer that looks
+        exactly like a right one.
     """
 
     #: Where this transport's transcript mirror lives, under ``.aic-dc/``.
@@ -152,6 +167,7 @@ class AntigravityService:
         event_callback: Any = None,
         symbol_index: Any = None,
         reindexer: Any = None,
+        index_sources: dict[str, Any] | None = None,
         credentials: Credentials | None = None,
         model: str = options.DEFAULT_MODEL,
     ) -> None:
@@ -161,6 +177,7 @@ class AntigravityService:
         self._collab: Any = None
         self.symbol_index = symbol_index
         self.reindexer = reindexer
+        self._index_sources = index_sources
 
         repo_root = getattr(config, "repo_root", None) or Path.cwd()
         self._repo_root = Path(repo_root)
@@ -225,6 +242,79 @@ class AntigravityService:
             restricted=self._check_localhost_only,
         )
 
+        # AG-34. Built last, because two of its seven callables read state
+        # the lines above create — `review` and `_viewer`. `None` when this
+        # adapter was given no index sources, which is a supported
+        # construction: every test that builds this class without `main.py`
+        # does it, and an engine with no repo intelligence is the engine
+        # this one was until today rather than a broken one.
+        self.mcp_bridge = self._build_mcp_bridge()
+
+    def _build_mcp_bridge(self) -> Any:
+        """This engine's :class:`McpBridge`, or ``None`` with no tree sources.
+
+        Same class, same handlers, same six tools as the Claude engine — the
+        bridge was written transport-neutral by AG-4 and took provider
+        *callables* precisely so that this would be a construction rather
+        than a port. What AG-4 did not do was build it anywhere but the
+        Claude adapter, which is why the tools reached one engine of three
+        for eleven days (AG-34).
+        """
+        if not self._index_sources:
+            return None
+        from aic_dc.claude_code.mcp_server import McpBridge
+
+        return McpBridge(
+            **self._index_sources,
+            review_state=self.get_review_state,
+            ui_state=self._ui_state_snapshot,
+        )
+
+    def _index_tool_callables(self) -> tuple[Any, ...]:
+        """The six index tools for the imminent session, or nothing (AG-34).
+
+        Empty with no bridge, which is the honest answer for a host that
+        gave this service no tree sources — and it is the *same* emptiness
+        ``tools`` has always had on this transport, so a session built that
+        way is byte-for-byte the session phase 3 built.
+
+        Never reached on the ``agy`` transport, which overrides
+        :meth:`_ensure_session` entirely — and could not use this if it did,
+        because that engine is a subprocess and a subprocess cannot be
+        handed a Python callable. The same six specs reach it over the
+        consultation listener's second MCP server instead. One producer per
+        transport, one spec table behind all three.
+        """
+        if self.mcp_bridge is None:
+            return ()
+        from aic_dc.antigravity import options
+
+        return options.index_tool_callables(self.mcp_bridge)
+
+    def _ui_state_snapshot(self) -> dict[str, Any]:
+        """What the user is pointing at, for the ``ui_state`` tool.
+
+        The same three keys the Claude adapter reports, read off this
+        engine's own state, because the tool has to mean the same thing on
+        whichever engine the user picked in Settings — that is AG-33's
+        argument about framing, arriving at the tool that answers the same
+        question on demand.
+
+        Paths and modes only, never file content: the agent reads files with
+        its own tools, and this answers the one question those cannot
+        (``specs5/plan/decisions.md`` CC-14). No file list, for CC-21's
+        reason — pointing at a file is something the user does in the prompt,
+        where the agent already sees it, so there is no browser-side set to
+        report. The tool's own description says otherwise and is left saying
+        it, verbatim, so that the extraction into `index_tools` stayed
+        provably byte-exact; recorded as AG-R-34.
+        """
+        return {
+            "viewer": dict(self._viewer) if self._viewer else None,
+            "review_state": self.get_review_state(),
+            "permission_mode": self._permission_mode,
+        }
+
     def _build_session_store(self) -> Any:
         """The repo-local transcript mirror's store, or ``None``.
 
@@ -274,10 +364,14 @@ class AntigravityService:
         JSON value would replace the index with something that has no
         ``lsp_get_hover``.
 
-        There is no ``_mark_symbol_index_ready`` counterpart. That flag
-        feeds the Claude adapter's symbol-map surface, which this engine
-        does not serve; adding a field nothing reads would be the stub
-        this class is written to avoid.
+        There is still no ``_mark_symbol_index_ready`` counterpart, and the
+        reason changed on 2026-09-15. It used to be that this engine did not
+        serve the symbol map, so a readiness flag here would have been a
+        field nothing read. It now serves it (AG-34) — and readiness comes
+        from :attr:`mcp_bridge`'s injected
+        ``ClaudeCodeService.index_sources``, because readiness is a fact
+        about the one index over the one tree and not about an engine. A
+        flag per adapter would be three answers to a question that has one.
         """
         self.symbol_index = symbol_index
         self.review.symbol_index = symbol_index
@@ -324,6 +418,7 @@ class AntigravityService:
         if self._session is not None and self._session.started:
             return self._session
         target = await self._resume_target(resume)
+        index_tools_for_session = self._index_tool_callables()
         self._gate = AntigravityPermissionGate(
             self._repo_root,
             broadcast=self._broadcast,
@@ -347,12 +442,24 @@ class AntigravityService:
             # of its state in one place, and so a test that forgets it
             # cannot silently write grants into the developer's own config.
             config_dir=self._config_dir,
+            # AG-34. Only the names this session actually registered, so a
+            # session with no bridge does not ungate a bare `symbol_map` —
+            # see the gate's constructor for why the bare name is evidence
+            # on this transport and not on `agy`'s.
+            own_read_tools=frozenset(
+                tool.__name__ for tool in index_tools_for_session
+            ),
         )
         session = AntigravitySession(
             self._repo_root,
             credentials=self._credentials,
             model=self._model,
             decide_hook=self._gate.as_hook(),
+            # AG-4's channel, fed at last (AG-34). It has taken a `tools`
+            # argument since phase 3 and nothing ever produced one, which is
+            # why the engine the user picked decided whether they had a
+            # symbol map.
+            tools=index_tools_for_session,
             resume=target,
         )
         await session.start()

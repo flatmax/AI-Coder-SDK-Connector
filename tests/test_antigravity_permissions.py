@@ -30,6 +30,8 @@ import asyncio
 
 import pytest
 
+from aic_dc import index_tools
+from aic_dc.agy import tools as agy_tools
 from aic_dc.antigravity import permissions as ag_permissions
 from aic_dc.antigravity.options import MUTATING_TOOLS
 from aic_dc.antigravity.permissions import (
@@ -960,3 +962,133 @@ class TestAnMcpCallCanBeGranted:
             assert g.pre_verdict("call_mcp_tool", other) is None, other
         # Nor to the shell, which is the other tool in the `exec` class.
         assert g.pre_verdict("run_command", {"CommandLine": "ls"}) is None
+
+
+# ----------------------------------------------------------------------
+# AG-34: our own six read tools, on both transports
+# ----------------------------------------------------------------------
+
+
+class TestOurOwnReadToolsNeverRaiseADialog:
+    """The narrowing that has to exist before the tools are worth serving.
+
+    Every ``aic-dc`` call on the ``agy`` transport arrives as
+    ``call_mcp_tool``, which is classified ``exec`` and sits in
+    ``ALWAYS_ASK`` — correctly, because it dispatches an open set. So
+    without this a ``symbol_map`` opens a permission dialog for a tool that
+    reads the index this process already holds and cannot do anything else.
+    Six of those in a turn is R-12's click-through training with our own
+    name on it, and the user learns to approve ``call_mcp_tool`` without
+    reading it.
+
+    The Claude engine has had this since phase 4, as one line in
+    ``can_use_tool`` keyed on the server name. These are the same decision
+    reaching the two transports that now serve the same six tools.
+    """
+
+    def call(self, tool="symbol_map", server=None, **extra):
+        return {
+            "ServerName": index_tools.SERVER_NAME if server is None else server,
+            "ToolName": tool,
+            "Arguments": {"path_prefix": "src"},
+            **extra,
+        }
+
+    @pytest.mark.parametrize("tool", sorted(index_tools.TOOL_NAMES))
+    def test_each_of_the_six_is_allowed_with_no_dialog(self, tmp_path, tool):
+        """Through ``run``, not ``pre_verdict``, because the hang is the bug.
+
+        No responder is started: a call that reaches the broker waits on a
+        human forever, so the timeout is the assertion.
+        """
+        recorder = Recorder()
+        g = gate(tmp_path, recorder)
+
+        async def go():
+            async with asyncio.timeout(5):
+                return await g.run(None, FakeCall("call_mcp_tool", self.call(tool)))
+
+        result = asyncio.run(go())
+        assert result.allow is True
+        assert recorder.requests() == [], f"{tool} raised a dialog"
+
+    def test_the_consultant_tools_still_reach_the_dialog(self, tmp_path):
+        """They sit on the same seam **on purpose**.
+
+        ``second_opinion`` spends money on another vendor's model and
+        ``generate_image`` writes a file, so both are things the user gets
+        asked about. The narrowing is scoped to a server name *and* a tool
+        name for exactly this: it must not widen to "anything of ours".
+        """
+        g = gate(tmp_path, Recorder())
+        for tool in ("second_opinion", "generate_image"):
+            args = self.call(tool, server="aic-dc-antigravity")
+            assert g.pre_verdict("call_mcp_tool", args) is None, tool
+
+    def test_a_third_party_server_cannot_borrow_the_tool_names(self, tmp_path):
+        """Both halves are checked, and the server half is why.
+
+        ``symbol_map`` on somebody else's MCP server is somebody else's
+        tool. Our own is reachable only through a config
+        ``agy.roots.write_mcp_config`` writes into a root this app owns, so
+        the name pair is evidence and either half alone is not.
+        """
+        g = gate(tmp_path, Recorder())
+        assert g.pre_verdict("call_mcp_tool", self.call(server="not-ours")) is None
+        assert g.pre_verdict("call_mcp_tool", self.call(tool="delete_repo")) is None
+        assert g.pre_verdict("call_mcp_tool", {}) is None
+
+    def test_a_bare_name_is_not_enough_on_the_agy_transport(self, tmp_path):
+        """The default this gate refuses to make.
+
+        ``AgyService`` registers nothing in-process — the tools are on a
+        loopback MCP server the binary calls — so a bare ``symbol_map``
+        arriving here is a tool of the *binary's* that happens to share the
+        spelling. Defaulting ``own_read_tools`` to
+        ``index_tools.TOOL_NAMES`` would be the gate deciding it recognises
+        something on evidence it does not have.
+        """
+        g = gate(tmp_path, Recorder())
+        assert g.pre_verdict("symbol_map", {"path_prefix": "src"}) is None
+
+    @pytest.mark.parametrize("tool", sorted(index_tools.TOOL_NAMES))
+    def test_a_bare_name_is_enough_when_this_session_registered_it(
+        self, tmp_path, tool
+    ):
+        """On the SDK transport the callable *is* ours by construction.
+
+        There is no server name to check because there is no server: the
+        harness was handed our Python objects, so the name it calls back
+        with is the one we set on ``__name__``.
+        """
+        g = gate(tmp_path, Recorder(), own_read_tools=index_tools.TOOL_NAMES)
+        assert g.pre_verdict(tool, {}) == (True, "")
+
+    def test_the_registered_set_does_not_ungate_anything_else(self, tmp_path):
+        """A session naming its own tools has not named the write seam."""
+        g = gate(tmp_path, Recorder(), own_read_tools=index_tools.TOOL_NAMES)
+        for tool in sorted(MUTATING_TOOLS):
+            assert g.pre_verdict(tool, {}) is None, tool
+
+    def test_the_check_runs_before_the_class_and_the_always_ask_table(self, tmp_path):
+        """Which is the whole reason it is first in ``pre_verdict``.
+
+        ``call_mcp_tool`` is in ``ALWAYS_ASK`` and classified ``exec``, so a
+        check placed after either of those would never fire — the tools
+        would be served and every call would still ask.
+        """
+        assert ag_permissions.TOOL_CLASSES[agy_tools.MCP_TOOL] == "exec"
+        assert agy_tools.MCP_TOOL in ALWAYS_ASK
+
+    def test_the_predicate_is_named_rather_than_inlined(self, tmp_path):
+        """``is_index_read`` is what the ``agy`` gate server reaches for too.
+
+        Both Antigravity transports funnel through ``pre_verdict``, and the
+        subscription one arrives from ``gate_server``'s hook — so the check
+        being a module function rather than a method body is what keeps one
+        answer to "is this ours".
+        """
+        assert ag_permissions.is_index_read(
+            agy_tools.MCP_TOOL, self.call("doc_outline")
+        )
+        assert not ag_permissions.is_index_read("view_file", {})

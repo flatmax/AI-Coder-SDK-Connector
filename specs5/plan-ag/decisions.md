@@ -282,6 +282,26 @@ index objects, which is what makes the same six tools serve both engines. The `@
 wrappers are Claude-specific packaging around functions that are not; only the packaging is
 per-engine.
 
+> **Corrected and completed 2026-09-15 by [AG-34](#ag-34).** Two claims above needed amending, and
+> the design decision itself did not.
+>
+> - **"both engines" was two transports of three.** `agy` drives a **CLI subprocess** on the user's
+>   subscription; there is no in-process config to hand a callable to, so this route cannot reach it
+>   by any amount of wiring. The six tools get an MCP server there after all — a second one on the
+>   authenticated loopback listener AG-22 built, which did not exist when this was written. That is
+>   chronology, not error.
+> - **"derives their schemas from signatures" is true and is not the path to use.** It reads the
+>   signature through `FunctionDeclaration.from_callable_with_api_option`, so six handlers sharing
+>   one `**arguments` shape would advertise one empty schema between them and every per-argument
+>   description would be dropped. `ToolWithSchema(fn, input_schema)` takes the schema **verbatim**,
+>   and `schema_utils.normalize_schema` was measured to return all six of ours unchanged. The name
+>   comes from `__name__` and the *description from `__doc__`* — there is no description argument
+>   anywhere on this path.
+> - **The consequence held exactly as written.** `McpBridge` needed no change at all: seven injected
+>   callables, three packagings over one spec table. What AG-4 did not do was *build* the packaging,
+>   and what it should have carried is the status its own claim implied — plumbing designed, not
+>   plumbing fed.
+
 ---
 
 <a id="ag-5"></a>
@@ -3459,3 +3479,163 @@ The selection range is still not sent by anything — `set_viewer_state` accepts
 `end_line` and the renderer has always drawn them, but no selection plumbing exists in either viewer.
 That is unchanged by this and the reasoning is still `specs5/next.md` § C7: a range that lags the
 cursor points the agent at lines the user is not looking at, which is worse than no range.
+
+---
+
+<a id="ag-34"></a>
+
+## AG-34 — The repo-intelligence tools reach one engine of three, and [AG-4](#ag-4) is why nobody looked **(found 2026-09-15)**
+
+`README.md` § Features has advertised this since the SDK conversion:
+
+> **Six read-only MCP tools** on the `aic-dc` server — `symbol_map`, `file_symbols`,
+> `find_references`, `doc_outline`, `review_state`, `ui_state`. The agent can ask what the repo's shape
+> is and what the user is currently looking at.
+
+`claude_code/mcp_server.py` is imported by exactly one module, `claude_code/service.py:73`. Nothing
+under `antigravity/` or `agy/` mounts it, registers it, or names one of its tools. So on both
+Antigravity transports the model has **none of the six** — not a missing `ui_state`, the whole server.
+Stated as a user hits it: switch master to Antigravity for the reason the engine exists, and the agent
+loses the symbol map, the reference graph, the document outline, the review facts and any way to ask
+what is on screen, with nothing in the UI saying so and the README saying the opposite.
+
+### The decision that was recorded as though it had been carried out
+
+[AG-4](#ag-4) settled the design and it settled it correctly:
+
+> The symbol index and document index are exposed to the Antigravity engine as **plain Python
+> callables** passed to `AgentConfig.tools`, not through an MCP server. […] **Consequence:**
+> `McpBridge` keeps its existing design of taking provider *callables* rather than index objects,
+> which is what makes the same six tools serve both engines.
+
+Both halves of that consequence are true. `McpBridge.__init__` takes seven callables and no index
+objects, its handlers are plain `async` methods returning `{"content": [{"type": "text", …}]}` dicts,
+and `build_tools()` isolates every Claude-specific `@tool` decoration into one method. The bridge is
+genuinely transport-neutral, exactly as designed, and has been since it was written.
+
+It was never called by anything but Claude. The plumbing is there and it is fed nothing:
+
+- `antigravity/options.py:240-244` — `if tools: kwargs["tools"] = list(tools)`, under the comment
+  *"AG-4: the symbol and document indexes as plain callables"*.
+- `antigravity/session.py:132, 140, 205` — `tools` is accepted, stored as `self._tools`, and passed
+  through to `build_config_kwargs`.
+- `antigravity/service.py:351` — the **only** construction of `AntigravitySession` in the tree, and it
+  passes no `tools=` argument. So `self._tools` is `None`, the `if tools:` is false, and
+  `AgentConfig.tools` is never set on any config this app builds.
+
+A channel wired end to end with no producer is a particular kind of defect: every test that exercises
+the channel passes, because the channel works.
+
+### Why it stayed hidden for eleven days
+
+`antigravity/surface.py:110` is the drift register — config fields nobody has wired, each with what it
+would buy, so that triage after an SDK bump starts from an argument rather than a name. Its entry for
+the field that *would* have carried this reads:
+
+> `"mcp_servers"`: stdio and streamable-HTTP MCP servers. AG-4 routes AIC-DC's own indexes through
+> `tools` as plain callables instead, **so nothing needs this today**; user-configured servers have no
+> Antigravity path yet and want a settings surface before a config field.
+
+The register is the one place a reader goes to ask *"what have we not wired?"*, and for this feature it
+answered *"nothing, it is handled elsewhere"* — pointing at a route that carries no traffic. This is
+[AG-33](#ag-33)'s finding a second time and one layer up: there, a docstring promised turn framing that
+no code performed; here, a register of unbuilt work certifies a build that never happened. Both stop
+the reader who would otherwise have found it, which is why both are recorded as the interesting part
+rather than as an aside.
+
+### AG-4's route covers one transport, and it predates the vehicle for the other
+
+The reasoning in AG-4 is sound for the SDK transport and cannot apply to `agy`. `agy` is a **CLI
+subprocess**: there is no Python object graph to hand a callable into, so "no server, no transport, no
+lifecycle" is not available on the transport that a base install actually gets.
+
+That is not a fault in AG-4 — it is chronology. AG-4 was written when the SDK transport was the only
+Antigravity path, and at that time `agy` had no route for a tool of ours at all.
+[AG-22](#ag-22) then built one for a different purpose: an authenticated HTTP MCP listener, in this
+process, reachable from a spawn through a per-spawn `mcp_config.json`
+(`claude_code/consult_listener.py`, `agy/service.py:473-544`). The vehicle AG-4 correctly said did not
+exist now exists, was built for the opposite direction, and is the only route `agy` has. So the two
+transports take **different channels for the same six tools**, and that asymmetry is a property of the
+transports rather than a choice:
+
+| | how the six arrive | why not the other way |
+|---|---|---|
+| Antigravity (API key) | `AgentConfig.tools`, as callables — AG-4's route, finally fed | an HTTP listener would be a second transport for tools already in this process |
+| Antigravity (subscription) | the AG-22 listener, as MCP over authenticated loopback HTTP | a subprocess cannot be handed a Python callable |
+
+### Four measurements the build has to respect
+
+Taken against the installed SDK (`google-antigravity==0.1.16`) and this tree, because each one turns a
+plausible implementation into a broken one.
+
+- **`deny_all()` is a wildcard, so feeding `tools=` alone ships six denied tools.**
+  `hooks/policy.py:399` is `deny(_WILDCARD, name="deny_all")`, and `options.py:308` builds
+  `policies=[policy.deny_all(), *(policy.allow(t.value) for t in enabled)]` where `enabled` comes from
+  `_resolve_tools` and therefore names **builtins only**. A custom callable matches the wildcard deny
+  and nothing else. The AG-4 plumbing is not merely unfed, it is incomplete: a reader who "finished"
+  it by passing the tools in would ship a config whose policy denies every one of them.
+- **The hand-written schemas port verbatim, so the descriptions need not be re-authored.**
+  `tools/tool_runner.py:143` is `ToolWithSchema(fn, input_schema)`, taking an **explicit** JSON Schema
+  rather than deriving one from the signature, with the name from `fn.__name__` and the description
+  from `fn.__doc__` (`connections/local/local_connection.py:224-231`). Async callables are supported
+  (`tool_runner.py:156-163`). AG-4 said the SDK "derives their schemas from signatures", which is the
+  *other* branch of the same function; the explicit branch is what lets one description serve all
+  three transports instead of a signature-derived paraphrase on one of them.
+- **On `agy`, a read would raise a permission dialog.** `agy/tools.py:114` classifies
+  `call_mcp_tool` as `exec` **unconditionally**, correctly, because what an MCP call dispatches is
+  unknown to this host — the target is in `args.ServerName` / `args.ToolName`, not in the tool name.
+  `exec` is not auto-allowed, so `pre_verdict` returns `None` and the call reaches the broker and the
+  user. The Claude engine has the counterpart ungating and does it by server name:
+  `claude_code/permissions.py:173` classifies an `aic-dc` MCP call as `read`, and `:1321` allows it
+  with no dialog. Without the same narrowing on this transport, `symbol_map` becomes a modal — which
+  is the defect fixed on the SDK path on 2026-09-03 arriving on the third transport, the exact
+  reintroduction `pre_verdict`'s docstring says it exists to prevent.
+- **The `agy` config document is written whole, and cleared when there is no Claude CLI.**
+  `roots.write_mcp_config` writes one `{"mcpServers": …}` file atomically, and `_offer_consultant`
+  calls `roots.clear_mcp_config` and returns early when `ClaudeConsultant.available()` is false —
+  correctly, since an install with no Claude CLI is a supported install and `agy` is the transport that
+  survives one. The index tools have **nothing to do with the Claude CLI**. So they cannot be a second
+  tool on the consultation server or a second key written by that path, or a base install without
+  Claude would lose its own repo intelligence to an unrelated absence.
+
+### One dependency is genuinely missing, and one is already there
+
+`AntigravityService` holds the *shared* `symbol_index` and `reindexer` — injected from `main.py` for
+the reason stated at `antigravity/service.py:1506-1519`, where a re-index queue of its own was
+rejected because two queues over one index are each right about their own engine's writes and wrong
+about the other's. It also holds `self.review` and, since [AG-33](#ag-33), `self._viewer`. So five of
+the six tools have everything they need, and `ui_state` in particular is the three fields
+`claude_code/service.py:995-999` returns: viewer, review state, permission mode.
+
+`doc_index` is the exception: nothing hands the Antigravity services one, so `doc_outline` needs the
+same injection `symbol_index` already gets. One shared builder, for the same reason.
+
+### One spec, three packagings
+
+The six tools' names, descriptions and schemas are currently literals inside
+`claude_code/mcp_server.py`'s `@tool(...)` calls — Claude-SDK packaging with the product text embedded
+in it. Three transports rendering that text from three sources is [AG-9](#ag-9)'s prohibition against
+paying for one feature twice, and it fails the way AG-33 describes: a model asked the same question
+gets a differently-worded tool on a different engine, so its answer varies for a reason the user cannot
+see. The descriptions are also load-bearing prose — `symbol_map`'s says *"far cheaper than a directory
+walk plus dozens of Reads"*, which is the sentence that makes the tool get used instead of Glob.
+
+So the spec is extracted to one list, and each transport packages it: `@tool` for Claude,
+`ToolWithSchema` for the SDK transport, a FastMCP registration for `agy`. Guarded the way
+`framing.py` was — the descriptions and schemas pinned as **literals** in a test rather than compared
+against the function under test, so a reword is noticed once rather than three times or not at all.
+
+### What can be verified here, and what cannot
+
+Said in the decision rather than discovered later, because AG-4's error was precisely a claim made
+without a measurement.
+
+- **The `agy` transport can be verified live on this machine.** `agy` is logged in on the consumer
+  subscription, so a real turn can be asked for a symbol map and watched arriving — including whether
+  it reached the model without a dialog, which is the half no unit test can assert.
+- **The SDK transport cannot.** A live turn needs a valid Gemini API key and this machine has none
+  (AG-R-10's neighbour: the extra installs, the credential is unproven). Registration is checkable —
+  the protos are built in-process at connect time — but *whether the Go policy evaluator applies a
+  wildcard deny to a custom Python tool* is a question about the Go side that only a live turn answers.
+  The allow entries are therefore written from the policy source and marked as reasoned rather than
+  measured, which is exactly the status AG-4's own claim should have carried.

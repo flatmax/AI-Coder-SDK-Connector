@@ -8159,3 +8159,223 @@ by re-asserting a turn-scoped fact every invocation, which is the failure mode A
 Unchanged and still recorded at `specs5/next.md` § C7: the **selection range** is accepted, stored and
 rendered, and nothing sends it, because no selection plumbing exists in either viewer and a range that
 lags the cursor points the agent at lines the user is not looking at.
+
+## Six tools that existed in Python and did not exist to a model (2026-09-15)
+
+[AG-34](decisions.md#ag-34), [AG-R-33](risks.md#ag-r-33) closed, [AG-R-34](risks.md#ag-r-34) opened.
+
+### Found by widening yesterday's residue instead of building it
+
+AG-R-33 was written the day before as *"neither Antigravity transport can be asked what the user is
+looking at now"*, and the task was to add a `ui_state` tool. Measuring the scope before building it —
+row 691's lesson, one day old — turned one missing tool into six:
+
+```
+$ grep -rln "from aic_dc.claude_code.mcp_server import\|claude_code import mcp_server" src/
+src/aic_dc/claude_code/service.py
+```
+
+One importer. `symbol_map`, `file_symbols`, `find_references`, `doc_outline`, `review_state` and
+`ui_state` were absent from both Antigravity transports by the same mechanism, and had been absent the
+whole time. AG-R-33's two most reassuring sentences — *"the gap is narrower than it sounds"* and
+*"nothing in front of the model is wrong"* — were true only of the viewer half it happened to be looking
+at.
+
+**Two records said this already worked**, which is why nobody looked:
+
+- `README.md`'s Tree-sitter bullet described the six tools without naming an engine, under a document
+  whose whole subject is three engines.
+- `antigravity/surface.py`'s `PENDING_CONFIG["mcp_servers"]` said the SDK's `tools` field was *"AG-4's
+  route for the symbol and document indexes … as plain callables"*. AG-4 decided that on 2026-09-04 and
+  built the channel. Nothing produced a value for it for eleven days, and the entry read as coverage.
+
+`antigravity/options.py:240` is where the channel ended: `if tools: kwargs["tools"] = list(tools)`, with
+no caller ever passing one. A field that is accepted, documented and never filled is worse than an
+absent one — the absent one fails at the call site.
+
+### The SDK's declaration path, measured before a line was written
+
+The tempting build is `tools=[symbol_map, file_symbols, …]` with plain functions, and it produces six
+tools the model cannot use. `connections/local/local_connection.py:222-243` has two branches:
+
+- A bare callable goes through `FunctionDeclaration.from_callable_with_api_option`, which derives the
+  declaration from the **signature**. Every one of our handlers has the same signature —
+  `**arguments` — so six tools would have advertised one empty schema between them, with none of the
+  per-argument prose reaching the model.
+- A `ToolWithSchema` takes the schema **verbatim** (`:230` → `normalize_schema(fn.input_schema)`), the
+  name from `__name__` (`:224`) and — the load-bearing one — the **description from `__doc__`**
+  (`:225`). There is no description argument anywhere on that path.
+
+So the wrapper sets three attributes and passes one. `normalize_schema` was then run on all six of our
+schemas and returned every one **byte-unchanged**, which is what lets AG-34 claim the three transports
+show the model *identical* text rather than equivalent text. Finally a real `ToolRunner` was driven end
+to end: names, descriptions and schemas identical to the specs, arguments arriving through
+`**arguments` intact (`_coerce_args` skips a `VAR_KEYWORD` param by name and then restores every
+unmatched kwarg, `tools/tool_runner.py:325-328`), absent arguments arriving as `None`, and
+`ToolResult(result="map 'src' None None")` coming back.
+
+### The trap that would have shipped: declared, shown, and then denied
+
+`build_config` sets `policies=[policy.deny_all(), *(policy.allow(t.value) for t in enabled)]`, and
+`enabled` is `BuiltinTools` members. A custom Python tool is not one. `deny_all()` is `deny("*")`, the
+rules are evaluated by the **Go harness** (`local_connection.py:1169`), and nothing in Python would have
+reported it — so the six would have been declared to the model and refused on use. That failure costs a
+turn and reads to the user as the tool being broken rather than as a policy, which is the most expensive
+kind of silence.
+
+Fixed by deriving one specific allow per tool actually passed, justified by the SDK's own documented
+precedence — *Specific Deny > Specific Ask > Specific Allow > Wildcard Deny* (`hooks/policy.py`). Named
+tools rather than a widened wildcard: `allow("*")` would have given away the AG-5 write seam to save a
+loop.
+
+### Two narrowings, because the two transports carry the same tool differently
+
+Both Antigravity transports funnel through `AntigravityPermissionGate.pre_verdict`, and the same tool
+arrives at it two ways.
+
+On `agy` it is `call_mcp_tool` with `{"ServerName", "ToolName"}` beside it, so `is_index_read` checks the
+**pair**. On the SDK transport there is no server name because there is no server — the harness was
+handed our Python objects — so the gate is told which bare names *this session registered*
+(`own_read_tools`, built from the callables actually passed to the session).
+
+`own_read_tools` is deliberately **not** defaulted to `index_tools.TOOL_NAMES`. On `agy` a bare
+`symbol_map` would be a tool of the binary's that happened to share the spelling, and defaulting would
+be the gate deciding it recognises something on evidence it does not have.
+
+The check is **first** in `pre_verdict`, before the class table and before `ALWAYS_ASK`, and that
+ordering is the whole of it: `call_mcp_tool` is classed `exec` (`agy/tools.py:114`) and sits in
+`ALWAYS_ASK` — correctly, since it dispatches an open set — so a check placed after either would never
+have fired, and every `symbol_map` would have opened a permission dialog for a tool that reads an index
+this process already holds. Six of those in a turn is R-12's click-through training with our own name on
+it. The two consultant tools stay on that seam on purpose: `second_opinion` spends money on another
+vendor's model and `generate_image` writes a file, so the narrowing names six tools rather than a server.
+
+### The structural blocker, which had nothing to do with tools
+
+`AgyService._offer_consultant` started the loopback listener **only when a Claude CLI was installed**,
+and cleared the MCP config otherwise. So the obvious build — add the index server to the listener — would
+have given the repo intelligence to exactly the installs that already had Claude, and an `agy`-only
+install would have lost both. That is the likeliest shape of a subscription user's machine.
+
+The two halves are now offered independently: a consultant factory when `claude` resolves, an index
+server whenever there is a bridge, and the config written when **either** exists. One socket, one bearer,
+two mount points, one token retired with the subprocess.
+
+### Where the work actually went: one spec table, three packagings
+
+`index_tools.SPECS` holds the six names, descriptions and schemas; `McpBridge` still holds what they do.
+AG-4 had already made this cheap and said so — the bridge takes provider *callables* rather than index
+objects, so *"only the packaging is per-engine"* — and then built it in the Claude adapter alone.
+
+The descriptions are the reason this is a shared table rather than three literals. `symbol_map`'s argues
+its own cost — *"far cheaper than a directory walk plus dozens of Reads"* — and that sentence is what
+gets the tool called instead of a Glob sweep. Three transports rendering it from three sources is
+AG-9's prohibition against paying for one feature twice, with AG-33's symptom: a model asked the same
+question told about the same tool in different words depending on a Settings dropdown.
+
+`ClaudeCodeService.index_sources` is the other half. Five of `McpBridge`'s seven callables describe the
+**one working tree**, of which there is one however many engines are mounted; `review_state` and
+`ui_state` describe an *engine*. Sharing those two would have the second adapter report the first's
+review as its own — a wrong answer that looks exactly like a right one — so each adapter builds its own
+bridge from the five shared sources plus its own two.
+
+### Fail-first, and what failed
+
+Forty-one tests written against the shipped source, all forty-one failing, with every pre-existing test
+in the same six files still passing (813) — so nothing in the run is a coincidental break:
+
+- 12 in `test_antigravity_options.py` — the declaration, driven through the SDK's own `ToolRunner`, and
+  the wildcard-deny trap.
+- 14 in `test_antigravity_permissions.py` — both narrowings, and the two controls that matter: a
+  third-party server cannot borrow the six names, and a bare name is *not* enough on `agy`.
+- 8 in `test_antigravity_service.py` — sources to bridge to callables to session, plus the gate being
+  told which names are ours.
+- 4 in `test_agy_service.py` — over the wire, on the config document `agy` actually reads.
+- 2 in `test_claude_code_service.py` — `index_sources` is the five that describe the tree, asserted
+  against `McpBridge`'s own signature so a new provider has to be classified rather than omitted.
+- Plus 1 renamed: `test_no_claude_means_no_file_rather_than_a_dead_one` became
+  `test_nothing_to_serve_means_no_file_…`, because "no Claude" stopped being the condition.
+
+`test_consult_listener.py`'s 16 new tests failed as a **collection** error against the shipped source —
+`ImportError: cannot import name 'INDEX_PATH'` — which is a weaker signal than the rest and is reported
+as such: it proves the mount point did not exist, not that behaviour was wrong. It is the honest shape
+here, since a wire test for a server with no path cannot be written.
+
+The listener tests are over the socket rather than in-process, deliberately. The defect this whole change
+fixes was a tool that existed in Python and did not exist to a model, and an in-process assertion would
+have passed against the broken build.
+
+**57 new tests; 5,572 passed.** The three failures are the known environmental ones in
+`test_claude_consultant.py`.
+
+### The live run, and the free signal it could not use
+
+`scripts/probe_agy_index_tools.py`, the `agy` counterpart of `bridge_smoke.py`. A second probe rather
+than a flag on the first, because this transport shares none of that plumbing: the Claude engine hands
+its CLI an in-process SDK server, the SDK engine hands its harness Python callables, and `agy` is a
+subprocess reached over a pipe that can be handed neither. Three things can therefore be true at once
+and the tools still not exist to the model — the bridge answers, the listener serves `/index`, and `agy`
+never read the config. That gap is the exact shape of the defect this change closes, and it is the one a
+green suite cannot rule out.
+
+**The probe's first live run failed on correct code, and the failure was the measurement.** It was
+written to read our six names off `agy`'s `init` frame, because `probe_agy_tool_inventory.py` gets the
+tool list from there for free. `init` advertised 57 tools on 2026-09-15 and every one was a builtin:
+not our six, and not AG-22's `second_opinion` either — which has worked since it was written. **MCP
+tools are not enumerated in `init` at all.** Consistent with the rest of this transport rather than
+surprising, since every MCP call arrives as the multiplexer `call_mcp_tool` carrying
+`ServerName`/`ToolName` in its *arguments*, which is precisely why `is_index_read` has to read them.
+
+So the free signal was taken from our own side of the socket: the listener's session table, which holds
+one live transport per server a client has handshaked with. It is the table `_forget` already reclaims
+from and already warns about at startup, so the probe asserts on what the shipping code depends on
+rather than on a private name it introduced. `call_mcp_tool`'s presence in `init` *is* asserted — it is
+the one builtin the six ride on — and a qualified `mcp__*` name appearing there later is logged as a
+note, because it would mean `is_index_read` should stop reading arguments.
+
+What the run measured, 2026-09-15:
+
+- `mcp_config.json` at `0600`, naming both servers, one port and one bearer between them.
+- The listener serving `aic-dc` and `aic-dc-claude`, with one live `agy` transport on **each** — the
+  specific failure two servers on one socket can produce is a manager whose lifespan was never entered,
+  and `agy` would have carried on with the other one and said nothing.
+- One turn: `file_symbols(paths=["src/aic_dc/index_tools.py"])` and `find_references(symbol="ToolSpec")`
+  called for real through the recording bridge, **no permission dialog for either**, and an answer built
+  from what came back. `find_references` was asked for on purpose — nothing in the tree tells you that
+  answer without an index, so a model that had read the file instead would fail rather than pass.
+
+### Neighbours corrected while here
+
+- `README.md`'s two bullets: the Tree-sitter one now says the map is *"exposed to every engine's agent
+  through the six tools below"*, and the tools bullet names the three packagings and dates the change.
+- `antigravity/surface.py`'s `mcp_servers` entry now records that AG-4's claim *became* true on
+  2026-09-15 and was written here as though it already were — which is why the entry read as coverage.
+- `AG-4`'s decision carries a correction blockquote: *"both engines"* was two transports of three
+  (`agy` is a subprocess and postdates it — chronology, not error), and *"derives their schemas from
+  signatures"* is true and is **not** the path to use.
+- `options.build_config_kwargs`'s `tools` comment repeated that signature claim at the exact line a
+  future caller would read. It now points at `index_tool_callables`'s docstring.
+- `AntigravitySession`'s `tools` docstring said *"Empty in phase 3"*; it was empty until today.
+- `AntigravityService.set_symbol_index`'s note said there is no readiness flag here *because this engine
+  does not serve the symbol map*. It does now, and the reason changed rather than expired: readiness is a
+  fact about the one index over the one tree, so it comes from the injected `index_sources` and a flag
+  per adapter would be three answers to a question that has one.
+- **Two probes were reading a footer key that no longer exists.** `streamComplete`'s `response_text` was
+  renamed to `response` when both Antigravity transports were found to be settling every turn with empty
+  content; `probe_agy_pre_invocation.py` records the rename and the remedy — accumulate the text
+  fragments as well as the footer — and two probes written beside it kept the old name.
+  `probe_agy_resume.py` is the serious one: its whole assertion is a passphrase appearing in the answer,
+  so a resume that worked was indistinguishable from one that had lost its context, since an empty
+  string contains no passphrase either way. `probe_agy_stop_terminates.py` only *reports* the prose, so
+  every one of its verdicts carried a blank quote whatever the model had said and nothing failed. Both
+  now read `response`, and the new probe accumulates fragments from the start — it walked into the same
+  trap on its own first run, which is how these were found.
+
+### What is left
+
+[AG-R-34](risks.md#ag-r-34): `ui_state`'s description promises *"files ticked in the picker"* and no
+snapshot has ever carried one. The snapshot is right — CC-21 records why there is no browser-side
+selection to report — and the sentence is wrong. Moved **verbatim** anyway, because this change's whole
+guarantee is that the prose did not change when it moved, and `tests/test_index_tools.py` pins each
+description as a literal so the reword has to be deliberate. Editing one inside the commit whose claim is
+sameness would have made it unverifiable against the state it came from.

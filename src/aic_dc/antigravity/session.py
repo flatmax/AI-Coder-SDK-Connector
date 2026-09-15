@@ -111,8 +111,11 @@ class AntigravitySession:
         enabled at all, which is what ``options.build_config_kwargs``
         enforces. Phase 4 supplies the real hook.
     tools:
-        Plain Python callables for the symbol and document indexes
-        (AG-4). Empty in phase 3.
+        Python callables for the symbol and document indexes (AG-4), which
+        since AG-34 are the six :data:`aic_dc.index_tools.SPECS` wrapped by
+        ``options.index_tool_callables``. Empty from phase 3 until
+        2026-09-15, when nothing produced a value for this argument and the
+        tools reached the Claude engine only.
     resume:
         A conversation id to continue instead of starting fresh (phase 5).
         The harness keeps its own trajectory store, so resuming is a

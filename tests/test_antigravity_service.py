@@ -37,12 +37,12 @@ import types
 
 import pytest
 
-from aic_dc import capabilities
+from aic_dc import capabilities, index_tools
 from aic_dc.antigravity.credentials import GEMINI_API, NONE, Credentials
 from aic_dc.antigravity.service import PERMISSION_MODES, AntigravityService
+from aic_dc.capabilities import ANTIGRAVITY, CLAUDE
 from aic_dc.claude_code.hooks import Reindexer
 from aic_dc.claude_code.messages import Event
-from aic_dc.capabilities import ANTIGRAVITY, CLAUDE
 from aic_dc.engine_router import RPC_SURFACES, build_router
 
 
@@ -1293,3 +1293,166 @@ class TestItReportsThePosturesItAccepts:
         """
         offered = asyncio.run(service(tmp_path).get_current_state())["permission_modes"]
         assert "bypassPermissions" not in offered
+
+
+# ----------------------------------------------------------------------
+# AG-34: the same six repo-intelligence tools this engine's row claimed
+# ----------------------------------------------------------------------
+
+
+def index_sources(flushed=None):
+    """The five tree-shaped callables ``ClaudeCodeService`` hands over.
+
+    Named here as a literal dict rather than built from a real
+    ``ClaudeCodeService``, because the assertion that these are *the same
+    five* belongs on that side — ``test_claude_code_service.py`` compares
+    the property against ``McpBridge``'s own signature. This one only needs
+    a bridge that constructs.
+    """
+    return {
+        "symbol_index": lambda: None,
+        "symbol_index_ready": lambda: True,
+        "doc_index": lambda: None,
+        "doc_index_ready": lambda: True,
+        "flush": flushed or (lambda: None),
+    }
+
+
+class RecordingSession:
+    """Stands in for ``AntigravitySession`` so ``_ensure_session`` completes.
+
+    Records the keyword arguments rather than the config, because what AG-34
+    got wrong was upstream of the config: ``tools`` had been an accepted
+    argument since phase 3 and no caller ever produced a value for it. A
+    test that asserted on ``config_kwargs`` of a hand-built session would
+    have passed throughout those eleven days.
+    """
+
+    last: dict = {}
+
+    def __init__(self, repo_root, **kw):
+        RecordingSession.last = dict(kw, repo_root=repo_root)
+        self.started = False
+
+    async def start(self):
+        self.started = True
+
+    @property
+    def conversation_id(self):
+        return None
+
+
+def ensured(svc, monkeypatch):
+    """Drive ``_ensure_session`` with no harness, and return its kwargs."""
+    from aic_dc.antigravity import service as mod
+
+    monkeypatch.setattr(mod, "AntigravitySession", RecordingSession)
+
+    async def no_resume(requested):
+        return None
+
+    monkeypatch.setattr(svc, "_resume_target", no_resume)
+
+    async def no_mirror():
+        return None
+
+    monkeypatch.setattr(svc, "_sync_mirror", no_mirror)
+    asyncio.run(svc._ensure_session())
+    return RecordingSession.last
+
+
+class TestTheIndexToolsReachThisEngine:
+    """The defect: the engine the user picked decided whether they had a
+    symbol map.
+
+    AG-4 built ``McpBridge`` transport-neutral — seven injected callables,
+    with only the ``@tool`` packaging per engine — and then built it in the
+    Claude adapter alone. So for eleven days this engine's README row
+    claimed six repo-intelligence tools it did not serve, and the
+    ``mcp_servers`` line in ``surface.PENDING_CONFIG`` read as coverage
+    rather than as an intention (AG-34).
+
+    The assertions run from the wiring inward: sources produce a bridge,
+    a bridge produces callables, and ``_ensure_session`` hands them to the
+    session *and* names them to the gate. Each link is separate because
+    each one was individually absent.
+    """
+
+    def test_index_sources_produce_a_bridge(self, tmp_path):
+        from aic_dc.claude_code.mcp_server import McpBridge
+
+        svc = service(tmp_path, index_sources=index_sources())
+        assert isinstance(svc.mcp_bridge, McpBridge)
+
+    def test_no_sources_is_no_bridge_rather_than_a_broken_one(self, tmp_path):
+        """Every test that builds this class without ``main.py`` does that.
+
+        A supported construction, not a degraded one: it is the engine this
+        one was until 2026-09-15.
+        """
+        assert service(tmp_path).mcp_bridge is None
+
+    def test_the_bridge_answers_review_state_from_this_engine(self, tmp_path):
+        """The two callables that are **not** shared, and why.
+
+        Five of the seven describe the one working tree, of which there is
+        one however many engines are mounted. ``review_state`` and
+        ``ui_state`` describe an *engine*, so sharing them would have this
+        adapter report the Claude adapter's review as its own — a wrong
+        answer that looks exactly like a right one.
+        """
+        svc = service(tmp_path, index_sources=index_sources())
+        asyncio.run(svc.set_permission_mode("plan"))
+        snapshot = svc._ui_state_snapshot()
+        assert snapshot["permission_mode"] == "plan"
+        assert snapshot["review_state"] == svc.get_review_state()
+
+    def test_the_ui_snapshot_carries_the_viewer_and_no_file_content(self, tmp_path):
+        """CC-14: paths and modes, never bytes.
+
+        The agent reads files with its own tools; this answers the one
+        question those cannot.
+        """
+        svc = service(tmp_path, index_sources=index_sources())
+        svc.set_viewer_state(path="a.py", start_line=3)
+        snapshot = svc._ui_state_snapshot()
+        assert snapshot["viewer"]["path"] == "a.py"
+        assert set(snapshot) == {"viewer", "review_state", "permission_mode"}
+
+    def test_all_six_reach_the_session(self, tmp_path, monkeypatch):
+        pytest.importorskip("google.antigravity")
+        svc = service(tmp_path, index_sources=index_sources())
+        names = [t.__name__ for t in ensured(svc, monkeypatch)["tools"]]
+        assert names == [spec.name for spec in index_tools.SPECS]
+
+    def test_the_gate_is_told_which_names_are_ours(self, tmp_path, monkeypatch):
+        """So ``pre_verdict`` can allow a bare ``symbol_map`` without asking.
+
+        Derived from the callables actually passed rather than from
+        ``index_tools.TOOL_NAMES``, which is what keeps the two facts from
+        disagreeing: a session handed no tools must not ungate their names.
+        """
+        pytest.importorskip("google.antigravity")
+        svc = service(tmp_path, index_sources=index_sources())
+        ensured(svc, monkeypatch)
+        assert svc._gate._own_read_tools == index_tools.TOOL_NAMES
+
+    def test_a_session_with_no_bridge_ungates_nothing(self, tmp_path, monkeypatch):
+        svc = service(tmp_path)
+        assert ensured(svc, monkeypatch)["tools"] == ()
+        assert svc._gate._own_read_tools == frozenset()
+
+    def test_main_hands_both_transports_the_same_five(self, tmp_path):
+        """The wiring nobody would notice was missing.
+
+        ``main.py`` is where the second engine is constructed, and this
+        argument arriving at only one of the two mounts is the shape of the
+        original defect: an engine that has the feature and one that does
+        not, with no error anywhere.
+        """
+        from pathlib import Path
+
+        from aic_dc import main as mod
+
+        source = Path(mod.__file__).read_text(encoding="utf-8")
+        assert source.count("index_sources=claude_code_service.index_sources") == 2

@@ -21,8 +21,11 @@ import pytest
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 
+from aic_dc import index_tools
 from aic_dc.claude_code.consult_listener import (
     DISCOVER_METHOD,
+    INDEX_PATH,
+    INDEX_SERVER_NAME,
     MCP_PATH,
     METHOD_HEADER,
     SERVER_NAME,
@@ -556,7 +559,7 @@ class TestWhatRoundEightChanged:
         and no ``DELETE`` ever follows it.
         """
         async with running(idle_timeout=1234.0) as (listener, _url, _token):
-            assert listener._mcp.session_manager.session_idle_timeout == 1234.0
+            assert listener.managers[SERVER_NAME].session_idle_timeout == 1234.0
 
 
 async def _call_then_cancel(url: str, token: str) -> list[str]:
@@ -831,7 +834,8 @@ class TestWhatTheProbesSettled:
 
                 await listener.revoke(token)
                 assert session_id not in listener.sessions
-                assert session_id not in listener._mcp.session_manager._session_owners
+                owners = listener.managers[SERVER_NAME]._session_owners
+                assert session_id not in owners
 
     async def test_a_second_session_under_one_bearer_is_announced(self, caplog):
         """The tripwire behind the ``server/discover`` filter.
@@ -854,3 +858,313 @@ class TestWhatTheProbesSettled:
                 assert len(grant.sessions) == 2
                 tripped = [r for r in caplog.records if "MCP sessions" in r.message]
                 assert tripped and DISCOVER_METHOD in tripped[0].getMessage()
+
+
+class StubIndexBridge:
+    """Stands in for ``McpBridge``, which would need two live indexes.
+
+    Answers in the bridge's own envelope — ``{"content": [...]}`` — because
+    the point of several of these tests is that the listener *unwraps* it.
+    Records what it was asked so a test can prove the arguments crossed the
+    wire rather than merely that a call happened.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict]] = []
+
+    def _answer(self, name: str, args: dict) -> dict:
+        self.calls.append((name, args))
+        return {"content": [{"type": "text", "text": f"{name}:{sorted(args.items())}"}]}
+
+    async def symbol_map(self, path_prefix=None, language=None, cursor=None):
+        return self._answer(
+            "symbol_map",
+            {"path_prefix": path_prefix, "language": language, "cursor": cursor},
+        )
+
+    async def file_symbols(self, paths=None):
+        return self._answer("file_symbols", {"paths": paths})
+
+    async def find_references(self, symbol=None):
+        return self._answer("find_references", {"symbol": symbol})
+
+    async def doc_outline(self, path_prefix=None, cursor=None):
+        return self._answer(
+            "doc_outline", {"path_prefix": path_prefix, "cursor": cursor}
+        )
+
+    async def review_state(self):
+        return self._answer("review_state", {})
+
+    async def ui_state(self):
+        return self._answer("ui_state", {})
+
+
+@contextlib.asynccontextmanager
+async def serving_index(factory=None, *, bridge=None, idle_timeout: float = 3600.0):
+    """A started listener with an index bridge, and its index URL."""
+    bridge = bridge if bridge is not None else StubIndexBridge()
+    listener = ConsultationListener(
+        factory, index_bridge=bridge, idle_timeout=idle_timeout
+    )
+    port = await listener.start()
+    token = listener.mint(repo_root="/tmp/some-repo", session_id=SESSION)
+    try:
+        yield listener, f"http://127.0.0.1:{port}{INDEX_PATH}", token, bridge
+    finally:
+        await listener.aclose()
+
+
+class TestTheIndexServerRidesTheSameSocket:
+    """AG-34's ``agy`` half, over the wire the model actually reaches.
+
+    In-process assertions would prove the specs were transcribed and prove
+    nothing about the thing that was missing, which is a *served* tool. Each
+    of these goes through a real MCP client, because the failure this whole
+    change exists to fix was a tool that existed in Python and did not exist
+    to a model.
+    """
+
+    async def test_the_six_tools_are_listed_with_their_own_schemas(self):
+        """One flattened schema for six tools is the failure mode here.
+
+        ``FastMCP.add_tool`` has no explicit-schema argument, so the
+        obvious implementation advertises the handler's signature — and
+        every ``description`` inside ``properties`` is what the model needs
+        to pass a sensible ``path_prefix``. Compared field by field against
+        the spec table, which is the same table the Claude engine renders.
+        """
+        async with serving_index() as (_listener, url, token, _bridge):
+            async with connected(url, token) as session:
+                listed = await session.list_tools()
+
+        served = {tool.name: tool for tool in listed.tools}
+        # Spec order, not `TOOL_NAMES` — that is a frozenset, and the
+        # order the model is shown the tools in is the table's.
+        assert list(served) == [spec.name for spec in index_tools.SPECS]
+        for spec in index_tools.SPECS:
+            tool = served[spec.name]
+            assert tool.description == spec.description, spec.name
+            assert tool.inputSchema == spec.schema, spec.name
+
+    async def test_every_served_tool_declares_itself_read_only(self):
+        """The claim that makes ungating these six a narrowing.
+
+        Said to the client as well as to our own gate, so a reader of the
+        wire can check the assertion `pre_verdict` acts on.
+        """
+        async with serving_index() as (_listener, url, token, _bridge):
+            async with connected(url, token) as session:
+                listed = await session.list_tools()
+        for tool in listed.tools:
+            assert tool.annotations is not None, tool.name
+            assert tool.annotations.readOnlyHint is True, tool.name
+
+    async def test_a_call_reaches_the_bridge_and_comes_back_as_text(self):
+        async with serving_index() as (_listener, url, token, bridge):
+            async with connected(url, token) as session:
+                result = await session.call_tool(
+                    "symbol_map", {"path_prefix": "src/aic_dc", "language": "python"}
+                )
+
+        assert bridge.calls == [
+            (
+                "symbol_map",
+                {"path_prefix": "src/aic_dc", "language": "python", "cursor": None},
+            )
+        ]
+        # Unwrapped. The bridge answers in the MCP envelope because that is
+        # what the Claude SDK passes straight through; wrapping it again
+        # would show the model a content array inside a content array.
+        assert _text(result) == "symbol_map:" + str(
+            sorted(
+                {
+                    "path_prefix": "src/aic_dc",
+                    "language": "python",
+                    "cursor": None,
+                }.items()
+            )
+        )
+
+    async def test_a_no_argument_tool_needs_no_arguments(self):
+        """``review_state`` and ``ui_state`` take nothing, on every engine."""
+        async with serving_index() as (_listener, url, token, bridge):
+            async with connected(url, token) as session:
+                assert _text(await session.call_tool("review_state", {})) == (
+                    "review_state:[]"
+                )
+                assert _text(await session.call_tool("ui_state", {})) == "ui_state:[]"
+        assert [name for name, _args in bridge.calls] == ["review_state", "ui_state"]
+
+    async def test_an_argument_the_schema_does_not_declare_is_refused(self):
+        """The check the Claude CLI performs on the other transport.
+
+        The low-level ``Server`` validates against the schema it advertised,
+        which is the second reason it was chosen over ``FastMCP``: a
+        flattened schema validates nothing.
+        """
+        async with serving_index() as (_listener, url, token, bridge):
+            async with connected(url, token) as session:
+                # `paths` is required, so an empty call is a schema error
+                # rather than a call with `None` in it.
+                result = await session.call_tool("file_symbols", {})
+        assert result.isError is True
+        assert bridge.calls == []
+
+    async def test_the_bearer_gate_covers_the_index_path_too(self):
+        """A second route is a second thing to forget to authenticate."""
+        async with serving_index() as (_listener, url, _token, bridge):
+            async with httpx.AsyncClient(timeout=30) as client:
+                for header in ({}, {"Authorization": "Bearer wrong"}):
+                    response = await client.post(
+                        url,
+                        headers={
+                            "Content-Type": "application/json",
+                            "Accept": "application/json, text/event-stream",
+                            **header,
+                        },
+                        json={
+                            "jsonrpc": "2.0",
+                            "id": 1,
+                            "method": "tools/list",
+                            "params": {},
+                        },
+                    )
+                    assert response.status_code == 401, header
+        assert bridge.calls == []
+
+    async def test_both_servers_are_advertised_in_one_config_document(self):
+        """What ``agy`` reads, and the reason there is one socket.
+
+        Two entries, two paths, **one** bearer: the token identifies the
+        spawn, not the server.
+        """
+        async with serving_index(_factory()) as (listener, _url, token, _bridge):
+            entry = listener.config_entry(token)
+            assert set(entry["mcpServers"]) == {SERVER_NAME, INDEX_SERVER_NAME}
+            consult = entry["mcpServers"][SERVER_NAME]
+            index = entry["mcpServers"][INDEX_SERVER_NAME]
+            assert consult["serverUrl"].endswith(MCP_PATH)
+            assert index["serverUrl"].endswith(INDEX_PATH)
+            assert consult["serverUrl"] != index["serverUrl"]
+            assert (
+                consult["headers"]["Authorization"]
+                == index["headers"]["Authorization"]
+                == f"Bearer {token}"
+            )
+            assert listener.paths == (MCP_PATH, INDEX_PATH)
+
+    async def test_repo_intelligence_does_not_depend_on_a_claude_install(self):
+        """The structural half of AG-34, and the reason for two servers.
+
+        ``_offer_consultant`` used to return early with no listener at all
+        when ``ClaudeConsultant.available()`` was false. Serving one half
+        without the other is what lets a Claude-less install — which is the
+        install ``agy`` exists for — keep its symbol map.
+        """
+        async with serving_index(None) as (listener, url, token, _bridge):
+            assert listener.serves_index is True
+            assert listener.serves_consultation is False
+            assert listener.paths == (INDEX_PATH,)
+            assert set(listener.config_entry(token)["mcpServers"]) == {
+                INDEX_SERVER_NAME
+            }
+            async with connected(url, token) as session:
+                listed = await session.list_tools()
+        assert [tool.name for tool in listed.tools] == [
+            spec.name for spec in index_tools.SPECS
+        ]
+
+    async def test_consultation_alone_still_serves_only_its_own_path(self):
+        """The other direction: an install with no index bridge is unchanged."""
+        async with running(_factory()) as (listener, url, token):
+            assert listener.serves_consultation is True
+            assert listener.serves_index is False
+            assert listener.paths == (MCP_PATH,)
+            assert set(listener.config_entry(token)["mcpServers"]) == {SERVER_NAME}
+            async with connected(url, token) as session:
+                listed = await session.list_tools()
+        assert [tool.name for tool in listed.tools] == ["second_opinion"]
+
+    async def test_a_listener_with_nothing_to_serve_says_so(self):
+        """Rather than binding a socket that answers 404 on every path."""
+        listener = ConsultationListener(None)
+        with pytest.raises(RuntimeError, match="nothing to serve"):
+            await listener.start()
+        await listener.aclose()
+
+    async def test_both_managers_are_entered_by_the_one_lifespan(self):
+        """The bug a ``Mount`` per server would have shipped.
+
+        Starlette does not route lifespan scope to a mounted sub-app, so
+        mounting would leave both session managers un-entered and every
+        request to either would fail. Asserted through the wire on *both*
+        paths in one listener, because a half-working composition is the
+        shape this would take.
+        """
+        async with serving_index(_factory()) as (listener, index_url, token, _b):
+            consult_url = index_url.replace(INDEX_PATH, MCP_PATH)
+            async with connected(consult_url, token) as session:
+                listener.begin_turn(token, "turn-1")
+                assert _text(await session.call_tool("second_opinion", {"question": "q"})) == (
+                    "the answer"
+                )
+            async with connected(index_url, token) as session:
+                assert _text(await session.call_tool("review_state", {})) == (
+                    "review_state:[]"
+                )
+            assert set(listener.managers) == {SERVER_NAME, INDEX_SERVER_NAME}
+
+    async def test_a_session_on_either_server_is_reclaimed_on_revoke(self):
+        """``_forget`` pops the managers' real tables, on every server.
+
+        Written because the merged :attr:`sessions` property is a *copy*:
+        popping from it would discard an entry from a dict nobody reads and
+        leave the transport exactly where it was — the U1/P8 leak this
+        module exists to avoid, spelled as a one-line no-op.
+        """
+        async with serving_index(_factory()) as (listener, index_url, token, _b):
+            consult_url = index_url.replace(INDEX_PATH, MCP_PATH)
+            async with httpx.AsyncClient(timeout=30) as client:
+                index_sid = (await _raw_session(client, index_url, token))[
+                    "mcp-session-id"
+                ]
+                consult_sid = (await _raw_session(client, consult_url, token))[
+                    "mcp-session-id"
+                ]
+                assert index_sid in listener.sessions
+                assert consult_sid in listener.sessions
+
+                await listener.revoke(token)
+                assert index_sid not in listener.sessions
+                assert consult_sid not in listener.sessions
+                for manager in listener.managers.values():
+                    assert index_sid not in manager._server_instances
+                    assert consult_sid not in manager._server_instances
+                    assert index_sid not in manager._session_owners
+                    assert consult_sid not in manager._session_owners
+
+    async def test_one_session_per_server_does_not_trip_the_tripwire(self, caplog):
+        """The threshold moved with the server count, and had to.
+
+        ``len(grant.sessions) > 1`` was right for one server and would fire
+        on every spawn once there are two — a warning that cries wolf on the
+        ordinary path is a warning nobody reads when it matters.
+        """
+        async with serving_index(_factory()) as (listener, index_url, token, _b):
+            consult_url = index_url.replace(INDEX_PATH, MCP_PATH)
+            async with httpx.AsyncClient(timeout=30) as client:
+                with caplog.at_level("WARNING"):
+                    await _raw_session(client, index_url, token)
+                    await _raw_session(client, consult_url, token)
+                assert not [r for r in caplog.records if "MCP sessions" in r.message]
+                # A third is one too many however they are spread.
+                with caplog.at_level("WARNING"):
+                    await _raw_session(client, index_url, token)
+                assert [r for r in caplog.records if "MCP sessions" in r.message]
+
+    async def test_the_idle_reaper_is_armed_on_both(self):
+        async with serving_index(_factory()) as (listener, _url, _token, _b):
+            assert set(listener.managers) == {SERVER_NAME, INDEX_SERVER_NAME}
+            for name, manager in listener.managers.items():
+                assert manager.session_idle_timeout == 3600.0, name

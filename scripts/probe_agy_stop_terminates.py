@@ -246,7 +246,13 @@ async def one_run(root: Path, launcher: Path, hooks: Path, *, arm: bool) -> dict
         "denied_after_stop": [d for _t, d in server.tool_calls[1:]],
         "stop_reasons": [str(s.get("terminationReason") or "") for s in server.stops],
         "cancelled": footer.get("cancelled"),
-        "response": (footer.get("response_text") or "")[:120],
+        # `response`, not `response_text`: the footer's key was renamed when
+        # both Antigravity transports were found to be settling every turn
+        # with empty content, and this line kept reading the old one until
+        # 2026-09-15 — so the prose beside every one of this probe's verdicts
+        # was blank whatever the model had said. Reported, not asserted on,
+        # which is why nothing failed and nobody noticed.
+        "response": (footer.get("response") or "")[:120],
     }
 
 

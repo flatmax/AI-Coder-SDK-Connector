@@ -2809,6 +2809,50 @@ class TestBridgeWiring:
         assert wired.session.health.degradations == []
         assert wired.get_engine_health()["degradations"] == []
 
+    def test_this_engines_own_bridge_is_built_from_index_sources(self, wired):
+        """AG-34: what the other engines are handed is what this one uses.
+
+        ``index_sources`` exists so ``main.py`` can give the two Antigravity
+        transports the same six tools. Naming the five callables twice —
+        once here, once in the property — is how the engines would come to
+        disagree about index readiness with nobody noticing, so the
+        constructor reads the property rather than repeating it.
+
+        Checked two ways because the five are two kinds of object. Three
+        are bound methods, which compare equal across accesses, so those
+        are compared directly. The readiness pair are lambdas closing over
+        ``self`` and a fresh one comes back per access — an equality check
+        there would fail against correct code — so they are compared by what
+        they answer: flip the flag and both move together, which is the fact
+        that matters.
+        """
+        for name in ("symbol_index", "doc_index", "flush"):
+            assert getattr(wired.mcp_bridge, f"_{name}") == wired.index_sources[name]
+        for ready in ("symbol_index_ready", "doc_index_ready"):
+            assert (
+                getattr(wired.mcp_bridge, f"_{ready}")()
+                == wired.index_sources[ready]()
+            ), ready
+        wired._symbol_index_ready = False
+        assert wired.mcp_bridge._symbol_index_ready() is False
+        assert wired.index_sources["symbol_index_ready"]() is False
+
+    def test_index_sources_are_the_five_that_describe_the_tree(self, wired):
+        """Five and not seven, and the two left out are the point.
+
+        ``review_state`` and ``ui_state`` are per-*engine* — each adapter has
+        its own ``ReviewMode`` and its own idea of what the user is looking
+        at — so an engine handed those would report this one's review as its
+        own. Asserted against ``McpBridge``'s own signature so that a new
+        provider argument has to be classified rather than silently omitted.
+        """
+        import inspect
+
+        from aic_dc.claude_code.mcp_server import McpBridge
+
+        accepted = set(inspect.signature(McpBridge).parameters)
+        assert set(wired.index_sources) == accepted - {"review_state", "ui_state"}
+
 
 # ---------------------------------------------------------------------------
 # The session store, as the session receives it — phase 5

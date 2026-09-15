@@ -478,16 +478,27 @@ class AgyService(AntigravityService):
         by `agy`, because the listener existed and was reachable by
         nothing.
 
+        **And since AG-34 it offers two servers, not one.** The six
+        `aic-dc` repo-intelligence tools reach `agy` the only way they can
+        — over this socket, because a CLI subprocess cannot be handed a
+        Python callable — so this method now starts a listener whenever
+        there is *either* a consultant to offer or an index bridge to serve.
+        The two are independent on purpose: a Claude CLI is what the second
+        opinion needs and has nothing to do with the symbol map, and until
+        this method separated them an install with no `claude` binary
+        cleared the config document and lost both.
+
         The token is per spawn and lives in a file only this app writes,
         under a root only this app owns. Three things about that file are
         deliberate and stated where they are enforced, in
         :func:`aic_dc.agy.roots.write_mcp_config`: atomic, ``0600`` inside
         a ``0700`` directory, and rewritten unconditionally rather than
-        blanked on exit.
+        blanked on exit. One token covers both servers, because the bearer
+        identifies the *spawn* — see :class:`_Grant`.
 
         **A failure here does not fail the session.** Every path leaves no
-        config file rather than a stale one, and `agy` then runs with no
-        consultant — which is what it did before this existed. The
+        config file rather than a stale one, and `agy` then runs with
+        neither tool — which is what it did before this existed. The
         alternative is refusing to start an engine because an optional
         second opinion could not be offered.
 
@@ -498,7 +509,8 @@ class AgyService(AntigravityService):
         `agy`'s own dispatcher, not a boundary against local code. The same
         code already holds the user's Claude credentials, so the bearer
         grants strictly less than what an attacker in that position has;
-        see AG-R-26.
+        see AG-R-26. The index server widens that surface by six read-only
+        tools over indexes of a tree the same code can already read.
         """
         # Retired first, so that one spawn is one listener holding one
         # token. A second mint onto a live listener would be legal — it
@@ -509,7 +521,13 @@ class AgyService(AntigravityService):
         from aic_dc.claude_code.consult_listener import ConsultationListener
         from aic_dc.claude_code.consultant import ClaudeConsultant
 
-        if not ClaudeConsultant(self._config_dir).available():
+        def new_consultant() -> Any:
+            return ClaudeConsultant(self._config_dir)
+
+        consultant_factory: Any = None
+        if ClaudeConsultant(self._config_dir).available():
+            consultant_factory = new_consultant
+        else:
             # Not a warning: an install with no Claude CLI is a supported
             # install, and `agy` is the transport that survives one. Said
             # once per spawn rather than silently, because "the tool is
@@ -519,19 +537,29 @@ class AgyService(AntigravityService):
                 "No Claude second opinion is offered to agy: this install "
                 "has no Claude CLI or SDK to run one"
             )
+
+        if consultant_factory is None and self.mcp_bridge is None:
+            # Nothing to serve, so no socket and no config document. The
+            # clear is what it always was: this app's own file, removed
+            # rather than left naming a port nothing is listening on.
             roots.clear_mcp_config(config_root)
             return
 
         spawn_id = uuid.uuid4().hex
         try:
-            listener = ConsultationListener(lambda: ClaudeConsultant(self._config_dir))
+            listener = ConsultationListener(
+                consultant_factory,
+                index_bridge=self.mcp_bridge,
+            )
             await listener.start()
             token = listener.mint(repo_root=self._repo_root, session_id=spawn_id)
-            roots.write_mcp_config(config_root, listener.config_entry(token))
+            document = listener.config_entry(token)
+            roots.write_mcp_config(config_root, document)
         except Exception as exc:  # noqa: BLE001 - an optional tool, not the session
             logger.warning(
-                "The Claude consultation listener could not be offered to "
-                "this agy session, which will run without it: %s",
+                "The MCP listener could not be offered to this agy session, "
+                "which will run without a second opinion and without repo "
+                "intelligence: %s",
                 exc,
             )
             with contextlib.suppress(Exception):
@@ -544,7 +572,8 @@ class AgyService(AntigravityService):
         self._consult_token = token
         self._consult_spawn_id = spawn_id
         logger.info(
-            "agy may consult Claude on 127.0.0.1:%s for this session",
+            "agy reaches %s on 127.0.0.1:%s for this session",
+            ", ".join(sorted(document.get("mcpServers", {}))),
             listener.port,
         )
 

@@ -3016,7 +3016,7 @@ fires the mirror has already routed around the problem and will not complain aga
 
 <a id="ag-r-33"></a>
 
-## AG-R-33 — Neither Antigravity transport can be asked what the user is looking at *now*
+## AG-R-33 — Neither Antigravity transport can be asked what the user is looking at *now* **(closed 2026-09-15)**
 
 Left by [AG-33](decisions.md#ag-33), which closed the larger half of this: the open file now reaches
 the model on all three engines, in identical words, on the turn's own prompt.
@@ -3051,3 +3051,129 @@ test_it_reaches_the_ui_state_tool_as_well_as_the_prompt` pins the Claude side, a
 docstring names this asymmetry at the point where a reader would otherwise assume parity. There is no
 test on the Antigravity side, because the thing to assert is the absence of a tool, and an assertion
 that `agy` is given exactly one MCP server would fail the day a second one is added for any reason.
+
+> **Widened 2026-09-15 by [AG-34](decisions.md#ag-34): the missing tool is the smallest part of it.**
+> This entry was written as though `ui_state` were the one absence, because AG-33 had just been looking
+> at viewer state and found the reader that was missing. Measured properly the next day: **none of the
+> six** `aic-dc` tools reaches either Antigravity transport. `claude_code/mcp_server.py` is imported by
+> `claude_code/service.py` alone, so `symbol_map`, `file_symbols`, `find_references`, `doc_outline` and
+> `review_state` are absent by the same mechanism and were absent the whole time. Two sentences above
+> are therefore too kind to the shipped state — *"the gap is narrower than it sounds"* and *"nothing in
+> front of the model is wrong"* — and both are true only of the viewer half this entry happened to be
+> looking at.
+>
+> The paragraph that survives is **What it would cost**, which guessed the shape right: the snapshot was
+> never the work, the gate policy was. AG-34 measures exactly that — `agy/tools.py:114` classes
+> `call_mcp_tool` as `exec`, so every one of the six would open a permission dialog where the Claude
+> engine ungates them by server name at `claude_code/permissions.py:173`. What that paragraph did not
+> anticipate is that the *other* transport needs no server at all: [AG-4](decisions.md#ag-4) had already
+> decided callables for the SDK path, and its plumbing has been sitting unfed at
+> `antigravity/options.py:240` since it was written.
+>
+> **The reasoning that stays correct is the rejection of `PreInvocation`**, and it now covers more than
+> it was written for. A repository whose shape is re-asserted every invocation is a worse version of the
+> same mistake than a re-asserted viewer, because it is larger and goes stale on the agent's own writes.
+>
+> Superseded as a whole by AG-34; closed when that build lands on both transports. The last paragraph's
+> reason for having no Antigravity-side tripwire also expires with it — once a second MCP server is
+> deliberately given to `agy`, "exactly one server" stops being the invariant it declined to assert and
+> becomes a fact worth pinning by name.
+
+### Closed, 2026-09-15
+
+All six tools reach both transports, and the two costs this entry guessed at are the two that were
+actually paid.
+
+**The gate policy was the work, as predicted — and it was two narrowings, not one.** On `agy` the call
+arrives as `call_mcp_tool` with `{"ServerName", "ToolName"}` beside it, so
+`antigravity/permissions.is_index_read` checks the **pair** and `pre_verdict` returns an allow before the
+class table or `ALWAYS_ASK` is consulted. First, and that ordering is the whole of it: `call_mcp_tool`
+is classed `exec` and sits in `ALWAYS_ASK` — correctly, since it dispatches an open set — so a check
+placed after either would never have fired and every `symbol_map` would have opened a dialog. On the SDK
+transport there is no server name because there is no server, so the gate is told which bare names *this
+session registered* (`own_read_tools`, derived from the callables actually passed). Deliberately not
+defaulted to `index_tools.TOOL_NAMES`: on `agy` a bare `symbol_map` would be a tool of the binary's that
+happened to share the spelling, and defaulting would be the gate deciding it recognises something on
+evidence it does not have.
+
+**What the cost paragraph did not anticipate, and it was the expensive half.** AG-4's callable channel
+existed and using it needed a measurement of somebody else's code. A plain callable has its declaration
+derived from its *signature*
+(`FunctionDeclaration.from_callable_with_api_option`, `connections/local/local_connection.py:243`), and
+all six of our handlers share one `**arguments` signature — so the obvious build would have advertised
+six tools with one empty schema between them and no per-argument prose. `ToolWithSchema` is the one
+branch that takes a schema verbatim (`:222`), where `__name__` is the name, **`__doc__` is the
+description** — there is no description argument anywhere on that path — and `normalize_schema` was
+measured to return all six of our schemas unchanged. That measurement is what lets the claim be
+*identical* words rather than equivalent ones.
+
+**And a trap neither this entry nor AG-34's first draft saw.** `policies=[deny_all(), *allows]` names
+`BuiltinTools` members only, and a custom Python tool is not one — so the six would have been declared
+to the model and then refused by the wildcard deny, in the Go harness, with nothing in Python to show
+it. That failure costs a turn and reads to the user as the tool being broken rather than as a policy.
+`build_config` now emits one specific allow per custom tool, which beats a wildcard deny by the SDK's
+own documented precedence.
+
+**The structural blocker was on the `agy` side and had nothing to do with tools.** `_offer_consultant`
+started the loopback listener only when a Claude CLI was installed, and cleared the config otherwise —
+so an `agy`-only install, which is the likeliest shape of a subscription user's machine, would have lost
+the repo intelligence along with the second opinion. The two halves are now offered independently: a
+consultant factory when `claude` is there, an index server whenever there is a bridge, both on one
+socket under one bearer with two mount points.
+
+**The tripwire this entry declined to write now exists**, and it is the fact rather than the count:
+`test_agy_service.py::TestTheIndexToolsAgyCanReach` asserts both servers by name in the config document
+`agy` actually reads, on one port with one token — over the wire, not in-process, because the defect
+being closed was a tool that existed in Python and did not exist to a model. `test_antigravity_options.py`
+drives the SDK's own `ToolRunner` for the same reason.
+
+**And a live one, because no offline test can see the far end of a pipe.**
+`scripts/probe_agy_index_tools.py` spawns the real binary against the real config and confirmed on
+2026-09-15 that `agy` opens a transport on *both* servers and calls two of the six with no dialog. Its
+first run failed on correct code by looking for our names in `agy`'s `init` frame: that frame carries 57
+builtins and no MCP tool at all — not `second_opinion` either, which has worked since AG-22 — because
+every MCP call on this transport arrives as `call_mcp_tool` with the target in its arguments. Which is
+the same fact `is_index_read` above is built on, arrived at from the other direction.
+
+The one thing left unfixed is the `ui_state` description's promise of *"files ticked in the picker"*,
+which no snapshot has ever carried. Moved verbatim so the extraction was provably byte-exact, and
+recorded separately as [AG-R-34](#ag-r-34).
+
+---
+
+<a id="ag-r-34"></a>
+
+## AG-R-34 — `ui_state` promises the model a file list that no snapshot has ever carried
+
+Left by [AG-34](decisions.md#ag-34), which moved the tool descriptions into `index_tools.SPECS` and
+declined to edit one of them on the way.
+
+`ui_state`'s description opens *"What the user is looking at right now: **files ticked in the picker**,
+the file open in the viewer pane and the selected line range."* The first of those three is not in the
+answer. `ClaudeCodeService._ui_state_snapshot` returns `viewer`, `review_state` and `permission_mode`,
+and the Antigravity adapter's counterpart returns the same three keys — there is no set of ticked files
+in either, and there never was. The tool has said this since phase 4.
+
+**The snapshot is right and the sentence is wrong**, which is the part worth being clear about. The
+absence is deliberate and reasoned: `specs5/plan/decisions.md` CC-21 records that pointing at a file is
+something the user does *in the prompt*, where the agent already sees it, so there is no browser-side
+selection to report. `_ui_state_snapshot`'s own docstring makes that argument at the point where a
+reader would otherwise assume a field had been forgotten. So the fix is a reword, not a feature.
+
+**Why it was not fixed in the same change.** AG-34's whole guarantee is that the prose the model reads
+did not change when it moved out of the `@tool` calls and into a spec table — `tests/test_index_tools.py`
+pins every description as a **literal**, written from the shipped source, so the extraction is provably
+byte-exact. Editing a description inside that change would have made one of the six unverifiable against
+the state it came from, in the one commit whose claim is sameness. And a tool description is product
+text: it is now read by three engines, so rewording it is a change to what every engine tells a model,
+which is a decision rather than a tidy-up.
+
+**What it costs while it stands.** A model that wants the picker's selection calls `ui_state`, gets three
+keys that do not include it, and has to infer the difference between "nothing is ticked" and "this tool
+does not report that". The likeliest reading is the first, which is a false negative rather than a
+wrong answer — the model concludes the user has selected nothing. Small, and one-directional: nothing
+here puts a wrong fact in front of the model, and the two fields that *are* promised are both delivered.
+
+**The tripwire is `tests/test_index_tools.py`'s literal**, which is what makes the reword deliberate: the
+sentence cannot be changed without changing the test that quotes it, in a file whose whole purpose is to
+make a description edit visible. The fix is to drop the clause, at which point this entry closes.

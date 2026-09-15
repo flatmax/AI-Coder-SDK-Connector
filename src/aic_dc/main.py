@@ -1140,6 +1140,11 @@ async def run(
                 repo=repo,
                 event_callback=event_callback,
                 reindexer=claude_code_service.reindexer,
+                # AG-34: the same six `aic-dc` tools this engine's README row
+                # has always claimed. One tree, one index, one readiness
+                # flag — passed rather than rebuilt, for the reason the
+                # `reindexer` above is.
+                index_sources=claude_code_service.index_sources,
                 credentials=antigravity_credentials,
             )
             logger.info(
@@ -1174,6 +1179,7 @@ async def run(
                 repo=repo,
                 event_callback=event_callback,
                 reindexer=claude_code_service.reindexer,
+                index_sources=claude_code_service.index_sources,
                 credentials=antigravity_credentials,
             )
             logger.info("agy transport mounted (Antigravity CLI on PATH)")

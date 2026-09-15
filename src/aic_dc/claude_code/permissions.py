@@ -60,6 +60,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from aic_dc import index_tools
 from aic_dc.claude_code.messages import Event, mcp_server_name, summarise_tool_input
 
 logger = logging.getLogger(__name__)
@@ -114,8 +115,12 @@ RESOLUTION_MEMORY = 64
 # ---------------------------------------------------------------------------
 
 # The MCP server AIC-DC itself exposes (phase 4). Its tools are repo
-# introspection — the same class of consequence as Read.
-AIC_DC_MCP_SERVER = "aic-dc"
+# introspection — the same class of consequence as Read. Re-exported from
+# `index_tools` rather than spelled again: the same six tools are now served
+# on the two Antigravity transports under the same name, and this module's
+# classification of the string has to be about the same server the others
+# register.
+AIC_DC_MCP_SERVER = index_tools.SERVER_NAME
 
 _READ_TOOLS = frozenset(
     {"Read", "Glob", "Grep", "WebFetch", "WebSearch", "NotebookRead", "TodoWrite"}

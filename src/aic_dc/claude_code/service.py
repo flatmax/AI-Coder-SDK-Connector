@@ -471,14 +471,14 @@ class ClaudeCodeService:
             broadcast=self._broadcast,
             repo_root=self._repo_root,
         )
+        # Built from `index_sources` rather than naming the five again, so
+        # that what the other engines are handed is provably what this one
+        # uses. Two records of the same five callables is how the engines
+        # would come to disagree about readiness without anyone noticing.
         self.mcp_bridge = McpBridge(
-            symbol_index=self._live_symbol_index,
-            symbol_index_ready=lambda: self._symbol_index_ready,
-            doc_index=self._live_doc_index,
-            doc_index_ready=lambda: self.doc_builder.ready,
+            **self.index_sources,
             review_state=self.get_review_state,
             ui_state=self._ui_state_snapshot,
-            flush=self.reindexer.flush,
         )
         # Filled by the call below, drained onto the health record once the
         # session that owns it exists.
@@ -980,6 +980,28 @@ class ClaudeCodeService:
         if getattr(self.doc_builder, "failed", False):
             return None
         return self.doc_builder.doc_index
+
+    @property
+    def index_sources(self) -> dict[str, Any]:
+        """The five of :class:`McpBridge`'s callables that belong to the *tree*.
+
+        Handed to the other engines' adapters by ``main.py``, which is what
+        gives them the same six repo-intelligence tools this one has
+        (AG-34). Five and not seven, and the split is the point: the symbol
+        index, its readiness, the doc index, its readiness and the re-index
+        flush all describe *one working tree*, of which there is one however
+        many engines are mounted. ``review_state`` and ``ui_state`` are the
+        two that do not — each engine has its own ``ReviewMode`` and its own
+        idea of what the user is looking at, so an engine sharing those
+        would report the *other* engine's review as its own.
+        """
+        return {
+            "symbol_index": self._live_symbol_index,
+            "symbol_index_ready": lambda: self._symbol_index_ready,
+            "doc_index": self._live_doc_index,
+            "doc_index_ready": lambda: self.doc_builder.ready,
+            "flush": self.reindexer.flush,
+        }
 
     def _ui_state_snapshot(self) -> dict[str, Any]:
         """What the user is pointing at, for the ``ui_state`` tool.

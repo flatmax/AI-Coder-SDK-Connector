@@ -1539,7 +1539,7 @@ class TestTheConsultantAgyCanReach:
     modes rather than inherited from a default.
     """
 
-    def offer(self, tmp_path, monkeypatch, *, available=True, fail=False):
+    def offer(self, tmp_path, monkeypatch, *, available=True, fail=False, **kw):
         from aic_dc.claude_code import consult_listener as listener_module
         from aic_dc.claude_code.consultant import ClaudeConsultant
 
@@ -1551,7 +1551,7 @@ class TestTheConsultantAgyCanReach:
             monkeypatch.setattr(
                 listener_module.ConsultationListener, "start", explode
             )
-        svc = service(tmp_path)
+        svc = service(tmp_path, **kw)
         root = roots.master_root(svc._config_dir)
         return svc, root
 
@@ -1585,7 +1585,7 @@ class TestTheConsultantAgyCanReach:
 
         asyncio.run(go())
 
-    def test_no_claude_means_no_file_rather_than_a_dead_one(
+    def test_nothing_to_serve_means_no_file_rather_than_a_dead_one(
         self, tmp_path, monkeypatch
     ):
         """An install with no Claude CLI is a supported install.
@@ -1593,8 +1593,15 @@ class TestTheConsultantAgyCanReach:
         A config file left behind would send `agy` dialling a port that
         answers nothing, and the user would read an MCP error for a
         feature that was never switched on.
+
+        **Nothing to serve, not "no Claude".** Since AG-34 the listener
+        also carries the six index tools, so this service is built with no
+        index sources as well — those two absences together are what make
+        the file pointless. The class below is the case where one of them is
+        present.
         """
         svc, root = self.offer(tmp_path, monkeypatch, available=False)
+        assert svc.mcp_bridge is None, "this test needs a service with no bridge"
         roots.write_mcp_config(root, {"mcpServers": {"stale": {}}})
 
         asyncio.run(svc._offer_consultant(root))
@@ -1647,6 +1654,141 @@ class TestTheConsultantAgyCanReach:
                 assert svc._listener.resolve(svc._consult_token) is not None
             finally:
                 await svc._retire_consultant()
+
+        asyncio.run(go())
+
+
+class TestTheIndexToolsAgyCanReach:
+    """AG-34 on the transport that cannot be handed a callable.
+
+    `agy` is a subprocess, so the six index tools reach it the only way
+    anything reaches it: a second MCP server on the same authenticated
+    loopback listener AG-22 built for the second opinion. The listener is
+    the same object, the bearer is the same bearer and the port is the same
+    port — one socket, two servers.
+
+    The failure this class pins is a **structural** one, and it is the
+    reason the two halves had to be separated rather than the tools simply
+    added: ``_offer_consultant`` started the listener only when a Claude CLI
+    was installed, so on a machine without one the config was cleared and
+    the repo intelligence went with the second opinion. A `agy`-only
+    install is a supported install, and it is the one where the symbol map
+    has nothing to do with whether `claude` is on ``PATH``.
+    """
+
+    def sources(self):
+        """The five tree-shaped callables ``main.py`` passes in."""
+        return {
+            "symbol_index": lambda: None,
+            "symbol_index_ready": lambda: True,
+            "doc_index": lambda: None,
+            "doc_index_ready": lambda: True,
+            "flush": lambda: None,
+        }
+
+    def offer(self, tmp_path, monkeypatch, *, available):
+        return TestTheConsultantAgyCanReach.offer(
+            self,
+            tmp_path,
+            monkeypatch,
+            available=available,
+            index_sources=self.sources(),
+        )
+
+    def served(self, root):
+        body = json.loads(roots.mcp_config_file(root).read_text(encoding="utf-8"))
+        return body["mcpServers"]
+
+    def test_repo_intelligence_survives_an_install_with_no_claude(
+        self, tmp_path, monkeypatch
+    ):
+        """The structural blocker, stated as the behaviour it cost.
+
+        Before this the config was cleared and the listener never started,
+        so the six tools were unreachable on the transport most likely to be
+        the only one a subscription user has.
+        """
+        svc, root = self.offer(tmp_path, monkeypatch, available=False)
+        assert svc.mcp_bridge is not None
+
+        async def go():
+            await svc._offer_consultant(root)
+            try:
+                assert list(self.served(root)) == ["aic-dc"]
+                assert svc._listener is not None
+                assert svc._listener.serves_index
+                assert not svc._listener.serves_consultation
+            finally:
+                await svc._retire_consultant()
+
+        asyncio.run(go())
+
+    def test_both_servers_ride_one_socket_and_one_bearer(self, tmp_path, monkeypatch):
+        """Two entries, one port, one token — not two listeners.
+
+        A second listener would be a second port to bind, a second token to
+        revoke and a second thing to leave running after a turn. The bearer
+        is checked against the listener's own grant table rather than for
+        being non-empty, because a config naming a token the listener will
+        not honour is the failure that looks like the tools being broken.
+        """
+        svc, root = self.offer(tmp_path, monkeypatch, available=True)
+
+        async def go():
+            await svc._offer_consultant(root)
+            try:
+                entries = self.served(root)
+                assert sorted(entries) == ["aic-dc", "aic-dc-claude"]
+                port = svc._listener.port
+                tokens = set()
+                for name, entry in entries.items():
+                    assert f"127.0.0.1:{port}" in entry["serverUrl"], name
+                    tokens.add(entry["headers"]["Authorization"])
+                assert len(tokens) == 1
+                token = tokens.pop().removeprefix("Bearer ")
+                assert svc._listener.resolve(token) is not None
+                assert token == svc._consult_token
+            finally:
+                await svc._retire_consultant()
+
+        asyncio.run(go())
+
+    def test_the_two_servers_are_on_different_paths(self, tmp_path, monkeypatch):
+        """One socket needs two mount points, and `agy` dials the URL.
+
+        Asserted on the artefact the binary reads rather than on the app's
+        routing table: a config that named one path twice would send both
+        servers' traffic to whichever answered.
+        """
+        svc, root = self.offer(tmp_path, monkeypatch, available=True)
+
+        async def go():
+            await svc._offer_consultant(root)
+            try:
+                urls = {e["serverUrl"] for e in self.served(root).values()}
+                assert len(urls) == 2
+            finally:
+                await svc._retire_consultant()
+
+        asyncio.run(go())
+
+    def test_the_index_tools_are_reclaimed_with_the_child(
+        self, tmp_path, monkeypatch
+    ):
+        """The same lifetime the second opinion has, for the same reason.
+
+        A token outliving the subprocess it was minted for is a grant to
+        whatever binds that port next.
+        """
+        svc, root = self.offer(tmp_path, monkeypatch, available=False)
+
+        async def go():
+            await svc._offer_consultant(root)
+            listener, token = svc._listener, svc._consult_token
+            await svc._retire_consultant()
+            assert listener.resolve(token) is None
+            assert listener.port is None
+            assert not roots.mcp_config_file(root).exists()
 
         asyncio.run(go())
 

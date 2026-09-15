@@ -62,6 +62,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from _agy_probe_support import probe_root  # noqa: E402
+
 from aic_dc.agy import install  # noqa: E402
 from aic_dc.agy.service import AgyService  # noqa: E402
 
@@ -120,14 +121,25 @@ async def turn(service: AgyService, request_id: str, prompt: str) -> str:
     Goes through ``chat_streaming`` rather than ``AgySession`` directly,
     because the mirror is wired at ``_dispatch`` and reaching past the
     adapter would be probing a path the product does not use.
+
+    **Every fragment as well as the footer**, as
+    ``probe_agy_pre_invocation.py`` explains at length. This read
+    ``response_text`` off ``streamComplete`` until 2026-09-15 — a key that
+    was renamed to ``response`` when both Antigravity transports were found
+    to be settling every turn with empty content. This probe's whole
+    assertion is a passphrase appearing in the answer, so the stale key made
+    a resume that worked indistinguishable from one that had lost the
+    context: an empty string contains no passphrase either way.
     """
-    answer: list[str] = []
+    prose: list[str] = []
     original_dispatch = service._dispatch
 
     async def recording_dispatch(event: Any, rid: str | None) -> None:
         await original_dispatch(event, rid)
-        if event.name == "streamComplete":
-            answer.append(str(event.payload.get("response_text") or ""))
+        for key in ("text", "delta", "content", "response"):
+            value = event.payload.get(key)
+            if isinstance(value, str) and value:
+                prose.append(value)
 
     service._dispatch = recording_dispatch  # type: ignore[method-assign]
     started = await service.chat_streaming(request_id, prompt)
@@ -137,7 +149,7 @@ async def turn(service: AgyService, request_id: str, prompt: str) -> str:
         while request_id in service._turns:
             await asyncio.sleep(0.1)
     service._dispatch = original_dispatch  # type: ignore[method-assign]
-    return answer[-1] if answer else ""
+    return "\n".join(prose)
 
 
 # ----------------------------------------------------------------------

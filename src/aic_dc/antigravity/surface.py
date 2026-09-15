@@ -119,9 +119,13 @@ PENDING_CONFIG: dict[str, str] = {
     "logging; worth wiring once there is somewhere to route it, which is "
     "the analogue of the Claude engine's engine-errors.jsonl.",
     "mcp_servers":"stdio and streamable-HTTP MCP servers. AG-4 routes "
-    "AIC-DC's own indexes through `tools` as plain callables instead, so "
-    "nothing needs this today; user-configured servers have no Antigravity "
-    "path yet and want a settings surface before a config field.",
+    "AIC-DC's own indexes through `tools` as plain callables instead, which "
+    "became true on 2026-09-15 and was written here as though it already "
+    "were: AG-4 built the channel and nothing produced a value for it for "
+    "eleven days, so this entry read as coverage and was the reason nobody "
+    "looked (AG-34). Now genuinely nothing needs this on the SDK transport. "
+    "User-configured servers still have no Antigravity path and want a "
+    "settings surface before a config field.",
     "models":"per-ModelType overrides — TEXT and IMAGE are separate "
     "targets, which is how generate_image picks a model distinct from the "
     "one holding the conversation. Phase 1's consultant needs it.",
