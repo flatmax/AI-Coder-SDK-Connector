@@ -49,16 +49,23 @@ pins every description and schema as a **literal** rather than comparing
 against this module — a reword has to be deliberate rather than noticed
 three times or not at all.
 
-One known discrepancy, moved rather than fixed
-==============================================
-``ui_state``'s description promises *"files ticked in the picker"* and the
-snapshot behind it has never carried a file list: ``_ui_state_snapshot``
-(``claude_code/service.py``) returns the viewer, the review state and the
-permission mode, and its own docstring explains why there is no set of
-files to report (``specs5/plan/decisions.md`` CC-21). The text is moved
-here **verbatim** anyway, because this change's whole guarantee is that the
-prose the model reads did not change when it moved, and editing a tool
-description is a change to what three engines tell a model. Recorded as
+The one description that was wrong when it moved
+===============================================
+``ui_state`` opened *"What the user is looking at right now: files ticked
+in the picker, …"* — and there is no ticking. The checkbox was removed
+under ``specs5/plan/decisions.md`` CC-21, which decided that pointing at a
+file is something the user does *in the prompt* where the agent already
+sees it; ``files-tab/exclusion.js`` says so at the line where the last of
+its state outlived it. So the sentence did not describe a snapshot field
+that had been forgotten. It described a control the user cannot operate.
+
+Moved **verbatim** on 2026-09-15 all the same, because that change's whole
+guarantee was that the prose did not change when it moved, and reworded on
+2026-09-16 once it was separable — dropping the clause, and naming the two
+keys the answer really carries and the old text never mentioned
+(``review_state``, ``permission_mode``). A tool description is product
+text read by three engines, so it is a decision rather than a tidy-up,
+which is why it took its own commit:
 [AG-R-34](../../specs5/plan-ag/risks.md#ag-r-34).
 """
 
@@ -266,8 +273,9 @@ SPECS: tuple[ToolSpec, ...] = (
     ToolSpec(
         name="ui_state",
         description=(
-            "What the user is looking at right now: files ticked in the picker, "
-            "the file open in the viewer pane and the selected line range. "
+            "What the user is looking at right now: the file open in the "
+            "viewer pane and the selected line range, whether a review is "
+            "in progress, and the permission mode this session runs under. "
             "Browser state, so no built-in tool can answer it. The turn's "
             "opening framing carries a snapshot of this; call the tool to "
             "re-read it after a long turn."

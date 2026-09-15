@@ -3143,7 +3143,7 @@ recorded separately as [AG-R-34](#ag-r-34).
 
 <a id="ag-r-34"></a>
 
-## AG-R-34 — `ui_state` promises the model a file list that no snapshot has ever carried
+## AG-R-34 — `ui_state` promises the model a file list that no snapshot has ever carried **(closed 2026-09-16)**
 
 Left by [AG-34](decisions.md#ag-34), which moved the tool descriptions into `index_tools.SPECS` and
 declined to edit one of them on the way.
@@ -3177,3 +3177,30 @@ here puts a wrong fact in front of the model, and the two fields that *are* prom
 **The tripwire is `tests/test_index_tools.py`'s literal**, which is what makes the reword deliberate: the
 sentence cannot be changed without changing the test that quotes it, in a file whose whole purpose is to
 make a description edit visible. The fix is to drop the clause, at which point this entry closes.
+
+### Closed, 2026-09-16
+
+**And the entry above understated it: there is no ticking at all.** This was written as a snapshot
+missing a field — the picker has a selection, `_ui_state_snapshot` does not report it, CC-21 explains
+why. That is not the situation. CC-21 removed the **checkbox**, and `files-tab/exclusion.js` says so at
+the line where the last of its three-state logic outlived it: *"it outlived both the index it named and,
+under CC-21, the checkbox itself"*. `mentions.js` says the same thing from the other side — the affordance
+is `@`-mentions in the prompt now. So the sentence was not promising an unreported fact. It was
+promising a control the user cannot operate, and had been since phase 4.
+
+That makes the cost paragraph above too generous as well. It reasoned the model would read the empty
+answer as "nothing is ticked" — a one-directional false negative. But a model told it can see a
+selection, finding none, and *asking the user to tick some files* is putting a wrong fact in front of
+them, not withholding a right one.
+
+Reworded rather than merely trimmed, because the sentence was wrong in both directions: it named one
+thing the answer does not carry and omitted two that it does. `ui_state` now reads *"the file open in the
+viewer pane and the selected line range, whether a review is in progress, and the permission mode this
+session runs under"* — every key `_ui_state_snapshot` actually returns, on both adapters.
+
+**A prose literal was not enough, which is the reusable part.** Every existing check in
+`test_index_tools.py` asks whether the description is *unchanged*, and this one was: unchanged and wrong
+from the day it was written, so the pinning that made AG-34's extraction provable could never have caught
+it. `TestUiStateDescribesTheAnswerItSends` asserts in both directions instead — every snapshot key is
+named in the prose, and four spellings of a selection are absent, because the fault was the idea rather
+than the word. Five failures against the shipped description, 40 passing.

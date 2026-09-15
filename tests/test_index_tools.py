@@ -77,8 +77,9 @@ REVIEW_STATE_DESCRIPTION = (
 )
 
 UI_STATE_DESCRIPTION = (
-    "What the user is looking at right now: files ticked in the picker, "
-    "the file open in the viewer pane and the selected line range. "
+    "What the user is looking at right now: the file open in the "
+    "viewer pane and the selected line range, whether a review is "
+    "in progress, and the permission mode this session runs under. "
     "Browser state, so no built-in tool can answer it. The turn's "
     "opening framing carries a snapshot of this; call the tool to "
     "re-read it after a long turn."
@@ -211,6 +212,51 @@ class TestTheTextIsWhatClaudeAlreadySent:
 
         for tool in McpBridge().build_tools():
             assert tool.annotations.readOnlyHint is True, tool.name
+
+
+class TestUiStateDescribesTheAnswerItSends:
+    """AG-R-34's tripwire, and the reason it needed one.
+
+    The description promised *"files ticked in the picker"* from phase 4
+    until 2026-09-16. Nothing caught it because every check in this file
+    asks whether the prose is unchanged, and it was: unchanged and wrong
+    from the day it was written. There are no ticks — CC-21 removed the
+    checkbox, deciding that pointing at a file is something the user does
+    in the prompt where the agent already sees it — so this was not a
+    snapshot missing a field. It was a promise about a control the user
+    cannot operate.
+
+    Two assertions in opposite directions, because the sentence was wrong
+    both ways: it named one thing the answer does not carry and omitted two
+    that it does.
+    """
+
+    #: What both adapters' ``_ui_state_snapshot`` really returns, mapped to
+    #: the words the description uses for it. Pinned here as a literal;
+    #: ``test_claude_code_service.py`` and ``test_antigravity_service.py``
+    #: are where the snapshots are asserted to return exactly these keys, so
+    #: a fourth key added there without a reword fails *there* as well.
+    ANSWERS = {
+        "viewer": "viewer",
+        "review_state": "review",
+        "permission_mode": "permission mode",
+    }
+
+    @pytest.mark.parametrize("key,phrase", sorted(ANSWERS.items()))
+    def test_every_key_the_snapshot_sends_is_named_in_the_prose(self, key, phrase):
+        """A key the model is never told about is a key it never asks for."""
+        assert phrase in index_tools.by_name("ui_state").description, key
+
+    @pytest.mark.parametrize("claim", ["tick", "picker", "checkbox", "selected files"])
+    def test_it_promises_no_selection_the_browser_cannot_express(self, claim):
+        """Four spellings, because the fault was the *idea* rather than a word.
+
+        A reword that swapped "ticked in the picker" for "chosen in the file
+        list" would leave the model inferring an empty selection from an
+        answer that has no selection in it — a false negative, and the one
+        this entry measured as the cost of leaving the clause standing.
+        """
+        assert claim not in index_tools.by_name("ui_state").description.lower()
 
 
 class TestTheServerNameIsSpelledOnce:

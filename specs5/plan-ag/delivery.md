@@ -8379,3 +8379,32 @@ selection to report — and the sentence is wrong. Moved **verbatim** anyway, be
 guarantee is that the prose did not change when it moved, and `tests/test_index_tools.py` pins each
 description as a literal so the reword has to be deliberate. Editing one inside the commit whose claim is
 sameness would have made it unverifiable against the state it came from.
+
+## The description that was wrong before it moved (2026-09-16)
+
+[AG-R-34](risks.md#ag-r-34), closed the morning after it was opened, and the entry needed correcting
+before it could be.
+
+**It was written as a snapshot missing a field, and it is not that.** The entry reasoned that the picker
+has a selection which `_ui_state_snapshot` declines to report, with CC-21 explaining why. Told plainly
+that *you cannot tick files in the picker*, the code agrees at the line a reader would reach last:
+`files-tab/exclusion.js` says its three-state logic *"outlived both the index it named and, under CC-21,
+the checkbox itself"*, and `mentions.js` says the affordance is `@`-mentions in the prompt now. So the
+description was not promising an unreported fact. It was promising a control that does not exist, and had
+been since phase 4.
+
+Which also makes the cost too generously stated. A model reading an empty answer as "nothing is ticked"
+is a one-directional false negative; a model *asking the user to tick some files* is a wrong fact put in
+front of them. Same sentence, worse consequence than the entry credited it with.
+
+Reworded rather than trimmed, because it was wrong in both directions — one thing named that the answer
+does not carry, two omitted that it does. It now names every key `_ui_state_snapshot` returns on both
+adapters: the viewer and its line range, whether a review is in progress, and the permission mode.
+
+**The reusable finding is that a prose literal could never have caught this.** Every other check in
+`test_index_tools.py` asks whether the description is *unchanged* — and it was, unchanged and wrong from
+the day it was written, so the pinning that made AG-34's extraction provably byte-exact was blind to it by
+construction. `TestUiStateDescribesTheAnswerItSends` asserts in both directions instead: every snapshot
+key appears in the prose, and four spellings of a selection do not, because the fault was the idea and not
+the word. Five failed against the shipped description, 40 passed; 726 passed across the five affected
+files afterwards.
