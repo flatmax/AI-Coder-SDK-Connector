@@ -140,7 +140,14 @@ vi.mock('monaco-editor/esm/vs/editor/edcore.main.js', () => {
 // ---------------------------------------------------------------------------
 
 import { SharedRpc } from '../rpc.js';
-import { ESCAPE_DENY_REASON, SETTLING_MS, TITLE_MARKER } from './constants.js';
+import {
+  ESCAPE_DENY_REASON,
+  QUESTION_DOCK_GUTTER,
+  QUESTION_DOCK_MIN_PLAIN,
+  QUESTION_DOCK_MIN_WIDTH,
+  SETTLING_MS,
+  TITLE_MARKER,
+} from './constants.js';
 import './index.js';
 
 // ---------------------------------------------------------------------------
@@ -234,6 +241,22 @@ function key(el, k, extra = {}) {
     key: k, bubbles: true, cancelable: true, ...extra,
   });
   window.dispatchEvent(event);
+  return event;
+}
+
+/**
+ * Escape pressed with focus inside the panel.
+ *
+ * `key()` dispatches on `window`, whose composed path is `window` alone —
+ * which is what a keystroke aimed at anything else on screen looks like. A
+ * real keypress inside the panel originates on the focused node in the
+ * shadow root and is `composed`, so the dialog is on its path.
+ */
+function keyFromInside(el, k) {
+  const event = new KeyboardEvent('keydown', {
+    key: k, bubbles: true, cancelable: true, composed: true,
+  });
+  el.shadowRoot.querySelector('.dialog').dispatchEvent(event);
   return event;
 }
 
@@ -2925,6 +2948,578 @@ describe('a question offering examples', () => {
     expect(el.shadowRoot.querySelector('.option-preview-label').textContent)
       .toContain('Sidebar');
   });
+});
+
+// ---------------------------------------------------------------------------
+// interact — beside the transcript rather than over it
+//
+// A question is written about what was just said, and the modal was drawn
+// opaquely over the one thing the user needs to read to answer it. The shell
+// measures where its docked panel ends and hands that over as `dockLeft`;
+// everything below is what the dialog does with it (§ Placement).
+// ---------------------------------------------------------------------------
+
+describe('a question with room beside the chat', () => {
+  const DOCK_LEFT = 401;
+  const inlineStyle = (el) =>
+    el.shadowRoot.querySelector('.dialog').getAttribute('style') || '';
+
+  /** Mount with the shell already reporting room, and ask a question. */
+  async function askDocked(el, payload = interactPayload()) {
+    el.dockLeft = DOCK_LEFT;
+    await settle(el);
+    await ask(el, payload);
+  }
+
+  it('sits beside the panel instead of over it, with no scrim', async () => {
+    publishRpc();
+    const el = mount();
+    await settle(el);
+    await askDocked(el);
+
+    const dialog = el.shadowRoot.querySelector('.dialog');
+    expect(dialog.classList.contains('docked')).toBe(true);
+    // The gutter is the dialog's own constant, so the left offset and the
+    // three sides the stylesheet sets cannot disagree.
+    expect(inlineStyle(el))
+      .toContain(`left: ${DOCK_LEFT + QUESTION_DOCK_GUTTER}px`);
+    expect(inlineStyle(el))
+      .toContain(`--question-dock-gutter: ${QUESTION_DOCK_GUTTER}px`);
+    // No scrim at all: the picker, the chat and the viewer are live behind
+    // a docked question, and opening the file it is about is a fair thing
+    // to want to do while answering.
+    expect(el.shadowRoot.querySelector('.scrim')).toBeNull();
+  });
+
+  it('stops claiming to be modal when it is not', async () => {
+    // `aria-modal="true"` beside a live transcript tells a screen reader
+    // everything else on screen is unavailable, which would be false.
+    publishRpc();
+    const el = mount();
+    await settle(el);
+    await askDocked(el);
+    expect(el.shadowRoot.querySelector('.dialog').getAttribute('aria-modal'))
+      .toBeNull();
+  });
+
+  it('is still modal when the shell reports no room', async () => {
+    publishRpc();
+    const el = mount();
+    await settle(el);
+    await ask(el, interactPayload());
+
+    const dialog = el.shadowRoot.querySelector('.dialog');
+    expect(dialog.classList.contains('docked')).toBe(false);
+    expect(dialog.getAttribute('aria-modal')).toBe('true');
+    expect(el.shadowRoot.querySelector('.scrim')).not.toBeNull();
+  });
+
+  it('never docks a class whose modality is the point', async () => {
+    // An edit answered while the user was reading something else is the
+    // failure the scrim exists for; room beside the chat is no argument
+    // against it.
+    publishRpc();
+    const el = mount();
+    await settle(el);
+    await askDocked(el, writePayload());
+
+    expect(el.shadowRoot.querySelector('.dialog').classList.contains('docked'))
+      .toBe(false);
+    expect(el.shadowRoot.querySelector('.scrim')).not.toBeNull();
+  });
+
+  it('returns to the centre when the room goes away', async () => {
+    // Minimizing the panel, or dragging it out of the dock, takes the chat
+    // the question was placed beside with it.
+    publishRpc();
+    const el = mount();
+    await settle(el);
+    await askDocked(el);
+
+    el.dockLeft = null;
+    await settle(el);
+
+    expect(el.shadowRoot.querySelector('.dialog').classList.contains('docked'))
+      .toBe(false);
+    expect(el.shadowRoot.querySelector('.scrim')).not.toBeNull();
+    expect(inlineStyle(el)).not.toContain('left:');
+  });
+
+  it('does not deny because Escape was pressed somewhere else', async () => {
+    // Escape in the chat input clears it. Denying the agent's question for
+    // that would resolve a request the user never touched — and unlike the
+    // modal case, the input behind a docked question is genuinely live.
+    publishRpc();
+    const el = mount();
+    await settle(el);
+    await askDocked(el);
+
+    const event = key(el, 'Escape');
+    await settle(el);
+
+    expect(event.defaultPrevented).toBe(false);
+    expect(lastResolve()).toBeUndefined();
+    expect(el.current?.permission_id).toBe('perm_ask');
+  });
+
+  it('still denies on Escape from inside the panel', async () => {
+    // Escape is the way out of a question the user does not want to answer,
+    // and docking must not take it away.
+    publishRpc();
+    const el = mount();
+    await settle(el);
+    await askDocked(el);
+
+    const event = keyFromInside(el, 'Escape');
+    await settle(el);
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(lastResolve().args).toEqual([
+      'perm_ask', { action: 'deny', reason: ESCAPE_DENY_REASON },
+    ]);
+    expect(el.current).toBeNull();
+  });
+
+  it('leaves Tab alone, so the transcript stays reachable', async () => {
+    // The trap exists so a keyboard user cannot reach a UI the scrim calls
+    // unavailable. With no scrim there is nothing to be inconsistent with,
+    // and reading the transcript is how a keyboard user answers this.
+    //
+    // Asserted on the trap being consulted rather than on defaultPrevented:
+    // jsdom lays nothing out, so `_trapFocus` finds no visible focusable
+    // node and returns without preventing anything either way.
+    publishRpc();
+    const el = mount();
+    await settle(el);
+    await askDocked(el);
+    const trapped = vi.fn();
+    el._trapFocus = trapped;
+
+    keyFromInside(el, 'Tab');
+    expect(trapped).not.toHaveBeenCalled();
+
+    // Same keystroke, same request, no room beside the chat: trapped.
+    el.dockLeft = null;
+    await settle(el);
+    keyFromInside(el, 'Tab');
+    expect(trapped).toHaveBeenCalledTimes(1);
+  });
+
+  it('reports its own modality, because the shell asks', async () => {
+    // The shell makes its global shortcuts inert while a modal request is up
+    // (shell.md § Keyboard Shortcuts) and asks here rather than re-deriving
+    // the rule, so a second copy cannot disagree with the scrim on screen.
+    publishRpc();
+    const el = mount();
+    await settle(el);
+    // Nothing on screen is not a modal, whatever the dock says.
+    el.dockLeft = DOCK_LEFT;
+    await settle(el);
+    expect(el.modal).toBe(false);
+
+    await ask(el, interactPayload());
+    expect(el.modal).toBe(false);
+
+    el.dockLeft = null;
+    await settle(el);
+    expect(el.modal).toBe(true);
+  });
+
+  it('is modal for every other class, room or not', async () => {
+    publishRpc();
+    const el = mount();
+    await settle(el);
+    await askDocked(el, writePayload());
+    expect(el.modal).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// interact — collapsing the modal fallback
+//
+// Where there is no room to dock, the question falls back to the centred modal
+// over the transcript it was written about. Collapsing parks it as its header
+// so the user can read that transcript without answering from memory and
+// without denying a question they do want to answer
+// (§ Collapsing the modal fallback).
+// ---------------------------------------------------------------------------
+
+describe('collapsing a question that could not be docked', () => {
+  const toggle = (el) => el.shadowRoot.querySelector('button.collapse-toggle');
+  const dialog = (el) => el.shadowRoot.querySelector('.dialog');
+
+  /** Ask a question with no room beside the chat, then collapse it. */
+  async function askCollapsed(el, payload = interactPayload()) {
+    await ask(el, payload);
+    toggle(el).click();
+    await settle(el);
+  }
+
+  it('offers the control on the fallback, and only there', async () => {
+    publishRpc();
+    const el = mount();
+    await settle(el);
+    await ask(el, interactPayload());
+    // No room beside the chat: this is the modal covering the transcript, so
+    // there is something to collapse away from.
+    expect(toggle(el)).not.toBeNull();
+    expect(toggle(el).textContent.trim()).toBe('▾');
+
+    // Room appears. The docked question is already beside the transcript —
+    // collapsing it would hide the thing the dock just uncovered.
+    el.dockLeft = 401;
+    await settle(el);
+    expect(toggle(el)).toBeNull();
+  });
+
+  it('does not offer it on a class whose modality is the argument', async () => {
+    // An edit is not collapsible: § Placement's case for the scrim on a
+    // destructive call is not about what the user needs to read.
+    publishRpc();
+    const el = mount();
+    await settle(el);
+    await ask(el, writePayload());
+    expect(toggle(el)).toBeNull();
+  });
+
+  it('parks as its header and hands the transcript back', async () => {
+    publishRpc();
+    const el = mount();
+    await settle(el);
+    await askCollapsed(el);
+
+    expect(dialog(el).classList.contains('collapsed')).toBe(true);
+    // The header stays: which tool is asking, about what, and how long it has
+    // left are exactly what a parked request still has to say.
+    expect(el.shadowRoot.querySelector('header#permission-header')).not.toBeNull();
+    // Everything that answers it is gone from the DOM rather than merely
+    // hidden — a display:none Answer button is still Tab-reachable, and an
+    // invisible control that resolves a request is the click-through
+    // § Anti-Click-Through is about.
+    expect(el.shadowRoot.querySelector('.body')).toBeNull();
+    expect(decision(el, 'allow')).toBeNull();
+    // The scrim is what was covering the chat. Collapsing without dropping it
+    // would be the app agreeing to uncover the transcript in appearance only.
+    expect(el.shadowRoot.querySelector('.scrim')).toBeNull();
+    expect(dialog(el).getAttribute('aria-modal')).toBeNull();
+    expect(el.modal).toBe(false);
+    expect(toggle(el).textContent.trim()).toBe('▴');
+  });
+
+  it('resolves nothing — the request is parked, not answered', async () => {
+    publishRpc();
+    const el = mount();
+    await settle(el);
+    await askCollapsed(el);
+
+    expect(lastResolve()).toBeUndefined();
+    expect(el.current?.permission_id).toBe('perm_ask');
+    expect(el.queue).toHaveLength(1);
+  });
+
+  it('keeps the answers typed before it was collapsed', async () => {
+    // The state lives on the element, not in the DOM the collapse removes —
+    // so a user who picked an option, went to check the transcript and came
+    // back does not start again.
+    publishRpc();
+    const el = mount();
+    await settle(el);
+    await ask(el, interactPayload());
+    el.shadowRoot.querySelectorAll('.option')[1].click();
+    await settle(el);
+    const before = new Map(el._answers);
+
+    toggle(el).click();
+    await settle(el);
+    toggle(el).click();
+    await settle(el);
+
+    expect(el._answers).toEqual(before);
+    expect(decision(el, 'allow')).not.toBeNull();
+  });
+
+  it('does not deny because Escape was pressed somewhere else', async () => {
+    // The same rule the dock needs, and it is hit more often here: collapsing
+    // is *for* returning to the chat input, and Escape there clears it.
+    publishRpc();
+    const el = mount();
+    await settle(el);
+    await askCollapsed(el);
+
+    const event = key(el, 'Escape');
+    await settle(el);
+
+    expect(event.defaultPrevented).toBe(false);
+    expect(lastResolve()).toBeUndefined();
+    expect(el.current?.permission_id).toBe('perm_ask');
+  });
+
+  it('still denies on Escape from inside the collapsed bar', async () => {
+    publishRpc();
+    const el = mount();
+    await settle(el);
+    await askCollapsed(el);
+
+    const event = keyFromInside(el, 'Escape');
+    await settle(el);
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(lastResolve().args).toEqual([
+      'perm_ask', { action: 'deny', reason: ESCAPE_DENY_REASON },
+    ]);
+  });
+
+  it('leaves Tab alone, so the transcript stays reachable', async () => {
+    // Trapping Tab inside a collapsed bar would be worse than pointless: the
+    // only thing in it is the button that expands it again.
+    publishRpc();
+    const el = mount();
+    await settle(el);
+    await askCollapsed(el);
+    const trapped = vi.fn();
+    el._trapFocus = trapped;
+
+    keyFromInside(el, 'Tab');
+    expect(trapped).not.toHaveBeenCalled();
+  });
+
+  it('opens the next request, however the last one was left', async () => {
+    // The load-bearing one. A queue that inherited the collapse would show
+    // the next request as a one-line bar the user has no reason to look at,
+    // which is invariant 1 — "never silently" — reached another way.
+    publishRpc();
+    const el = mount();
+    await settle(el);
+    await askCollapsed(el);
+    expect(dialog(el).classList.contains('collapsed')).toBe(true);
+
+    broadcast(writePayload({
+      permission_id: 'perm_next', tool_use_id: 'toolu_next',
+    }));
+    resolveBroadcast({ permission_id: 'perm_ask', action: 'deny' });
+    await settle(el);
+    await tick(el, SETTLING_MS + 40);
+
+    expect(el.current.permission_id).toBe('perm_next');
+    expect(dialog(el).classList.contains('collapsed')).toBe(false);
+    expect(el.shadowRoot.querySelector('.scrim')).not.toBeNull();
+    expect(el.modal).toBe(true);
+  });
+
+  it('gives up the collapse when the room it worked around appears', async () => {
+    // Widening the panel grants what the collapse was asking for by better
+    // means. Honouring the flag as well would hide the docked panel the user
+    // can now see.
+    publishRpc();
+    const el = mount();
+    await settle(el);
+    await askCollapsed(el);
+
+    el.dockLeft = 401;
+    await settle(el);
+    expect(dialog(el).classList.contains('collapsed')).toBe(false);
+    expect(dialog(el).classList.contains('docked')).toBe(true);
+    expect(el.shadowRoot.querySelector('.body')).not.toBeNull();
+
+    // Narrow it again and the collapse the user asked for is still theirs.
+    el.dockLeft = null;
+    await settle(el);
+    expect(dialog(el).classList.contains('collapsed')).toBe(true);
+  });
+
+  it('collapses on Alt+M, and hands the key back when there is nothing to park',
+    async () => {
+      // The shortcut has to live in the dialog: the shell makes every Alt
+      // binding inert while a modal permission dialog is open, which is
+      // precisely the state this needs to act in.
+      publishRpc();
+      const el = mount();
+      await settle(el);
+      await ask(el, interactPayload());
+
+      const collapse = key(el, 'm', { altKey: true });
+      await settle(el);
+      expect(collapse.defaultPrevented).toBe(true);
+      expect(dialog(el).classList.contains('collapsed')).toBe(true);
+
+      // Caps Lock must not break it, and it toggles back.
+      const expand = key(el, 'M', { altKey: true });
+      await settle(el);
+      expect(expand.defaultPrevented).toBe(true);
+      expect(dialog(el).classList.contains('collapsed')).toBe(false);
+
+      // A class with nothing to park leaves Alt+M to the shell's own panel
+      // minimize. Declining a key and swallowing it anyway is how a
+      // suppressed shortcut becomes indistinguishable from a broken one.
+      resolveBroadcast({ permission_id: 'perm_ask', action: 'deny' });
+      await settle(el);
+      await ask(el, writePayload());
+      const passed = key(el, 'm', { altKey: true });
+      expect(passed.defaultPrevented).toBe(false);
+    });
+
+  it('leaves Alt+Shift+M alone', async () => {
+    publishRpc();
+    const el = mount();
+    await settle(el);
+    await ask(el, interactPayload());
+    const event = key(el, 'M', { altKey: true, shiftKey: true });
+    await settle(el);
+    expect(event.defaultPrevented).toBe(false);
+    expect(dialog(el).classList.contains('collapsed')).toBe(false);
+  });
+
+  it('keeps announcing the countdown while parked', async () => {
+    // A parked request that expires silently is the failure the live region
+    // exists to prevent, so collapsing must not be a way to opt out of it.
+    publishRpc();
+    const el = mount();
+    await settle(el);
+    await askCollapsed(el, interactPayload({ expires_at: expiresIn(61) }));
+
+    await tick(el, 1500);
+    const live = el.shadowRoot.querySelector('.sr-only[role="status"]');
+    expect(live).not.toBeNull();
+    expect(live.textContent).toContain('1 minute left to answer');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// interact — how much room the question actually needs
+//
+// The floor was one number for every question, and it bought a layout most of
+// them never draw: 720px plus gutters wants a viewport near 1480 before even
+// the default half-width panel leaves room, so the dock never engaged on a
+// panel the user had widened. Which floor applies is a fact about the pending
+// request, so the dialog answers it and the shell asks
+// (§ A question docks beside the chat).
+// ---------------------------------------------------------------------------
+
+describe('the width a question needs to dock', () => {
+  /** One question, with `over` applied to it and `payloadOver` to the rest. */
+  function asked(over, payloadOver = {}) {
+    const question = {
+      question: 'Which layout?',
+      header: 'Layout',
+      multi_select: false,
+      options: [
+        { label: 'Sidebar', description: 'nav on the left' },
+        { label: 'Topbar', description: 'nav across the top' },
+      ],
+      ...over,
+    };
+    return interactPayload({
+      question: { ...question, questions: [question] },
+      ...payloadOver,
+    });
+  }
+
+  /** The same question with an example on each option. */
+  const withPreviews = (over, payloadOver) => asked({
+    options: [
+      { label: 'Sidebar', description: 'nav on the left', preview: '[nav]' },
+      { label: 'Topbar', description: 'nav across the top', preview: '=nav=' },
+    ],
+    ...over,
+  }, payloadOver);
+
+  it('asks for the narrow floor when there is nothing to compare', async () => {
+    publishRpc();
+    const el = mount();
+    await settle(el);
+    await ask(el, asked());
+    expect(el.dockMinWidth).toBe(QUESTION_DOCK_MIN_PLAIN);
+  });
+
+  it('asks for the wide floor when the options carry examples', async () => {
+    // This is what the 720 is for: the options and the example beside them.
+    publishRpc();
+    const el = mount();
+    await settle(el);
+    await ask(el, withPreviews());
+    expect(el.dockMinWidth).toBe(QUESTION_DOCK_MIN_WIDTH);
+  });
+
+  it('does not claim the wide floor for a compare pane it will not draw',
+    async () => {
+      // The pane is single-select only (renderInteractBody § compare), so a
+      // multi-select question with previews renders as a plain list. Testing
+      // `hasPreviews` alone would hand it 720px to protect a layout it never
+      // draws — the exact mistake that made the dock unreachable.
+      publishRpc();
+      const el = mount();
+      await settle(el);
+      await ask(el, withPreviews({ multi_select: true }));
+      expect(el.shadowRoot.querySelector('.question-compare')).toBeNull();
+      expect(el.dockMinWidth).toBe(QUESTION_DOCK_MIN_PLAIN);
+    });
+
+  it('takes the widest floor across a set of questions', async () => {
+    // They render stacked in one panel, so the widest layout sets the width.
+    publishRpc();
+    const el = mount();
+    await settle(el);
+    const plain = {
+      question: 'Which branch?',
+      multi_select: false,
+      options: [{ label: 'main', description: 'the default' }],
+    };
+    const compare = {
+      question: 'Which layout?',
+      multi_select: false,
+      options: [{ label: 'Sidebar', description: 'left', preview: '[nav]' }],
+    };
+    await ask(el, interactPayload({
+      question: { ...plain, questions: [plain, compare] },
+    }));
+    expect(el.dockMinWidth).toBe(QUESTION_DOCK_MIN_WIDTH);
+  });
+
+  it('is conservative with nothing pending', async () => {
+    // The shell measures the dock on its own schedule, including before any
+    // request exists. The two ways of being wrong are not symmetrical: too
+    // wide costs a modal the user can collapse, too narrow docks a comparison
+    // into a region that stacks it.
+    publishRpc();
+    const el = mount();
+    await settle(el);
+    expect(el.current).toBeNull();
+    expect(el.dockMinWidth).toBe(QUESTION_DOCK_MIN_WIDTH);
+  });
+
+  it('tells the shell when the answer changes, so a stale verdict cannot stick',
+    async () => {
+      // None of the shell's own triggers fire when a request arrives, so
+      // without this the second question in a queue would inherit the first
+      // one's verdict and stay modal in a region it fits.
+      publishRpc();
+      const el = mount();
+      await settle(el);
+      const changes = [];
+      el.addEventListener('dock-requirement-changed', () => {
+        changes.push(el.dockMinWidth);
+      });
+
+      await ask(el, withPreviews());
+      expect(changes).toEqual([]);   // already the wide floor, nothing moved
+
+      // A plain question behind it. The floor drops, and the shell has to hear.
+      broadcast(asked({ question: 'Which branch?' }, {
+        permission_id: 'perm_plain', tool_use_id: 'toolu_plain',
+      }));
+      resolveBroadcast({ permission_id: 'perm_ask', action: 'allow' });
+      await settle(el);
+      await tick(el, SETTLING_MS + 40);
+      expect(el.current.permission_id).toBe('perm_plain');
+      expect(changes).toEqual([QUESTION_DOCK_MIN_PLAIN]);
+
+      // Queue drained: back to the conservative answer.
+      resolveBroadcast({ permission_id: 'perm_plain', action: 'allow' });
+      await settle(el);
+      expect(changes).toEqual([
+        QUESTION_DOCK_MIN_PLAIN, QUESTION_DOCK_MIN_WIDTH,
+      ]);
+    });
 });
 
 // ---------------------------------------------------------------------------

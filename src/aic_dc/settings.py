@@ -491,19 +491,39 @@ class Settings:
     # The `agy` permission gate — a machine setting, not an engine one
     # ------------------------------------------------------------------
     #
-    # These live here rather than on the Antigravity adapter because what
-    # they change is the *user's own* `agy` configuration, not a property
-    # of a running session. A user is entitled to ask whether the gate is
-    # installed, and to remove it, without an engine running at all — and
-    # putting them on an engine would make that impossible on the engine
-    # they are not currently using. See AG-14 and `aic_dc/agy/install.py`.
+    # These live here rather than on the Antigravity adapter because a user
+    # is entitled to ask whether the gate is installed, and to remove it,
+    # without an engine running at all — and putting them on an engine
+    # would make that impossible on the engine they are not currently
+    # using. See AG-14 and `aic_dc/agy/install.py`.
+    #
+    # **What they act on moved with AG-21.** They used to read and write
+    # `~/.gemini/config/hooks.json`, which is the user's own file and is
+    # read by every `agy` they start by hand; that is why installing was a
+    # button rather than a default. The gate now lives in the private
+    # master root under `<config_dir>/agy-roots/master`, which this app
+    # created for processes this app spawns. The surface is kept anyway —
+    # the question "is my `agy` gated" is still worth being able to ask —
+    # and it grows one job it did not have: taking the old global entry
+    # back out, because this app is what put it there.
 
     def get_agy_gate(self) -> dict[str, Any]:
-        """Whether the gate is in the user's ``agy`` configuration."""
-        from aic_dc.agy import install
+        """Whether the gate is in this app's private ``agy`` root."""
+        from aic_dc.agy import install, roots
 
-        report = install.status(self._config.config_dir)
+        report = install.status(
+            self._config.config_dir,
+            path=roots.hooks_file(roots.master_root(self._config.config_dir)),
+        )
         report["agy_present"] = shutil.which("agy") is not None
+        # Pre-AG-21 installs left an entry in the user's own file. Reported
+        # so the surface can offer to remove it, and so that a reader who
+        # remembers granting that permission is told it is still in force.
+        legacy = install.status(self._config.config_dir)
+        report["legacy_global"] = {
+            "path": str(legacy["path"]),
+            "state": legacy["state"],
+        }
         # Which engine this gate is *for*, named by the server so the
         # browser can ask "does the engine I am switching to need this?"
         # without a hard-coded engine name of its own — AG-R-4.
@@ -705,21 +725,32 @@ class Settings:
         return {"ok": True, "rule_id": rule_id, **self.get_permission_rules()}
 
     def install_agy_gate(self) -> dict[str, Any]:
-        """Add it. **Localhost only** — this writes outside the repository.
+        """Add it to the private master root. **Localhost only.**
 
-        Never called automatically. While it is installed, *every* tool call
-        in *every* ``agy`` session on this machine runs our hook, including
-        sessions that have nothing to do with this app. That is a thing to
-        be asked about rather than a startup side effect, which is why there
-        is a button and no default.
+        Starting an `agy` session does this itself now — the root and the
+        hook inside it are ours, so there is nothing to consent to and no
+        reason to make a user click first. The button survives as a repair
+        affordance: `install` probes the command before writing it, so this
+        is how a user turns "the gate is stale" into an error message that
+        says why.
+
+        Before AG-21 this wrote ``~/.gemini/config/hooks.json`` and every
+        ``agy`` on the machine ran our hook, which is a thing that had to be
+        asked about. It no longer touches anything outside
+        ``<config_dir>/agy-roots``.
         """
         restricted = self._check_localhost_only()
         if restricted is not None:
             return restricted
-        from aic_dc.agy import install
+        from aic_dc.agy import install, roots
 
+        config_root = roots.prepare(
+            roots.master_root(self._config.config_dir), self._config.config_dir
+        )
         try:
-            report = install.install(self._config.config_dir)
+            report = install.install(
+                self._config.config_dir, path=roots.hooks_file(config_root)
+            )
         except RuntimeError as exc:
             return {"error": "unwritable", "message": str(exc)}
         report["agy_present"] = shutil.which("agy") is not None
@@ -731,15 +762,32 @@ class Settings:
         Also called on shutdown, so the cost is paid only while it buys
         something and a machine whose AIC⚡DC is closed has an untouched
         ``agy``.
+
+        **Both files, not just the current one.** A machine that ran a
+        pre-AG-21 build has our entry in the user's own
+        ``~/.gemini/config/hooks.json``, where it intercepts `agy` sessions
+        this app knows nothing about. Leaving that behind because the code
+        no longer writes there would be the worst version of the change:
+        the permission stays granted and nothing in the app admits it.
         """
         restricted = self._check_localhost_only()
         if restricted is not None:
             return restricted
-        from aic_dc.agy import install
+        from aic_dc.agy import install, roots
 
+        removed = install.uninstall(
+            path=roots.hooks_file(roots.master_root(self._config.config_dir))
+        )
+        legacy = install.uninstall()
+        if legacy:
+            logger.info(
+                "Removed the pre-AG-21 global agy gate from %s",
+                install.GLOBAL_HOOKS,
+            )
         return {
             "status": "ok",
-            "removed": install.uninstall(),
+            "removed": removed or legacy,
+            "removed_legacy_global": legacy,
             "gate": self.get_agy_gate(),
         }
 

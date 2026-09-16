@@ -24,6 +24,8 @@ from typing import TYPE_CHECKING, Any, Coroutine
 import websockets
 from jrpc_oo import JRPCServer
 
+from aic_dc.broadcast import Broadcaster
+
 if TYPE_CHECKING:
     import concurrent.futures
 
@@ -330,6 +332,10 @@ class RpcServer:
         self._max_message_size = max_message_size
         self._inner: JRPCServer | None = None
         self._started = False
+        # Constructed here rather than by the inner server, so
+        # ``server.broadcaster`` is valid before ``start()`` and stays the
+        # same object across one server's life.
+        self._broadcaster = Broadcaster()
 
     @property
     def port(self) -> int:
@@ -346,6 +352,16 @@ class RpcServer:
         """True after :meth:`start` has been awaited successfully."""
         return self._started
 
+    @property
+    def broadcaster(self) -> Broadcaster:
+        """The per-client server-push senders (AG-R-19).
+
+        Named on the facade as well as on the inner server because it is
+        part of the contract now: ``main`` reaches for it to wire the event
+        callback, and a collab server exposes the same attribute.
+        """
+        return self._broadcaster
+
     def _create_inner_server(self) -> JRPCServer:
         """Construct the inner :class:`JRPCServer`.
 
@@ -360,6 +376,7 @@ class RpcServer:
             port=self._port,
             remote_timeout=self._remote_timeout,
             max_size=self._max_message_size,
+            broadcaster=self._broadcaster,
         )
 
     async def start(self) -> None:
@@ -396,6 +413,7 @@ class RpcServer:
         """
         if self._inner is None or not self._started:
             return
+        self._broadcaster.shutdown()
         await self._inner.stop()
         self._started = False
         logger.info("RPC server stopped on %s:%d", self._host, self._port)
@@ -484,6 +502,7 @@ class MaxSizeJRPCServer(JRPCServer):
         remote_timeout: int = 60,
         ssl_context: Any = None,
         max_size: int = DEFAULT_MAX_MESSAGE_SIZE,
+        broadcaster: Broadcaster | None = None,
     ) -> None:
         super().__init__(
             port=port,
@@ -491,6 +510,43 @@ class MaxSizeJRPCServer(JRPCServer):
             ssl_context=ssl_context,
         )
         self._max_size = max_size
+        self.broadcaster = (
+            broadcaster if broadcaster is not None else Broadcaster()
+        )
+
+    # ------------------------------------------------------------------
+    # Server-push senders — AG-R-19
+    # ------------------------------------------------------------------
+
+    def create_remote(self, ws: Any) -> Any:
+        """Create the JRPC remote, and give it a sender.
+
+        This is the seam rather than ``handle_connection`` because both
+        connection paths pass through it — the base class's, and
+        :meth:`collab.CollabServer._run_admitted_connection` — so one
+        override covers a collab server and a solo one alike.
+
+        The websocket is captured here because it is the last place it is
+        available: a remote keeps only the transmitter closure over its
+        socket, never the socket, and eviction needs to close it.
+        """
+        remote = super().create_remote(ws)
+        try:
+            self.broadcaster.attach(remote, ws)
+        except Exception:
+            # A connection that cannot get a sender still gets to be a
+            # connection. It will take no server-push events, which the
+            # broadcaster's own warning reports.
+            logger.exception("Could not attach a sender for a new client")
+        return remote
+
+    def rm_remote(self, event: Any, uuid: str) -> None:
+        """Drop the sender before jrpc-oo drops the remote."""
+        try:
+            self.broadcaster.detach(uuid)
+        except Exception:
+            logger.exception("Could not detach the sender for %s", uuid)
+        super().rm_remote(event, uuid)
 
     async def start(self) -> None:
         self.ws_server = await websockets.serve(

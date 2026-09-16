@@ -171,12 +171,17 @@ describe('View-subagents affordance — dispatch', () => {
     p.addEventListener('view-subagents-requested', seen);
     p.shadowRoot.querySelector('.view-subagents-button').click();
     expect(seen).toHaveBeenCalledOnce();
-    expect(seen.mock.calls[0][0].detail).toEqual({
+    // The detail carries the row itself alongside the id and the label, so
+    // that the handler can tell a consultation from a delegation without
+    // going back to the turn to look it up.
+    expect(seen.mock.calls[0][0].detail).toMatchObject({
       agents: [
         { agent_id: 'agent_abc', label: 'explore: find auth call sites' },
         { agent_id: 'agent_def', label: 'general: write the tests' },
       ],
     });
+    expect(seen.mock.calls[0][0].detail.agents.map((a) => a.row.agent_id))
+      .toEqual(['agent_abc', 'agent_def']);
   });
 
   it('bubbles and composes out of the shadow root', async () => {
@@ -206,11 +211,16 @@ describe('Subagent row — opening one transcript', () => {
     const rows = p.shadowRoot.querySelectorAll('.subagent-desc-button');
     expect(rows).toHaveLength(2);
     rows[1].click();
-    expect(seen.mock.calls[0][0].detail).toEqual({
-      agents: [
-        { agent_id: 'agent_def', label: 'explore: find auth call sites' },
-      ],
+    const { agents } = seen.mock.calls[0][0].detail;
+    expect(agents).toHaveLength(1);
+    expect(agents[0]).toMatchObject({
+      agent_id: 'agent_def',
+      label: 'explore: find auth call sites',
     });
+    // The row travels with it. Whether the click yields a tab or a snapshot
+    // of a record is the handler's decision, and it needs more of the row
+    // than the join key to build one — see `openConsultationTab`.
+    expect(agents[0].row).toMatchObject({ key: 'task-2', terminal: true });
   });
 
   it('leaves a row that names no agent as plain text', async () => {

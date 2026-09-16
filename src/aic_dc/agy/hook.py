@@ -1,6 +1,33 @@
-"""The ``PreToolUse`` hook ``agy`` runs before every tool call.
+"""The hooks ``agy`` runs, and the one of them that must never fail open.
 
-This is the gate of [AG-14](../../../specs5/plan-ag/decisions.md#ag-14),
+Four lifecycle events reach this module, from four entries
+:mod:`~aic_dc.agy.install` writes into one hooks file. They are here
+together because they share a socket, an owner lookup and a process:
+
+- ``PreToolUse`` — **the gate**, before every tool call. The subject of
+  most of what follows, and the only one with the tree behind it.
+- ``PreInvocation`` — **the standing guidance**, before the model is
+  called. Injects one ephemeral system message per invocation
+  ([AG-32](../../../specs5/plan-ag/decisions.md#ag-32)), which is where
+  the ``ArtifactMetadata`` warning lives now that it is no longer
+  smuggled in front of the user's own prompt.
+- ``PostInvocation`` — **the stop**, after each invocation's tool calls
+  finish. Answers ``terminationBehavior: "terminate"`` while ⏹ is latched,
+  which ends the loop whatever the agent concluded
+  ([AG-19](../../../specs5/plan-ag/decisions.md#ag-19)).
+- ``Stop`` — when the execution loop terminates. Always lets it, and
+  **that is a report rather than a veto**: measured 2026-09-12, a rival
+  hook's ``continue`` holds the turn open whether ours runs before it or
+  not, and short-circuits ours entirely when it runs first
+  ([AG-R-16](../../../specs5/plan-ag/risks.md#ag-r-16)).
+
+**The gate fails in the opposite direction from the other three,
+deliberately** — see § *Every path prints* and § *An invocation hook
+fails open*.
+
+The gate
+--------
+It is the gate of [AG-14](../../../specs5/plan-ag/decisions.md#ag-14),
 and on this transport **it is the only gate there is**. ``agy``'s own
 headless permission layer cannot prompt — it auto-denies anything it would
 otherwise ask about, logged as ``Print mode: soft-denying tool
@@ -32,6 +59,29 @@ on this transport and it is entirely ours to avoid, which is why
 :func:`main` is written so that every exit — including one taken by an
 unexpected exception — goes through a print.
 
+An invocation hook fails open, and that is not the same mistake
+---------------------------------------------------------------
+``{}`` is the *correct* answer for ``PreInvocation``, ``PostInvocation``
+and ``Stop`` — it is the documented "no opinion", and it is what this
+module prints whenever it cannot get one. So the invocation hooks fail in
+the direction the gate must never fail in, and AG-19 says so rather than
+leaving it to be noticed: **what a failure there costs is a loop that
+keeps running, or one invocation the guidance did not reach, not a write
+that goes unreviewed.** The tree is protected by ``PreToolUse``,
+which is still refusing every call, so a stop that fails to end the loop
+mechanically degrades to the starvation it replaced. Ending a stranger's
+loop because we could not reach our own host would be the worse error, and
+it is the one this direction rules out.
+
+**The event is stamped here rather than read from the payload**, and that
+is a safety property rather than tidiness. The host answers a different
+shape per event, and ``{}`` — right for an invocation hook — is exactly
+the shape ``agy`` reads as *allow* on a tool call. A payload allowed to
+name its own event could ask for a tool call to be answered in the shape
+that waves it through. So :func:`main` learns the event from **argv**,
+which only :mod:`~aic_dc.agy.install` writes, and overwrites whatever the
+payload claimed.
+
 Whose call is this?
 -------------------
 The hook is installed in the user's global ``~/.gemini/config/hooks.json``
@@ -51,10 +101,13 @@ reasoning is in :mod:`~aic_dc.agy.registry` § *A claim outlives the process
 that made it*; nothing in this module changes for it, which is the point of
 having asked the registry rather than the socket.
 
-Governing spec: ``specs5/plan-ag/`` — AG-14, AG-5, and
-``risks.md`` AG-R-12, whose mitigations are requirements of this file:
-a ``"*"`` matcher, never exit 0 silently, and a tripwire that asserts the
-*file* is unchanged rather than that this hook fired.
+Governing spec: ``specs5/plan-ag/`` — AG-14, AG-5, AG-19, and
+``risks.md`` AG-R-12 and AG-R-16, whose mitigations are requirements of
+this file: a ``"*"`` matcher, never exit 0 silently, a ``Stop`` handler
+that never says ``continue`` — and a tripwire that asserts the *file* is
+unchanged rather than that this hook fired, which is the shape every claim
+here should have had: AG-R-16's own mitigation was believed for a day on
+the strength of the documentation, and measurement refuted it.
 """
 
 from __future__ import annotations
@@ -70,17 +123,57 @@ from aic_dc.agy import registry, scope
 
 logger = logging.getLogger(__name__)
 
+#: The lifecycle events this app registers. Ordered as the module
+#: docstring introduces them, and iterated by :mod:`~aic_dc.agy.install`
+#: so a new one cannot be added to the writer and forgotten by the reader.
+PRE_TOOL_USE = "PreToolUse"
+PRE_INVOCATION = "PreInvocation"
+POST_INVOCATION = "PostInvocation"
+STOP = "Stop"
+EVENTS = (PRE_TOOL_USE, PRE_INVOCATION, POST_INVOCATION, STOP)
+
+#: The events whose handlers ``agy`` reads as a **flat** list, with no
+#: ``matcher`` — everything except the gate, because there is no tool to
+#: match on. Named here rather than in :mod:`~aic_dc.agy.install` so that
+#: the writer and the reader of the hooks file cannot disagree about which
+#: shape an event takes: a grouped entry written for a flat event produces
+#: a handler that simply never fires.
+INVOCATION_EVENTS = (PRE_INVOCATION, POST_INVOCATION, STOP)
+
+#: The flag :mod:`~aic_dc.agy.install` writes to name the event. Absent on
+#: the gate's own command, which is left in the exact shape it has always
+#: had so that an existing install is recognised as itself.
+EVENT_FLAG = "--event"
+
+#: The key stamped onto every payload forwarded to the host, naming the
+#: event it came from. See the module docstring § *An invocation hook
+#: fails open* for why this is written here and never read from ``agy``.
+EVENT_KEY = "hookEvent"
+
 #: What we say when a call is not ours. Also what we say when we cannot
 #: tell and own nothing — see :func:`decide`.
 ALLOW: dict[str, Any] = {"decision": "allow"}
 
-#: How long to wait for this host to answer. Deliberately unbounded-ish
-#: rather than short: the host is waiting on a human reading a diff, and
-#: the deadline that actually bounds a dialog is ``agy``'s own hook
-#: ``timeout`` plus ``--print-timeout``, both of which the adapter sets.
-#: A short value here would re-introduce the fault this design exists to
-#: avoid — a refusal that fails because the user was slow.
+#: An invocation hook with no opinion. The documented default, and the
+#: answer to every failure on those two events.
+PROCEED: dict[str, Any] = {}
+
+#: What ends the loop, whatever the agent had planned next. AG-19.
+TERMINATE: dict[str, Any] = {"terminationBehavior": "terminate"}
+
+#: How long to wait for this host to answer a *tool call*. Deliberately
+#: unbounded-ish rather than short: the host is waiting on a human reading
+#: a diff, and the deadline that actually bounds a dialog is ``agy``'s own
+#: hook ``timeout`` plus ``--print-timeout``, both of which the adapter
+#: sets. A short value here would re-introduce the fault this design
+#: exists to avoid — a refusal that fails because the user was slow.
 SOCKET_TIMEOUT_SECONDS = 3600.0
+
+#: How long to wait on an *invocation* event. Short where the gate's is
+#: long, because there is no human in this question: the host answers it
+#: from a latch it is already holding. Spending the gate's hour here would
+#: stall a loop that has finished its work on a host that has gone away.
+INVOCATION_TIMEOUT_SECONDS = 15.0
 
 
 def deny(reason: str) -> dict[str, Any]:
@@ -93,6 +186,31 @@ def deny(reason: str) -> dict[str, Any]:
     to change course rather than re-route.
     """
     return {"decision": "deny", "reason": reason}
+
+
+def _owner(
+    payload: dict[str, Any], config_dir: Path | str | None
+) -> dict[str, Any] | None:
+    """The registry entry gating this payload's conversation, or ``None``.
+
+    Shared by all four handlers, because *whose call is this* is one
+    question and two copies of the answer is how the gate and the stop
+    would quietly start disagreeing about which sessions are ours.
+    """
+    entry = registry.lookup(payload.get("conversationId"), config_dir=config_dir)
+    if entry is None:
+        # AG-R-14. Nobody registered this conversation — which is the
+        # ordinary case for a stranger's session, and *also* what a
+        # subagent, a grandchild, and a child whose announcement has not
+        # arrived yet all look like. The two are told apart by asking the
+        # kernel rather than the registry: a call from inside a scope this
+        # host created is ours no matter who never wrote its id down.
+        #
+        # Second, not first, because it is the fallback path: a machine
+        # without systemd has no scopes and every call takes the branch
+        # above, exactly as it did before this existed.
+        entry = registry.scope_owner(scope.current_cgroup(), config_dir=config_dir)
+    return entry
 
 
 def decide(
@@ -125,22 +243,7 @@ def decide(
             )
         return ALLOW
 
-    conversation_id = payload.get("conversationId")
-    entry = registry.lookup(conversation_id, config_dir=config_dir)
-    if entry is None:
-        # AG-R-14. Nobody registered this conversation — which is the
-        # ordinary case for a stranger's session, and *also* what a
-        # subagent, a grandchild, and a child whose announcement has not
-        # arrived yet all look like. The two are told apart by asking the
-        # kernel rather than the registry: a call from inside a scope this
-        # host created is ours no matter who never wrote its id down.
-        #
-        # Second, not first, because it is the fallback path: a machine
-        # without systemd has no scopes and every call takes the branch
-        # above, exactly as it did before this existed.
-        entry = registry.scope_owner(
-            scope.current_cgroup(), config_dir=config_dir
-        )
+    entry = _owner(payload, config_dir)
     if entry is None:
         # Not ours. The overwhelmingly common case, because this hook is
         # global: the user's own `agy` sessions land here and must leave
@@ -148,7 +251,7 @@ def decide(
         return ALLOW
 
     try:
-        answer = asker(entry["socket"], payload)
+        answer = asker(entry["socket"], {**payload, EVENT_KEY: PRE_TOOL_USE})
     except Exception as exc:  # noqa: BLE001 - a gate must not raise
         logger.exception("The AIC-DC gate could not be reached")
         # Ours, and unreachable. This is the direction the registry split
@@ -173,6 +276,154 @@ def decide(
     return answer
 
 
+def inject_guidance(
+    payload: Any,
+    *,
+    config_dir: Path | str | None = None,
+    ask: Any = None,
+) -> dict[str, Any]:
+    """One ephemeral system message, before the model is called. AG-32.
+
+    ``PreInvocation`` is the vendor's own channel for putting a sentence in
+    front of the model, and it fires **once per invocation** — which is why
+    the host is asked every time rather than once per turn. An
+    ``ephemeralMessage`` is documented as *transient*: it is spent by the
+    invocation that received it, so a handler that answered only the first
+    one would deliver standing guidance to the first invocation of a turn
+    and nothing after it, which is the failure shape this event is easiest
+    to get wrong in. See :meth:`aic_dc.agy.gate_server.AgyGateServer.standing_guidance`.
+
+    **The frame is built here rather than forwarded**, for the same reason
+    :func:`decide_invocation`'s is: ``injectSteps`` accepts
+    ``{"toolCall": …}`` and ``{"userMessage": …}`` beside the ephemeral
+    message, so a host that could put its answer straight into ``agy``'s
+    hands could put a *tool call* there — one that never passes the gate,
+    because the gate is the hook this app installs for calls the **model**
+    emits. So the socket is asked for prose and nothing else: a non-empty
+    string is wrapped, and anything else becomes :data:`PROCEED`.
+
+    Every failure returns :data:`PROCEED`, and the cost of one is an
+    invocation the guidance did not reach — see the module docstring
+    § *An invocation hook fails open*. It is not nothing: the guidance
+    exists because a write carrying ``ArtifactMetadata`` fails *inside*
+    ``agy`` before any hook runs, and the model then routes around it with
+    a shell heredoc (:data:`aic_dc.agy.tools.WRITE_GUIDANCE`). But it is
+    recoverable at the next invocation, where refusing the invocation
+    would not be.
+    """
+    asker = ask if ask is not None else ask_host
+
+    if not isinstance(payload, dict):
+        return dict(PROCEED)
+
+    entry = _owner(payload, config_dir)
+    if entry is None:
+        return dict(PROCEED)
+
+    try:
+        answer = asker(entry["socket"], {**payload, EVENT_KEY: PRE_INVOCATION})
+    except Exception:  # noqa: BLE001 - a hook must not raise
+        logger.exception("The AIC-DC gate could not be asked for its guidance")
+        return dict(PROCEED)
+
+    text = answer.get("ephemeralMessage") if isinstance(answer, dict) else None
+    if not isinstance(text, str) or not text.strip():
+        return dict(PROCEED)
+    return {"injectSteps": [{"ephemeralMessage": text}]}
+
+
+def decide_invocation(
+    payload: Any,
+    *,
+    config_dir: Path | str | None = None,
+    ask: Any = None,
+) -> dict[str, Any]:
+    """Whether this conversation's loop should end now. AG-19.
+
+    ``PostInvocation`` fires after an invocation's tool calls have been
+    resolved, so this is the first moment after ⏹ at which the loop can be
+    ended by something other than the agent's own judgement. The host holds
+    the latch — the same one the gate reads to refuse tool calls — and this
+    asks it.
+
+    **The answer is built here rather than forwarded.** A dict from the
+    socket is inspected for one value and then thrown away, so a host bug
+    cannot put ``injectSteps``, a ``decision``, or anything else into
+    ``agy``'s hands through this path.
+
+    Every failure returns :data:`PROCEED`: an unreadable payload, a
+    conversation nobody claimed, an unreachable host, an answer that makes
+    no sense. See the module docstring § *An invocation hook fails open*.
+    """
+    asker = ask if ask is not None else ask_host
+
+    if not isinstance(payload, dict):
+        return dict(PROCEED)
+
+    entry = _owner(payload, config_dir)
+    if entry is None:
+        return dict(PROCEED)
+
+    try:
+        answer = asker(entry["socket"], {**payload, EVENT_KEY: POST_INVOCATION})
+    except Exception:  # noqa: BLE001 - a hook must not raise
+        logger.exception("The AIC-DC gate could not be asked whether to stop")
+        return dict(PROCEED)
+
+    if isinstance(answer, dict) and answer.get("terminationBehavior") == "terminate":
+        return dict(TERMINATE)
+    return dict(PROCEED)
+
+
+def report_stop(
+    payload: Any,
+    *,
+    config_dir: Path | str | None = None,
+    ask: Any = None,
+) -> dict[str, Any]:
+    """Tell the host the loop ended, and never object to it. AG-R-16.
+
+    ``agy``'s ``Stop`` contract accepts ``{"decision": "continue"}``, which
+    **blocks the stop and re-enters the loop**. This app never sends it,
+    and the return is a literal rather than anything derived from the
+    socket so that no failure and no host bug can reach that string.
+
+    **What this is not is a vote.** It was written believing that one
+    handler answering ``{}`` would be enough to carry a stop through a
+    merged hooks file — the mitigation
+    [AG-R-16](../../../specs5/plan-ag/risks.md#ag-r-16) asked for, and
+    recorded there as unverified. ``scripts/probe_agy_stop_merge.py``
+    measured it on 2026-09-12 and it is false twice over: a rival
+    ``continue`` holds the turn open with ours in the merge, in **either**
+    key order, and when the rival runs first **this handler is not run at
+    all** — a ``continue`` short-circuits the handlers after it. Being
+    registered is not the same as being asked.
+
+    So its value is the *side effect*, and that is now the reason it
+    exists. The payload carries ``terminationReason``, which is how the
+    host tells a loop it ended from one a stranger's hook ended, and there
+    is nowhere else to read it. The reply is read and discarded, and
+    reading it is not waste: ``agy`` is blocked on this process, so waiting
+    for the answer is what guarantees the host has recorded the stop before
+    the turn's ``result`` frame is emitted.
+
+    The defence that does hold is one layer down — the gate's refusal stays
+    armed after a stopped turn ends, so a revived loop reaches the working
+    tree through a gate still saying no. See
+    :meth:`aic_dc.agy.gate_server.AgyGateServer.resume`.
+    """
+    asker = ask if ask is not None else ask_host
+
+    if isinstance(payload, dict):
+        entry = _owner(payload, config_dir)
+        if entry is not None:
+            try:
+                asker(entry["socket"], {**payload, EVENT_KEY: STOP})
+            except Exception:  # noqa: BLE001 - the stop happens regardless
+                logger.exception("The AIC-DC gate could not be told a turn ended")
+    return dict(PROCEED)
+
+
 def ask_host(socket_path: str, payload: dict[str, Any]) -> dict[str, Any]:
     """Put the call to the running app and wait for the human's answer.
 
@@ -180,9 +431,18 @@ def ask_host(socket_path: str, payload: dict[str, Any]) -> dict[str, Any]:
     per call rather than a shared one because ``agy`` runs this as a fresh
     process every time — there is nothing to keep open between calls, and
     a lock file to share one would be a second thing to fail.
+
+    The deadline is read off the stamped event rather than passed in, so
+    an injected ``ask`` in a test keeps its two positional arguments and
+    the two timeouts stay one decision made in one place.
     """
+    timeout = (
+        SOCKET_TIMEOUT_SECONDS
+        if payload.get(EVENT_KEY, PRE_TOOL_USE) == PRE_TOOL_USE
+        else INVOCATION_TIMEOUT_SECONDS
+    )
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
-        sock.settimeout(SOCKET_TIMEOUT_SECONDS)
+        sock.settimeout(timeout)
         sock.connect(socket_path)
         sock.sendall(json.dumps(payload).encode("utf-8") + b"\n")
         chunks: list[bytes] = []
@@ -194,31 +454,67 @@ def ask_host(socket_path: str, payload: dict[str, Any]) -> dict[str, Any]:
     return json.loads(b"".join(chunks).decode("utf-8"))
 
 
+def parse_argv(argv: list[str] | None) -> tuple[str | None, str]:
+    """``(config_dir, event)`` from the command :mod:`install` wrote.
+
+    **Anything unrecognised is the gate**, and that is the fail-closed
+    direction rather than a fallback chosen for tidiness: an event this
+    function could not name, answered as an invocation hook, would print
+    ``{}`` — and ``{}`` on a tool call is *allow*. A hand-edited hooks file
+    is the only way to get here, and it gets the strict handler.
+    """
+    args = list(argv or [])
+    event = PRE_TOOL_USE
+    positional: list[str] = []
+    index = 0
+    while index < len(args):
+        if args[index] == EVENT_FLAG and index + 1 < len(args):
+            if args[index + 1] in INVOCATION_EVENTS:
+                event = args[index + 1]
+            index += 2
+            continue
+        positional.append(args[index])
+        index += 1
+    return (positional[0] if positional else None), event
+
+
 def main(argv: list[str] | None = None) -> int:
-    """Read one payload, print one decision. Never exits without printing.
+    """Read one payload, print one answer. Never exits without printing.
 
     The bare ``except`` is deliberate and is the point of this function.
     An uncaught exception would end the process with a traceback on stderr
     and **nothing on stdout**, which is the one shape ``agy`` reads as
-    allow. So the last thing that can go wrong here still prints a denial.
+    allow on a tool call. So the last thing that can go wrong here still
+    prints — a denial for the gate, and ``{}`` for the three events where
+    ``{}`` is what "no opinion" means.
     """
-    config_dir = None
-    if argv:
-        config_dir = argv[0]
+    config_dir, event = parse_argv(argv)
+    if event == PRE_INVOCATION:
+        handler: Any = inject_guidance
+        fallback: dict[str, Any] = dict(PROCEED)
+    elif event == POST_INVOCATION:
+        handler = decide_invocation
+        fallback = dict(PROCEED)
+    elif event == STOP:
+        handler = report_stop
+        fallback = dict(PROCEED)
+    else:
+        handler = decide
+        fallback = deny(
+            "The AIC-DC permission gate failed, so the call was refused "
+            "rather than allowed without review. This is an AIC-DC fault, "
+            "not a refusal by the user."
+        )
     try:
         raw = sys.stdin.read()
         try:
             payload: Any = json.loads(raw)
         except ValueError:
             payload = None
-        result = decide(payload, config_dir=config_dir)
+        result = handler(payload, config_dir=config_dir)
     except BaseException:  # noqa: BLE001 - see the docstring; silence is allow
-        logger.exception("The AIC-DC agy gate failed")
-        result = deny(
-            "The AIC-DC permission gate failed, so the call was refused "
-            "rather than allowed without review. This is an AIC-DC fault, "
-            "not a refusal by the user."
-        )
+        logger.exception("The AIC-DC agy %s hook failed", event)
+        result = fallback
     print(json.dumps(result), flush=True)
     return 0
 

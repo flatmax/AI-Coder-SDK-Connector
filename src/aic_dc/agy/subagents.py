@@ -22,9 +22,29 @@ parent's transcript serves the live listing and the browsed one alike,
 and ``MIRRORED_EVENTS`` needs no change.
 
 Reading another product's application directory is a real cost and it is
-paid knowingly: this is the same directory :data:`BRAIN_DIR` already
-points at to collect a generated image, and the alternative is a tab that
-says a subagent did nothing.
+paid knowingly: this is the same directory
+:func:`~aic_dc.agy.roots.brain_dir` already resolves to collect a
+generated image, and the alternative is a tab that says a subagent did
+nothing.
+
+**Every function here takes ``brain_dir`` and none of them defaults it.**
+They defaulted to a module constant pinned to this *server's* ``HOME``
+until 2026-09-11, which was correct only while there was one config root
+in the world. AG-21 gives ``agy`` a private one — a stable root for the
+master and an ephemeral one per consultation — and under two roots a
+default is not merely wrong, it is *silently* wrong: the scan finds an
+empty directory and reports, accurately and uselessly, that the subagent
+did nothing. That is [AG-R-18](../../../specs5/plan-ag/risks.md#ag-r-18),
+and a required argument is the fix, because it is the only version a
+caller cannot forget.
+
+Since 2026-09-14 there is a second reason it cannot be defaulted: there
+are now two candidate answers, because ``agy`` announces the directory on
+every hook payload and this build also derives one from a hard-coded
+:data:`~aic_dc.agy.roots.PRODUCT_DIR` (AG-32,
+[AG-R-32](../../../specs5/plan-ag/risks.md#ag-r-32)). Choosing between
+them is :func:`choose_brain_dir`, called once per request so that the
+containment check and the read cannot land in different stores.
 
 What was measured, on 2026-09-10, at ``agy`` 1.1.28
 ===================================================
@@ -32,7 +52,7 @@ Against the capture the 2026-09-09 subagent probe left on disk. Four
 findings, each of which would have produced a plausible and wrong reader:
 
 - **A subagent's conversation is a conversation.** It lives at
-  ``BRAIN_DIR/<conversation_id>/.system_generated/logs/``, addressed by
+  ``<brain_dir>/<conversation_id>/.system_generated/logs/``, addressed by
   the id the announcement already carries, and its records are the same
   vocabulary a parent's are — so there is one reader, not two.
 - **``transcript_full.jsonl`` is the file to read.** The sibling
@@ -59,7 +79,7 @@ What the second measurement corrected, same day, 121 transcripts
 ================================================================
 The four findings above came from one capture, and one capture is how a
 reader ends up right about the case it was written from. Re-measured
-against every ``transcript_full.jsonl`` in :data:`BRAIN_DIR` — 121 files,
+against every ``transcript_full.jsonl`` in the brain tree — 121 files,
 1,927 records, ``agy`` and the Antigravity IDE, 2026-08-03 to 09-09 —
 three of the four survived and **the linkage did not**.
 
@@ -125,11 +145,11 @@ from __future__ import annotations
 import json
 import logging
 import re
+from collections.abc import Iterable
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from aic_dc.agy.steps import BRAIN_DIR
 from aic_dc.claude_code.history import PREVIEW_CHARS
 from aic_dc.claude_code.messages import (
     files_written_by,
@@ -262,8 +282,42 @@ MAX_CONVERSATIONS = 200
 # ---------------------------------------------------------------------------
 
 
+def choose_brain_dir(conversation_id: str, candidates: Iterable[Path]) -> Path | None:
+    """The first candidate directory that actually holds this conversation.
+
+    ``brain_dir`` is a required argument everywhere in this module because
+    there is no single correct value for it (see the module docstring). This
+    is how a caller with **two** answers picks one: the directory ``agy``
+    announced on its own hook payloads
+    (:attr:`aic_dc.agy.gate_server.AgyGateServer.brain_dir`), and the one
+    :func:`aic_dc.agy.roots.brain_dir` derives from
+    :data:`~aic_dc.agy.roots.PRODUCT_DIR`.
+
+    **Chosen once per request rather than per read**, and that is the whole
+    reason this is a function instead of a fallback inside
+    :func:`transcript_path`. ``get_subagent_transcript`` checks containment
+    with :func:`descendants` and then reads with :func:`load`; if those two
+    resolved a directory independently, a machine where both candidates
+    exist could check the ownership of an id in one tree and hand back a
+    transcript from the other. One choice, used for both, cannot do that.
+
+    Falls back to the first candidate when none of them holds the
+    conversation, so the caller's report is *"no readable transcript"* — the
+    answer this module gave before it had two candidates — rather than
+    ``None`` meaning something new. ``None`` is returned only when there are
+    no candidates at all.
+    """
+    ordered = [Path(candidate) for candidate in candidates if candidate is not None]
+    if not ordered:
+        return None
+    for candidate in ordered:
+        if transcript_path(conversation_id, brain_dir=candidate) is not None:
+            return candidate
+    return ordered[0]
+
+
 def transcript_path(
-    conversation_id: str, *, brain_dir: Path = BRAIN_DIR
+    conversation_id: str, *, brain_dir: Path
 ) -> Path | None:
     """The best transcript file for one conversation, or ``None``.
 
@@ -337,7 +391,7 @@ def read_records(path: Path) -> list[dict[str, Any]]:
 
 
 def announcements(
-    conversation_id: str, *, brain_dir: Path = BRAIN_DIR
+    conversation_id: str, *, brain_dir: Path
 ) -> list[dict[str, Any]]:
     """The subagents one conversation announced, in order.
 
@@ -467,7 +521,7 @@ def _spawn_arguments(record: dict[str, Any]) -> list[dict[str, Any]]:
 def descendants(
     conversation_id: str,
     *,
-    brain_dir: Path = BRAIN_DIR,
+    brain_dir: Path,
     limit: int = MAX_CONVERSATIONS,
 ) -> set[str]:
     """Every conversation reachable by announcement from this one.
@@ -511,7 +565,7 @@ def descendants(
 
 
 def rows(
-    conversation_id: str, *, brain_dir: Path = BRAIN_DIR
+    conversation_id: str, *, brain_dir: Path
 ) -> list[dict[str, Any]]:
     """One listing row per subagent this conversation delegated to.
 
@@ -575,7 +629,7 @@ def rows(
 # ---------------------------------------------------------------------------
 
 
-def load(conversation_id: str, *, brain_dir: Path = BRAIN_DIR) -> list[dict[str, Any]]:
+def load(conversation_id: str, *, brain_dir: Path) -> list[dict[str, Any]]:
     """One subagent's transcript, as messages the chat panel draws.
 
     Rendered rather than raw, for the reason ``history.load_subagent``

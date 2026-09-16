@@ -25,11 +25,13 @@ present and answering "no credentials" on every call.
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import pytest
 
 from aic_dc.antigravity.bridge import SERVER_NAME as AG_SERVER_NAME
+from aic_dc.claude_code.hooks import CONSULT_TOOL_MATCHER
 from aic_dc.claude_code.mcp_server import SERVER_NAME as INDEX_SERVER_NAME
 from aic_dc.claude_code.permissions import AIC_DC_MCP_SERVER
 from aic_dc.claude_code.service import ClaudeCodeService
@@ -255,6 +257,78 @@ class TestTheTabWiring:
         assert callable(bridge.request_id)
 
 
+class TestTheAnchorHookIsWiredLate:
+    """AG-28: the hook that reads the consultation's ``tool_use_id``.
+
+    The ordering is the whole of it. ``_build_bridge_wiring`` assembles
+    the hook matchers *first* and calls ``_add_consultant`` — which is
+    what constructs the bridge — second, so a hook handed the bridge
+    directly would be handed ``None`` for the life of the session and the
+    anchoring would never fire. It is handed a callable instead, and this
+    checks that the callable is read after the bridge exists rather than
+    resolved at registration.
+    """
+
+    def wire(self, monkeypatch):
+        class FakeBridge:
+            def __init__(self, consultant, *, emit=None, request_id=None):
+                self.notes = []
+
+            available = True
+
+            def build_server(self):
+                return {"kind": "sdk-mcp-server"}
+
+            def note_tool_use(self, tool_name, tool_input, tool_use_id):
+                self.notes.append(tool_use_id)
+
+        def choose(repo_root, **kw):
+            credentials = type("C", (), {"source": "test", "available": True})()
+            return (
+                type("Consultant", (), {"credentials": credentials})(),
+                "a fake transport (test)",
+            )
+
+        import aic_dc.agy.consultant as chooser
+        import aic_dc.antigravity as ag
+
+        monkeypatch.setattr(chooser, "choose_consultant", choose)
+        monkeypatch.setattr(ag, "ConsultantBridge", FakeBridge)
+
+        service = Service()
+        service.reindexer = None
+        service._degradations = []
+        service._broadcast = None
+        service.mcp_bridge = type(
+            "B", (), {"build_server": lambda self: {"kind": "index"}}
+        )()
+        hooks, _ = service._build_bridge_wiring()
+        return service, hooks
+
+    def test_the_pretooluse_matcher_is_registered(self, monkeypatch):
+        _, hooks = self.wire(monkeypatch)
+        assert "PreToolUse" in hooks
+        assert hooks["PreToolUse"][0].matcher == CONSULT_TOOL_MATCHER
+
+    def test_the_bridge_is_resolved_when_the_hook_runs(self, monkeypatch):
+        """Not when it is registered — at registration there is none."""
+        service, hooks = self.wire(monkeypatch)
+        hook = hooks["PreToolUse"][0].hooks[0]
+        answer = asyncio.run(
+            hook(
+                {
+                    "tool_name": "mcp__aic-dc-antigravity__second_opinion",
+                    "tool_input": {"question": "Well?"},
+                    "tool_use_id": "toolu_01ABC",
+                },
+                "toolu_01ABC",
+                {"signal": None},
+            )
+        )
+        assert answer == {}, "a decision here would shadow can_use_tool"
+        assert service.consultant_bridge.notes == ["toolu_01ABC"]
+
+
 class TestStopReachesTheConsultation:
     """AG-13's ⏹, wired end to end.
 
@@ -268,10 +342,14 @@ class TestStopReachesTheConsultation:
     class Bridge:
         def __init__(self, stopped=True):
             self._stopped = stopped
-            self.cancels = 0
+            #: Every id this bridge was asked to stop, in order. A count
+            #: was enough while the bridge stopped "the" consultation;
+            #: which one it was asked for is the whole question now that a
+            #: turn can hold two.
+            self.cancels: list = []
 
-        async def cancel(self):
-            self.cancels += 1
+        async def cancel(self, consultation_id=None):
+            self.cancels.append(consultation_id)
             return self._stopped
 
     def service_with_bridge(self, stopped=True):
@@ -281,11 +359,18 @@ class TestStopReachesTheConsultation:
         return service
 
     def test_a_consultation_id_reaches_the_bridge(self):
+        """And it reaches it *as an id*, not as a bare "stop something".
+
+        ``stop_task`` had the row's id in hand and dropped it, so the
+        bridge stopped whichever consultation had started most recently.
+        With two in flight that is the wrong one half the time, and the
+        other one could not be stopped at all.
+        """
         import asyncio
 
         service = self.service_with_bridge()
         result = asyncio.run(service.stop_task("consultation-abc-1"))
-        assert service.consultant_bridge.cancels == 1
+        assert service.consultant_bridge.cancels == ["consultation-abc-1"]
         assert result["status"] == "stopping"
 
     def test_stopping_one_that_is_not_running_says_so(self):
@@ -312,7 +397,7 @@ class TestStopReachesTheConsultation:
 
         service.session = Session()
         asyncio.run(service.stop_task("toolu_01ABC"))
-        assert service.consultant_bridge.cancels == 0
+        assert service.consultant_bridge.cancels == []
         assert service.session.stopped == ["toolu_01ABC"]
 
     def test_the_prefix_matches_what_the_bridge_mints(self):

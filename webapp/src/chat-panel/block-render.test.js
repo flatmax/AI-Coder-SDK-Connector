@@ -65,6 +65,11 @@ import {
   toolLabel,
 } from './block-render.js';
 import { STYLES } from './styles.js';
+import {
+  applyToolResult,
+  makeTurnBlocks,
+  noteConsultationPosture,
+} from './blocks.js';
 
 // ---------------------------------------------------------------------------
 // Harness
@@ -1287,6 +1292,93 @@ describe('renderToolCard', () => {
     expect(host.querySelector('.tool-result-body')).toBeNull();
   });
 
+  describe('a call that never returned', () => {
+    // The engine says so — `interrupted` is the only status the browser
+    // cannot infer, because live a call with no result is simply running.
+    const interrupted = (over = {}) => {
+      const { tool = {}, ...rest } = over;
+      return toolBlock({ tool: { status: 'interrupted', ...tool }, ...rest });
+    };
+
+    it('says it never finished instead of saying it is running', () => {
+      const host = draw(renderToolCard(stubPanel(), interrupted()));
+      const card = host.querySelector('.tool-card');
+      expect(card.classList.contains('tool-status-interrupted')).toBe(true);
+      expect(card.classList.contains('tool-status-pending')).toBe(false);
+      expect(card.querySelector('.tool-dot').getAttribute('title'))
+        .toBe('Never finished — the turn ended before this call returned');
+    });
+
+    it('runs no clock on it, whatever the ticker is doing', () => {
+      // The defect this status exists to fix: a card restored from a killed
+      // turn counted up from an invocation two days ago.
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date(2026, 7, 29, 9, 0, 0));
+      const host = draw(renderToolCard(
+        stubPanel({ _streamTimerInterval: 7 }),
+        interrupted({ tool: { invoked_at: new Date(2026, 7, 27, 14, 32, 7).toISOString() } }),
+      ));
+      expect(host.querySelector('.tool-time')).not.toBeNull();
+      expect(host.querySelector('.tool-elapsed')).toBeNull();
+    });
+
+    it('opens itself and explains, keeping the input as the evidence', () => {
+      const host = draw(renderToolCard(stubPanel(), interrupted()));
+      expect(host.querySelector('.tool-header').getAttribute('aria-expanded')).toBe('true');
+      expect(text(host.querySelector('.tool-interrupted-label')))
+        .toBe('This call never returned.');
+      expect(text(host.querySelector('.tool-interrupted-reason')))
+        .toMatch(/turn ended while the call was still open/i);
+      // Above the input, not instead of it: unlike a denial this is not a
+      // proposal that was refused, it is the record of what was in flight.
+      expect(host.querySelector('.tool-input').textContent)
+        .toContain('"command": "ls -la"');
+    });
+
+    it('offers no way to re-run an ordinary tool', () => {
+      // A Bash that never returned may or may not have run. A button here
+      // would be the panel guessing at that.
+      const host = draw(renderToolCard(stubPanel(), interrupted()));
+      expect(host.querySelector('.tool-reask')).toBeNull();
+    });
+
+    it('says a lost question cannot be answered here, and why', () => {
+      const host = draw(renderToolCard(stubPanel(), interrupted({
+        tool: { name: 'AskUserQuestion', input: { questions: [{ question: 'Ship it?' }] } },
+      })));
+      expect(text(host.querySelector('.tool-interrupted-label')))
+        .toBe('This question was never answered.');
+      expect(text(host.querySelector('.tool-interrupted-reason')))
+        .toMatch(/lives only in the engine process that raised it/i);
+      // The question itself survives on the card, because the call's input is
+      // what the transcript kept.
+      expect(host.querySelector('.tool-input').textContent).toContain('Ship it?');
+    });
+
+    it('puts a re-ask in the composer and sends nothing', () => {
+      const panel = stubPanel({ _input: '' });
+      const host = draw(renderToolCard(panel, interrupted({
+        tool: { name: 'AskUserQuestion', input: { questions: [] } },
+      })));
+      const button = host.querySelector('.tool-reask');
+      expect(button.getAttribute('title')).toMatch(/nothing is sent until you send it/i);
+      button.click();
+      expect(panel._input).toMatch(/never answered/i);
+      expect(panel._input).toMatch(/ask it again/i);
+    });
+
+    it('does not toggle the card when the re-ask is clicked', () => {
+      // The button is inside the header's sibling body, and a click that
+      // bubbled to the card's toggle would shut the note it came from.
+      const panel = stubPanel({ _input: '' });
+      const block = interrupted({ tool: { name: 'AskUserQuestion', input: {} } });
+      const host = draw(renderToolCard(panel, block));
+      host.querySelector('.tool-reask').click();
+      render(renderToolCard(panel, block), host);
+      expect(host.querySelector('.tool-body')).not.toBeNull();
+    });
+  });
+
   it('footers the duration and the files it changed', () => {
     const host = draw(renderToolCard(stubPanel(), toolBlock({
       tool: { name: 'Edit', input: { file_path: 'src/a.js' } },
@@ -1774,6 +1866,124 @@ describe('renderSubagentRow', () => {
     expect(subagentBlocksExpanded(panel, row({ key: 'task-2' }))).toBe(false);
   });
 
+  describe('a consultation, whose inline card is the default surface', () => {
+    const consult = (over = {}) => row({
+      key: 'consult-1',
+      task_id: 'consult-1',
+      agent_id: 'consult-1',
+      description: 'Second opinion',
+      task_type: 'consultation',
+      subagent_type: null,
+      ...over,
+    });
+
+    it('draws its stream without being asked, unlike a delegated subagent', () => {
+      // The duplication argument that collapses a `Task` row does not hold
+      // here: a consultation's nested stream *is* the answer, and the
+      // `second_opinion` card beside it stays collapsed under `blockExpanded`,
+      // so expanding this leaves exactly one copy on screen rather than two.
+      const panel = stubPanel();
+      const host = draw(renderSubagentRow(
+        panel,
+        consult(),
+        [textBlock({ block_id: 'a:b0', content: 'The answer is ORCHID.' })],
+        [], false,
+      ));
+      expect(host.querySelector('.subagent-blocks')).toBeTruthy();
+      expect(text(host.querySelector('.subagent-blocks-toggle'))).toBe('▾ transcript');
+    });
+
+    it('leaves a delegated subagent collapsed on the same code path', () => {
+      expect(subagentBlocksExpanded(stubPanel(), consult())).toBe(true);
+      expect(subagentBlocksExpanded(stubPanel(), row())).toBe(false);
+    });
+
+    it('lets an explicit collapse win and stay won', () => {
+      // Against `=== true` this was the bug: a user who closed a consultation
+      // stored `false`, which read as "unset", which returned the default —
+      // a disclosure that reopened itself on the next repaint.
+      const panel = stubPanel();
+      const one = consult();
+      toggleSubagentBlocks(panel, one);
+      expect(subagentBlocksExpanded(panel, one)).toBe(false);
+      const host = draw(renderSubagentRow(
+        panel, one, [textBlock({ block_id: 'a:b0', content: 'ORCHID.' })], [], false,
+      ));
+      expect(host.querySelector('.subagent-blocks')).toBeNull();
+    });
+
+    it('frames the container with the posture before any notice arrives', () => {
+      // The container exists before the event does. A banner that appeared a
+      // beat late would read as something having gone wrong, and the
+      // unretracted posture is the only state a consultation can be in
+      // before anything has been observed about it.
+      const host = draw(renderSubagentRow(stubPanel(), consult(), [], [], false));
+      const posture = host.querySelector('.consultation-posture');
+      expect(text(posture)).toBe(
+        'A second opinion runs with no tools and no repository access.',
+      );
+      expect(posture.className).toContain('info');
+    });
+
+    it('says nothing of the kind over a delegated subagent', () => {
+      const host = draw(renderSubagentRow(stubPanel(), row(), [], [], false));
+      expect(host.querySelector('.consultation-posture')).toBeNull();
+    });
+
+    it('shows the retraction instead of the assurance it withdrew', () => {
+      // Not both. `_grounding` replaces the posture outright on a breach for
+      // the model's copy of this claim, because a paragraph asserting the
+      // isolation held and then mentioning that it had not is read by exactly
+      // the wrong half of its audience. The banner must not rebuild that.
+      const panel = stubPanel();
+      noteConsultationPosture(panel, 'consult-1', 'consultation_posture', {
+        text: 'A second opinion runs with no tools and no repository access.',
+        severity: 'info',
+      });
+      noteConsultationPosture(panel, 'consult-1', 'consultation_breach', {
+        text: 'A tool ran inside a second opinion that permits none.',
+        severity: 'error',
+      });
+      const host = draw(renderSubagentRow(panel, consult(), [], [], false));
+      const posture = host.querySelector('.consultation-posture');
+      expect(text(posture)).toBe(
+        'A tool ran inside a second opinion that permits none.',
+      );
+      expect(posture.className).toContain('error');
+    });
+
+    it('does not let a late posture overwrite the breach it retracted', () => {
+      const panel = stubPanel();
+      noteConsultationPosture(panel, 'consult-1', 'consultation_breach', {
+        text: 'The consultation gate did not hold.',
+        severity: 'error',
+      });
+      noteConsultationPosture(panel, 'consult-1', 'consultation_posture', {
+        text: 'A second opinion runs with no tools and no repository access.',
+        severity: 'info',
+      });
+      const host = draw(renderSubagentRow(panel, consult(), [], [], false));
+      expect(text(host.querySelector('.consultation-posture')))
+        .toBe('The consultation gate did not hold.');
+    });
+
+    it('keeps one consultation’s posture out of the next one’s banner', () => {
+      const panel = stubPanel();
+      noteConsultationPosture(panel, 'consult-1', 'consultation_breach', {
+        text: 'The consultation gate did not hold.',
+        severity: 'error',
+      });
+      const host = draw(
+        renderSubagentRow(panel, consult({ agent_id: 'consult-2' }), [], [], false),
+      );
+      const posture = host.querySelector('.consultation-posture');
+      expect(text(posture)).toBe(
+        'A second opinion runs with no tools and no repository access.',
+      );
+      expect(posture.className).toContain('info');
+    });
+  });
+
   it('renders the summary as the markdown the subagent wrote', () => {
     // Verified against a live CLI notification: the summary is the subagent's
     // own closing answer, and it arrives as markdown.
@@ -2049,5 +2259,72 @@ describe('renderLiveUsage', () => {
     }));
     expect(host.querySelector('.turn-cost')).toBeNull();
     expect(host.textContent).not.toContain('$');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The engine → card contract for a tool result
+// ---------------------------------------------------------------------------
+
+describe('a tool result from the engine reaches the card', () => {
+  /**
+   * Every test above hands `renderToolCard` a hand-written `result`, which
+   * is how a divergence between what the engine *sends* and what this
+   * renders survived on both Antigravity transports until 2026-09-12: the
+   * `agy` pump sent the output as `content`, this reads `preview`, and
+   * `applyToolResult` spreads the payload onto the block without mapping
+   * anything. Every tool card on that transport drew "No output." over a
+   * payload carrying the output.
+   *
+   * So this one starts from the payload shape the server emits and goes
+   * through `applyToolResult`, which is the path the browser actually
+   * takes. See `specs5/plan-ag/risks.md` AG-R-17.
+   */
+  function applied(payload) {
+    const turn = makeTurnBlocks();
+    const block = toolBlock({});
+    turn.blocks.push(block);
+    turn.index.set(block.block_id, block);
+    expect(applyToolResult(turn, { tool_use_id: block.block_id, ...payload }))
+      .toBe(true);
+    return block;
+  }
+
+  function body(block) {
+    const panel = stubPanel();
+    panel._blockExpansion.set(block.block_id, true);
+    return draw(renderToolCard(panel, block));
+  }
+
+  it('renders the output the engine put in `preview`', () => {
+    const host = body(applied({ status: 'ok', preview: 'alpha\nbeta' }));
+    // Read off `textContent` rather than the `text()` helper, which
+    // collapses whitespace: a tool result's newlines are the shape of the
+    // output and the card renders it in a <pre> for exactly that reason.
+    expect(host.querySelector('.tool-result-body').textContent)
+      .toBe('alpha\nbeta');
+    expect(host.querySelector('.tool-result-empty')).toBeNull();
+  });
+
+  it('draws "No output." only when the engine really sent none', () => {
+    const host = body(applied({ status: 'ok', preview: '' }));
+    expect(text(host.querySelector('.tool-result-empty'))).toBe('No output.');
+  });
+
+  it('names the withheld size from the engine\'s own truncation fields', () => {
+    const host = body(applied({
+      status: 'ok', preview: 'first lines…', truncated: true, full_bytes: 2560,
+    }));
+    expect(text(host.querySelector('.tool-result-truncated')))
+      .toBe('Truncated — 2.5 KB in full. The engine sends a preview only.');
+  });
+
+  it('shows nothing for a payload that names the body anything else', () => {
+    // The defect, pinned as a fact about this renderer rather than as a
+    // rule about engines: a key it does not read is a key that is not
+    // there, and the card says so without erroring. That silence is why
+    // the server-side tripwire (AG-R-17) is where the rule lives.
+    const host = body(applied({ status: 'ok', content: 'alpha\nbeta' }));
+    expect(text(host.querySelector('.tool-result-empty'))).toBe('No output.');
   });
 });

@@ -31,7 +31,12 @@ import { withRpcTimeout } from '../rpc.js';
 import { _AGENT_LABEL_MAX_LENGTH } from './helpers.js';
 import { restoreMessage } from './restore.js';
 import { makeTabState } from './state.js';
-import { findSubagentTab, subagentTabTooltip } from './subagent-tabs.js';
+import { isConsultation } from './blocks.js';
+import {
+  findSubagentTab,
+  openConsultationTab,
+  subagentTabTooltip,
+} from './subagent-tabs.js';
 
 // ---------------------------------------------------------------
 // Request-ID → tab routing
@@ -262,11 +267,19 @@ export function onChatTabShortcut(panel, event) {
 // UI gesture ever bound to it — the writable agent tabs it closed were
 // session-scoped.
 //
-// Both kinds of tab that remain sweep themselves: `clearHistoricalTabs`
+// Every kind of tab that remains sweeps itself: `clearHistoricalTabs`
 // below drops browsed transcripts on a fresh load or session change, and
 // `subagent-tabs.js` retires a live subagent's tab with the turn that
-// spawned it. Neither has a backend scope to release — a subagent tab is
+// spawned it. None has a backend scope to release — a subagent tab is
 // a view onto block records the parent turn already streamed.
+//
+// A consultation's tab sweeps itself the most slowly of the three: it is
+// opened by hand and only a session change takes it (AG-31), which makes
+// it the one tab whose lifetime a user might reasonably want to end and
+// cannot. That is a recorded risk, AG-R-31, and the reason it is not
+// answered by restoring this function is that whether *every* tab should
+// close by hand is a question about the tab model rather than about
+// consultations.
 
 // ---------------------------------------------------------------
 // Tab strip rendering
@@ -600,22 +613,44 @@ function isHistoricalTab(tabId) {
 }
 
 /**
+ * Invalidate every historical load still in flight.
+ *
+ * An ``await`` on a transcript read spans user actions, so a read that
+ * started before the user did something else must not be allowed to land
+ * afterwards — it would insert a tab into a strip that has moved on, and
+ * (because the insert ends by activating) yank the user out of whatever
+ * they opened in the meantime.
+ *
+ * Separate from :func:`clearHistoricalTabs`, which calls it. The two are
+ * genuinely different operations — this one is epoch invalidation, that one
+ * is a retention policy — and a caller that needs only this one should not
+ * have to evict tabs to get it. A **synchronous** mount is exactly that
+ * caller: it has no read of its own to cancel, but it must cancel anyone
+ * else's. Fusing them would mean that making eviction conditional one day
+ * silently removed the race protection from a caller that never wanted the
+ * eviction in the first place.
+ */
+export function bumpHistoricalGeneration(panel) {
+  panel._historicalTabGeneration =
+    (panel._historicalTabGeneration || 0) + 1;
+  return panel._historicalTabGeneration;
+}
+
+/**
  * Clear every historical tab from the strip.
  *
  * Called before each fresh load, so the strip does not accumulate
  * transcripts across clicks, and on a session change, because a subagent
  * transcript belongs to the session that spawned it.
  *
- * The generation bump is what stops a load still in flight: an
- * ``await`` on a transcript read spans user actions, and the tab it was
- * going to add belongs to a strip that has since been cleared.
+ * Bumps the generation too, because a strip that has been cleared is one
+ * every in-flight read has been orphaned by.
  *
  * If the active tab was historical, switches back to Main before deletion —
  * the active-tab setter would otherwise be left pointing at a missing key.
  */
 export function clearHistoricalTabs(panel) {
-  panel._historicalTabGeneration =
-    (panel._historicalTabGeneration || 0) + 1;
+  bumpHistoricalGeneration(panel);
   const historical = [];
   for (const tabId of panel._tabs.keys()) {
     if (isHistoricalTab(tabId)) {
@@ -749,6 +784,11 @@ async function _loadSubagentTranscript(panel, agentId, sessionId) {
  *   a `task_id` cannot be read, and is left with its seed line rather than
  *   guessed at from the listing — "the panel never invents a tab" applies just
  *   as much to a tab's contents.
+ * - **With a transcript.** A row that says it has none is not a row whose
+ *   read would come back empty — it is one whose `agent_id` names nothing on
+ *   disk by construction, so the read can only produce "this subagent has no
+ *   readable transcript": an error about a record that was never meant to
+ *   exist, reported against a subagent that did its work correctly.
  *
  * Deliberately not eager: the same "twelve subagents should not cost twelve
  * transcript reads" rule the historical tabs follow. Callers are the two
@@ -761,6 +801,7 @@ export async function loadSubagentFeedIfEmpty(panel, tabId) {
   const tab = panel?._tabs?.get(tabId);
   const sub = tab?.subagent;
   if (!sub || sub.transcriptRead || !sub.settled) return false;
+  if (sub.has_transcript === false) return false;
   if ((tab.turnBlocks?.blocks?.length || 0) > 0) return false;
   const agentId = typeof sub.agent_id === 'string' ? sub.agent_id : '';
   if (!agentId) return false;
@@ -785,12 +826,31 @@ export async function loadSubagentFeedIfEmpty(panel, tabId) {
 /**
  * Handle the ``view-subagents-requested`` event.
  *
- * Detail is ``{agents: [{agent_id, label}], session_id?}`` — dispatched by
- * the "View subagents (N)" affordance under a settled turn with all of that
- * turn's rows, and by a single subagent row with just its own. The session
- * defaults to the one the panel is attached to, which is the session Main is
- * showing; the history browser passes an explicit one when the transcript
- * belongs to a session that is not live.
+ * Detail is ``{agents: [{agent_id, label, has_transcript, tool_use_id}],
+ * session_id?}`` — dispatched by the "View subagents (N)" affordance under a
+ * settled turn with all of that turn's rows, and by a single subagent row
+ * with just its own. The session defaults to the one the panel is attached
+ * to, which is the session Main is showing; the history browser passes an
+ * explicit one when the transcript belongs to a session that is not live.
+ *
+ * Three outcomes per subagent, in order, because the user asked one question
+ * ("let me read the whole of this") that has three answers depending on where
+ * the whole of it currently is:
+ *
+ * 1. **A tab already exists** — go to it. It is the better view of the same
+ *    work, which is why the old code declined to replace it; but declining to
+ *    replace it and declining to *go* there are different decisions, and only
+ *    the first one was ever argued for. A row whose own button answered "that
+ *    subagent is still active in the tab strip" sent the user to look for it
+ *    by hand.
+ * 2. **No tab, and it is a consultation** — build one, from the blocks its
+ *    turn kept. A consultation has no transcript to read: it is awaited
+ *    inside the tool call that asked it, so it cannot outlive that turn or
+ *    scatter blocks across later ones, and one turn's blocks are the whole
+ *    of it. See :func:`openConsultationTab`.
+ * 3. **No tab, and it is a delegation** — read it off disk, unchanged. A
+ *    delegated subagent *can* outlive its turn, so its blocks are not the
+ *    whole of it and disk stays its only honest source.
  *
  * Tabs appear one at a time as their reads land, and the first one is
  * activated as soon as it exists rather than after the last: a turn that
@@ -804,11 +864,12 @@ async function onViewSubagentsRequested(panel, event) {
   const agents = Array.isArray(detail.agents) ? detail.agents : null;
   if (!agents || agents.length === 0) return;
 
-  // Skip subagents whose live tab is still in the strip: that tab is the
-  // running conversation, and replacing it with a snapshot of what has
-  // reached disk so far would be a worse view of the same subagent.
   const wanted = [];
   const seen = new Set();
+  // The tab to land on when every subagent asked for already had one. Only
+  // the first, matching the rule for reads below: a request naming eight
+  // subagents must not walk the user through eight tabs.
+  let existing = null;
   for (const agent of agents) {
     const id =
       agent && typeof agent.agent_id === 'string' ? agent.agent_id : '';
@@ -817,16 +878,46 @@ async function onViewSubagentsRequested(panel, event) {
     // Its live tab, whether that tab is keyed by the agent id or by the task
     // id an earlier event arrived with — a subagent must not end up with a
     // live feed and an archived snapshot of the same work side by side.
-    if (panel._tabs.has(id) || findSubagentTab(panel, id)) continue;
+    const open = panel._tabs.has(id)
+      ? id
+      : findSubagentTab(panel, id)?.tabId || null;
+    if (open) {
+      if (!existing) existing = open;
+      continue;
+    }
+    // A consultation, which has no tab because nothing makes one for it any
+    // more (AG-31). It gets one here and always the same one, running or
+    // finished, this turn's or an older one's — `openConsultationTab` reads
+    // the blocks from the turn or from the message the turn settled into,
+    // and that is the only difference between the two cases. Handled here
+    // rather than queued with the reads below because it is synchronous and
+    // reads nothing off disk: a consultation has no transcript to read.
+    if (isConsultation(agent.row)) {
+      const owner = panel._tabs.get(panel._activeTabId);
+      const tabId = openConsultationTab(
+        panel,
+        owner?.currentRequestId || null,
+        agent.row,
+        owner,
+      );
+      if (tabId && !existing) existing = tabId;
+      continue;
+    }
     wanted.push({ agentId: id, label: agent.label });
   }
   if (wanted.length === 0) {
-    panel._emitToast(
-      agents.length === 1
-        ? 'That subagent is still active in the tab strip'
-        : 'Those subagents are still active in the tab strip',
-      'info',
-    );
+    // Every one of them is already open, or was just opened. Go to the first
+    // rather than say so.
+    if (existing) {
+      // Activating is not a load, so it evicts nothing — but it is still a
+      // user action that a read started before it must not land on top of.
+      // Without this, a transcript still in flight from an earlier click
+      // arrives, finds its generation current, and activates itself over the
+      // tab the user just asked for.
+      bumpHistoricalGeneration(panel);
+      panel._activeTabId = existing;
+      panel.requestUpdate();
+    }
     return;
   }
 
@@ -840,13 +931,12 @@ async function onViewSubagentsRequested(panel, event) {
 
   let activated = false;
   for (const { agentId, label } of wanted) {
-    const messages = await _loadSubagentTranscript(
-      panel,
-      agentId,
-      sessionId,
-    );
+    const messages = await _loadSubagentTranscript(panel, agentId, sessionId);
     // The strip was cleared under us — a session resume, or another click
-    // on a different turn. These messages belong to nobody now.
+    // on a different turn. These messages belong to nobody now. Checked for
+    // the projection too even though it cannot have been overtaken: the
+    // check is about whether this tab still belongs in the strip, and that
+    // is as true of a mount as of a read.
     if (generation !== panel._historicalTabGeneration) return;
     const tabId = _historicalTabId(agentId);
     const state = makeTabState();

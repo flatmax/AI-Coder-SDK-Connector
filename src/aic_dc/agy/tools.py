@@ -53,6 +53,23 @@ from __future__ import annotations
 #: but the shared ones are listed too: this is the readable answer to "what
 #: does ``agy`` call, and what is each of them", and leaving out the
 #: overlapping half would make it look like the overlap does not exist.
+#: The name every MCP tool arrives under. Measured: ``agy`` does not send
+#: ``mcp__server__tool`` the way the Claude CLI does — one hook payload,
+#: one tool name, with the real target in the arguments as
+#: ``{"ServerName": ..., "ToolName": ..., "Arguments": {...}}``.
+#:
+#: **This is a multiplexer, and that is why it needs its own rule kind.**
+#: It stands in the same relation to MCP that ``run_command`` stands in to
+#: the shell: one gated name dispatching an open set of targets. The rule
+#: store matches a shell call on its *command*, not on the name
+#: ``run_command``, and for the same reason it matches an MCP call on
+#: ``(ServerName, ToolName)`` rather than on the name ``call_mcp_tool`` —
+#: see ``rules.mcp_tool_match``. Without that, no MCP tool on any server
+#: could ever be granted a standing rule, because a rule on the
+#: multiplexer's own name would grant every server at once.
+MCP_TOOL = "call_mcp_tool"
+
+
 TOOL_CLASSES: dict[str, str] = {
     # Mutating — every one of these is also in MUTATING_TOOLS below.
     "replace_file_content": "write",
@@ -94,7 +111,7 @@ TOOL_CLASSES: dict[str, str] = {
     "send_command_input": "exec",
     # Arbitrary tool by proxy: whatever an MCP server exposes, which this
     # host cannot enumerate and must not assume is read-only.
-    "call_mcp_tool": "exec",
+    MCP_TOOL: "exec",
     # Delegation, for AG-5's stated reason — a child inherits the tool set,
     # so a gate that stops at the parent is bypassed by asking a child.
     # `invoke_subagent` was the only spelling this table knew; 1.2.0 has
@@ -205,12 +222,30 @@ MUTATING_TOOLS = frozenset(
         "execute_browser_javascript",
         "notebook_execution",
         "send_command_input",
-        "call_mcp_tool",
+        MCP_TOOL,
         "define_subagent",
         "manage_subagents",
         "browser_subagent",
     }
 )
+
+def mcp_target(args: dict[str, object]) -> tuple[str, str] | None:
+    """The ``(server, tool)`` one ``call_mcp_tool`` names, or ``None``.
+
+    ``None`` for anything that does not carry both as non-empty strings,
+    and every caller treats that as "no rule and no identity" rather than
+    as a wildcard. A payload this cannot read is a payload whose target is
+    unknown, and the one thing that must not follow from an unknown target
+    is a standing grant.
+    """
+    server = args.get("ServerName")
+    tool = args.get("ToolName")
+    if not isinstance(server, str) or not server.strip():
+        return None
+    if not isinstance(tool, str) or not tool.strip():
+        return None
+    return server.strip(), tool.strip()
+
 
 #: ``agy`` argument names → the field names the dialog's payload builders
 #: read. Identical in shape to the SDK's aliases, and mostly identical in
@@ -253,9 +288,11 @@ ARG_ALIASES: dict[str, dict[str, str]] = {
     "find_by_name": {"SearchDirectory": "file_path"},
 }
 
-#: Guidance prepended to every ``agy`` prompt, and the one thing it says.
+#: The standing guidance every ``agy`` invocation carries, and the one
+#: thing it says.
 #:
-#: **Why a prompt and not a config setting: there is no setting.** ``agy``
+#: **Why prose at the model and not a config setting: there is no
+#: setting.** ``agy``
 #: declares ``write_to_file`` as *"Use this tool to create new files"* with
 #: ``ArtifactMetadata`` documented as *"Required when creating an artifact
 #: file"* — optional, by its own schema, for anything else. But the
@@ -284,10 +321,19 @@ ARG_ALIASES: dict[str, dict[str, str]] = {
 #: it named the presence of ``ArtifactMetadata`` as the trigger and
 #: clarifying the system instructions as the host's remedy.
 #:
-#: Wrapped in the framing tag the transcript reader already strips
-#: (``history.strip_framing``), so it reaches the model and not the user.
+#: **It travels on ``PreInvocation``, not on the user's prompt** — AG-32,
+#: 2026-09-14. It was prepended to every message the user sent, wrapped in
+#: the ``<aic-dc-ui-context>`` block ``history.strip_framing`` removes at
+#: read time. That worked and cost three things: the mirror stored a
+#: paragraph the user had not written as part of what they typed; the
+#: guidance arrived **once per turn**, where the failure it prevents can
+#: happen at any invocation; and it reached the **master only**, because a
+#: subagent never sees the parent's prompt and writes files with the same
+#: tool. ``agy`` documents ``injectSteps`` on ``PreInvocation`` for exactly
+#: this, so the disguise is gone with the smuggling — this is a system
+#: message on its own channel now, and it needs no tag to keep it out of
+#: the transcript.
 WRITE_GUIDANCE = (
-    "<aic-dc-ui-context>\n"
     "When creating or editing files in this workspace, call write_to_file "
     "WITHOUT the ArtifactMetadata field. That field marks the call as an "
     "artifact document, and agy then rejects any TargetFile outside its "
@@ -295,8 +341,7 @@ WRITE_GUIDANCE = (
     "fail and is not recoverable by retrying. Supply ArtifactMetadata only "
     "for a genuine artifact written into that directory. Prefer "
     "write_to_file and replace_file_content over shell redirection for "
-    "file changes, so the edit can be reviewed as a diff.\n"
-    "</aic-dc-ui-context>\n\n"
+    "file changes, so the edit can be reviewed as a diff."
 )
 
 

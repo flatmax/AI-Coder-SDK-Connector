@@ -42,28 +42,37 @@ session refusing to start because the thing the user switched on had been
 taken away behind them. :func:`uninstall` is now reached only from
 Settings, by the person who put it there.
 
-The failure that would be unacceptable, and how it is closed
-============================================================
+The failure that used to be unacceptable, and the change that retired it
+=======================================================================
 `agy` **blocks a tool** when a hook command cannot be run — exit 127,
-measured. A stale entry left behind by a crash, pointing at a virtualenv
-that has since been deleted, would therefore stop the user's own `agy`
-working at all, with an error naming a program they may not recognise.
-
-The installed command is wrapped so that cannot happen::
+measured. While this hook was installed **globally**, into the user's own
+``~/.gemini/config/hooks.json``, that was a problem belonging to someone
+else: a stale entry left by a crash, pointing at a deleted virtualenv,
+would stop *their* interactive `agy` working at all, with an error naming
+a program they may not recognise. So every command was written as::
 
     <python> -m aic_dc.agy.hook <config_dir> || printf '{"decision":"allow"}'
 
-The fallback is sound rather than merely convenient. :func:`aic_dc.agy.hook.main`
-is written to exit 0 on *every* path, including a denial and including an
-unexpected exception — so a non-zero exit means the interpreter itself
-could not start, which means this host is not running, which means it owns
-no conversations, which means allow is the correct answer. The one case it
-does not cover is a transient failure to fork while a turn is genuinely
-being gated; that is recorded rather than hidden, and it is the reason
-:func:`status` reports a stale install loudly.
+**That clause is gone, and what removed it was not a better clause.** It
+was [AG-21](../../../specs5/plan-ag/decisions.md#ag-21): the hook now goes
+into a config root this app owns and spawns `agy` against, so the only
+sessions it can break are this app's own — and for those, a gate that
+cannot run is exactly the thing that should stop the turn. Fail-open was
+the rent paid for living in somebody else's configuration file, and the
+tenancy has ended. See :data:`LEGACY_FALLBACKS`, which keeps the old
+string only so :func:`status` can recognise an entry that still carries
+it.
+
+The residual case the clause covered — a transient failure to fork while a
+turn is genuinely being gated — is now answered the way it should always
+have been: the tool is blocked. That is recorded rather than hidden, and
+it is the reason :func:`status` reports a stale install loudly.
 
 The fallback's other edge, and the bug it hid (2026-09-05)
 ==========================================================
+*Kept in full although the clause is gone, because the bug was never
+about the clause — it was about* :func:`status` *believing a string.*
+
 That reasoning has a premise: *a non-zero exit means this host is not
 running*. It is true when the only reason the command can fail is that an
 interpreter is gone. It was **false on a PyInstaller release binary**,
@@ -88,7 +97,30 @@ Two changes close it, and they are deliberately at different layers:
   user an error message at the moment they asked for a gate, which is the
   cheapest place to spend it.
 
-Governing spec: ``specs5/plan-ag/`` — AG-14, AG-5.
+Four handlers, one entry (2026-09-11, and a fourth on 2026-09-14)
+================================================================
+This wrote one ``PreToolUse`` handler until AG-19. It now writes four
+under the same name — the gate, a ``PreInvocation`` that carries this
+app's standing guidance (AG-32), a ``PostInvocation`` that ends a stopped
+loop, and a ``Stop`` that always permits the stop — because ``agy`` merges
+named hooks per event and one name is what makes :func:`uninstall` able to
+remove exactly what we added.
+
+The cost to a stranger's session is not four times the old one. The
+per-tool-call tax is unchanged, since only the gate fires per tool call;
+what is added is three more hook processes **per invocation**, which is a
+much coarser unit — measured at 4 invocations for a turn that ran three
+tools, against one hook process per tool call.
+
+**Adding an event makes every existing install read ``stale``**, which is
+intended rather than tolerated: :func:`_stale_detail` has a branch that
+names the handlers an entry is missing, and the alternative — treating an
+entry without the new handler as ``current`` — is a mechanism that reports
+itself installed while being absent, which is the untruth :func:`status`
+exists to refuse. It costs an upgrading user one click.
+
+Governing spec: ``specs5/plan-ag/`` — AG-14, AG-5, AG-19, AG-32;
+``risks.md`` AG-R-16.
 """
 
 from __future__ import annotations
@@ -101,6 +133,8 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Any
+
+from aic_dc.agy import hook
 
 logger = logging.getLogger(__name__)
 
@@ -120,13 +154,66 @@ HOOK_NAME = "aic-dc-gate"
 #: the user was slow.
 HOOK_TIMEOUT_SECONDS = 3600
 
+#: The deadline on the three *invocation* handlers, which wait on no human.
+#: A minute rather than an hour, and rather than the documented default of
+#: 30 seconds: each question is answered from state the host already holds
+#: — a latch, or one fixed string — so a minute is pure headroom, and
+#: leaving the default in place would mean a value we never chose bounding
+#: the stop.
+INVOCATION_TIMEOUT_SECONDS = 60
 
-def hook_command(config_dir: Path | str, python: str | None = None) -> str:
-    """The shell command ``agy`` will run for every tool call.
 
-    The ``||`` fallback is the safety net described in the module
-    docstring: our hook exits 0 on every path it controls, so a non-zero
-    exit means this host could not start and therefore owns nothing.
+#: The ``||`` fallback that used to end every command, kept as a string so
+#: that :func:`status` can recognise an install written before 2026-09-11
+#: and say what is different about it.
+#:
+#: **It was deleted rather than replaced, and the reason is measured.**
+#: The fallback existed because the hook was installed **globally**, into
+#: the user's own ``~/.gemini/config/hooks.json``, where it fired for
+#: their interactive ``agy`` sessions too — so a hook runner this app
+#: could not start would have broken sessions this app has nothing to do
+#: with. Fail-open was the price of being in somebody else's config file.
+#: [AG-21](../../../specs5/plan-ag/decisions.md#ag-21) moves the hook into
+#: a config root this app owns, and the price stops being owed.
+#:
+#: A *structured deny* — ``|| printf '{"decision":"deny",...}' $?`` — was
+#: the alternative, and it is worse than nothing on two counts. ``agy``
+#: already fails closed on a command that cannot run: measured
+#: 2026-09-11, a runner exiting 127 denies the tool, exits 0 and neither
+#: crashes nor hangs, so the clause's entire output is a verdict already
+#: reached. And ``||`` *appends*: a runner that dies after emitting a
+#: partial object produces that object followed by a second one, which is
+#: not JSON at all — so the clause would turn a clean deny into a parse
+#: failure precisely in the case it was added for.
+#:
+#: What replaces it is nothing, on purpose. Faults inside the runner are
+#: caught inside the runner and answered with a real ``deny``; faults
+#: outside it — missing interpreter, killed process, bad path — are the
+#: vendor's to fail closed on, and it does.
+#:
+#: **``PreInvocation`` is deliberately absent**, and so is any other event
+#: registered after the clause was deleted: there is no install of it old
+#: enough to carry one. :func:`_stale_detail` reads this with ``.get`` and
+#: a sentinel for that reason, rather than by iterating
+#: :data:`~aic_dc.agy.hook.EVENTS` — a fabricated entry here would be a
+#: claim about history that is not true.
+LEGACY_FALLBACKS = {
+    hook.PRE_TOOL_USE: " || printf '{\"decision\":\"allow\"}'",
+    hook.POST_INVOCATION: " || printf '{}'",
+    hook.STOP: " || printf '{}'",
+}
+
+
+def hook_command(
+    config_dir: Path | str, python: str | None = None, *, event: str | None = None
+) -> str:
+    """The shell command ``agy`` will run for one lifecycle event.
+
+    **One command and no shell fallback**, since 2026-09-11. The
+    ``|| printf '{"decision":"allow"}'`` clause every command used to end
+    with is gone with the globalness that forced it — see
+    :data:`LEGACY_FALLBACKS` for why deleting it beats replacing it, and
+    why an install that still carries it reads as ``stale``.
 
     **Two forms, because ``sys.executable`` is not always a Python.**
     Under PyInstaller it is the frozen binary, which does not honour
@@ -143,6 +230,19 @@ def hook_command(config_dir: Path | str, python: str | None = None) -> str:
     read from ``python`` when that argument names a different interpreter,
     because a caller passing one is describing an install that is not this
     process.
+
+    **The gate's command is unchanged, and deliberately so.** ``event`` of
+    ``None`` or ``PreToolUse`` emits exactly the string this function has
+    always emitted, so an install written before AG-19 is still recognised
+    as *itself* rather than as a different interpreter — the two are told
+    apart by the events that are missing, which is what they are.
+
+    The flag is spelled two ways for the same reason the invocation is:
+    ``--event`` is the module's own argument, and the frozen build cannot
+    take it, because on that form the arguments belong to this app's CLI
+    rather than to the hook. So the frozen build carries
+    ``--agy-hook-event``, a second suppressed flag whose only job is to be
+    translated back (:mod:`aic_dc.cli`).
     """
     interpreter = python or sys.executable
     frozen = python is None and bool(getattr(sys, "frozen", False))
@@ -151,10 +251,122 @@ def hook_command(config_dir: Path | str, python: str | None = None) -> str:
         if frozen
         else f"{interpreter} -m aic_dc.agy.hook {config_dir}"
     )
-    return f"{invocation} || printf '{{\"decision\":\"allow\"}}'"
+    if event and event != hook.PRE_TOOL_USE:
+        invocation += (
+            f" --agy-hook-event {event}" if frozen else f" {hook.EVENT_FLAG} {event}"
+        )
+    return invocation
 
 
-def hook_runs(command: str, *, timeout: float = 30.0) -> str:
+def hook_commands(
+    config_dir: Path | str, python: str | None = None
+) -> dict[str, str]:
+    """Every command this build would install, keyed by event.
+
+    One place the set is enumerated, read by :func:`hook_entry` to write
+    them, by :func:`install` to probe them and by :func:`status` to compare
+    them — so a fourth event cannot be registered and left unchecked.
+    """
+    return {
+        event: hook_command(config_dir, python, event=event)
+        for event in hook.EVENTS
+    }
+
+
+def hook_entry(config_dir: Path | str, python: str | None = None) -> dict[str, Any]:
+    """Our whole entry in the user's hooks file.
+
+    Four handlers under one name, which is how ``agy`` groups them:
+    ``PreToolUse`` is *grouped* — a ``matcher`` wrapping a ``hooks`` list —
+    and the three invocation events are **flat**, a list of handlers with
+    no matcher, because there is no tool to match on. Writing the grouped
+    shape for a flat event is the kind of mistake that produces a handler
+    which simply never fires, so the shapes are written out here rather
+    than generated from one template.
+
+    Separate from :func:`install` so that a test can put an entry on disk
+    without going through the probe — the states ``install`` now refuses to
+    create still have to be readable by :func:`status`.
+    """
+    commands = hook_commands(config_dir, python)
+    return {
+        hook.PRE_TOOL_USE: [
+            {
+                # AG-R-12: every tool, never a list. A blocked tool is an
+                # error the model can see, and it will reach for whatever
+                # the matcher missed — measured, three routes to one write.
+                "matcher": "*",
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": commands[hook.PRE_TOOL_USE],
+                        "timeout": HOOK_TIMEOUT_SECONDS,
+                    }
+                ],
+            }
+        ],
+        hook.PRE_INVOCATION: [
+            {
+                "type": "command",
+                "command": commands[hook.PRE_INVOCATION],
+                "timeout": INVOCATION_TIMEOUT_SECONDS,
+            }
+        ],
+        hook.POST_INVOCATION: [
+            {
+                "type": "command",
+                "command": commands[hook.POST_INVOCATION],
+                "timeout": INVOCATION_TIMEOUT_SECONDS,
+            }
+        ],
+        hook.STOP: [
+            {
+                "type": "command",
+                "command": commands[hook.STOP],
+                "timeout": INVOCATION_TIMEOUT_SECONDS,
+            }
+        ],
+    }
+
+
+#: A payload per event, shaped like the one ``agy`` sends, for
+#: :func:`hook_runs`. None of them names a conversation, so none is owned
+#: by this host — the probe therefore exercises the interpreter, the
+#: argument list and the print without touching permission state or a
+#: socket.
+_PROBES: dict[str, dict[str, Any]] = {
+    hook.PRE_TOOL_USE: {"toolCall": {"name": "aic-dc-install-probe"}},
+    # The two invocation events share a payload shape, per `hooks.md`:
+    # `invocationNum` and `initialNumSteps` beside the common fields.
+    hook.PRE_INVOCATION: {"invocationNum": 0, "initialNumSteps": 0},
+    hook.POST_INVOCATION: {"invocationNum": 0, "initialNumSteps": 0},
+    hook.STOP: {"executionNum": 1, "terminationReason": "model_stop"},
+}
+
+
+#: One probe per (command, event) per process. A probe spawns an
+#: interpreter, and AG-21 installs a hook into a **fresh root per
+#: consultation** — so the unmemoised version would pay three interpreter
+#: startups for every consultation, to re-answer a question whose answer
+#: cannot change while this process is running: the command names *this*
+#: interpreter and *this* package.
+#:
+#: Deliberately not invalidated. The thing that would make an answer stale
+#: is this install being deleted from under a running server, and a server
+#: whose own package has been removed has a larger problem than a cached
+#: probe.
+_PROBE_CACHE: dict[tuple[str, str], str] = {}
+
+
+def _probed(invocation: str, event: str, verdict: str) -> str:
+    """Record and return one probe verdict."""
+    _PROBE_CACHE[(invocation, event)] = verdict
+    return verdict
+
+
+def hook_runs(
+    command: str, *, event: str = hook.PRE_TOOL_USE, timeout: float = 30.0
+) -> str:
     """``""`` if ``command`` answers a probe, else why it did not.
 
     The check :func:`status` cannot make cheaply and :func:`install` must
@@ -164,17 +376,30 @@ def hook_runs(command: str, *, timeout: float = 30.0) -> str:
     correct string, unrunnable command — and the same gap catches a moved
     virtualenv or an uninstalled package.
 
-    Deliberately runs the **left side only**, without the ``|| printf``
-    fallback: the fallback exists to make a broken hook harmless to
-    *other people's* sessions, and running it here would mask the very
-    failure this is looking for.
+    The command it is handed no longer has a ``|| printf`` fallback to
+    strip, but the split survives, because an entry written before
+    2026-09-11 still carries one and a probe that ran it would report a
+    broken hook as healthy — the fallback prints valid JSON and exits 0,
+    which is exactly the shape of a pass. Stripping it is what lets this
+    function give the honest answer about a legacy install rather than the
+    reassuring one.
 
     A probe payload with no ``conversationId`` is one the gate does not
     own, so this asks the question in the shape that is guaranteed to be
     cheap and to touch no permission state.
+
+    **Each event is probed with its own payload and judged by its own
+    contract**, because the three commands differ by an argument and an
+    argument is exactly what the frozen-binary bug got wrong. Only the gate
+    is required to print a ``decision``; an invocation hook answering
+    ``{}`` — no opinion — is the correct answer and the one a probe should
+    expect.
     """
     invocation = command.split("||")[0].strip()
-    probe = json.dumps({"toolCall": {"name": "aic-dc-install-probe"}})
+    cached = _PROBE_CACHE.get((invocation, event))
+    if cached is not None:
+        return cached
+    probe = json.dumps(_PROBES.get(event, _PROBES[hook.PRE_TOOL_USE]))
     try:
         completed = subprocess.run(
             invocation,
@@ -185,18 +410,29 @@ def hook_runs(command: str, *, timeout: float = 30.0) -> str:
             timeout=timeout,
         )
     except (OSError, subprocess.SubprocessError) as exc:
-        return f"the command could not be run: {exc}"
+        return _probed(invocation, event, f"the command could not be run: {exc}")
     if completed.returncode != 0:
         detail = (completed.stderr or completed.stdout or "").strip().splitlines()
         tail = detail[-1] if detail else "no output"
-        return f"exit {completed.returncode}: {tail}"
+        return _probed(invocation, event, f"exit {completed.returncode}: {tail}")
     try:
         answer = json.loads(completed.stdout)
     except ValueError:
-        return f"printed no JSON decision: {completed.stdout.strip()[:200]!r}"
-    if not isinstance(answer, dict) or "decision" not in answer:
-        return f"printed JSON with no decision: {completed.stdout.strip()[:200]!r}"
-    return ""
+        return _probed(
+            invocation, event,
+            f"printed no JSON decision: {completed.stdout.strip()[:200]!r}",
+        )
+    if not isinstance(answer, dict):
+        return _probed(
+            invocation, event,
+            f"printed JSON that is not an object: {completed.stdout.strip()[:200]!r}",
+        )
+    if event == hook.PRE_TOOL_USE and "decision" not in answer:
+        return _probed(
+            invocation, event,
+            f"printed JSON with no decision: {completed.stdout.strip()[:200]!r}",
+        )
+    return _probed(invocation, event, "")
 
 
 def _load(path: Path) -> dict[str, Any]:
@@ -238,11 +474,24 @@ def status(
 
     - ``absent`` — no entry of ours. `agy` sessions are ungated by us and
       pay nothing.
-    - ``current`` — our entry, pointing at this interpreter.
+    - ``current`` — our entry, pointing at this interpreter, **with every
+      handler this build registers**.
     - ``stale`` — our entry, pointing at a **different or missing**
       interpreter. Usually another checkout, or a virtualenv that has
       moved. Still safe for the user thanks to the ``||`` fallback, but our
       own sessions would not be gated by *this* build.
+
+      **Also an entry that is ours and incomplete** (2026-09-11). AG-19
+      added a ``PostInvocation`` handler, AG-R-16 a ``Stop`` one and AG-32
+      a ``PreInvocation`` one, and an entry written before them has a
+      working gate and no stop mechanism — ⏹ would starve a turn and call
+      itself a halt. That reads as a small difference and is not: a control
+      that reports itself a mechanism while being a request is the same
+      shape of untruth as an ungated agent reporting itself gated, which is
+      what this state exists to refuse. It costs an upgrading user one
+      click on a panel that says what is missing (``detail``), and it
+      converges; treating it as ``current`` would leave the mechanism
+      unarmed and silent forever.
 
       **Different, not differently spelled** (2026-09-10). This compared
       command strings, so one venv's ``bin/python3`` and ``bin/python`` —
@@ -274,17 +523,90 @@ def status(
     if not isinstance(entry, dict):
         return {"state": "absent", "path": str(target), "other_hooks": others}
 
-    want = hook_command(config_dir, python)
-    found = _installed_command(entry)
-    state = "current" if _same_command(found, want) else "stale"
-    return {
-        "state": state,
+    want = hook_commands(config_dir, python)
+    found = _installed_commands(entry)
+    differs = [
+        event
+        for event in hook.EVENTS
+        if not _same_command(found.get(event, ""), want[event])
+    ]
+    report = {
+        "state": "current" if not differs else "stale",
         "path": str(target),
         "other_hooks": others,
-        "command": found,
-        "expected": want,
+        # The gate's pair, under the names they have always had: this is
+        # what the Settings panel renders, and it is still the answer to
+        # "which install is in the file".
+        "command": found.get(hook.PRE_TOOL_USE, ""),
+        "expected": want[hook.PRE_TOOL_USE],
+        "commands": found,
+        "expected_commands": want,
         "agy_present": shutil.which("agy") is not None,
     }
+    if differs:
+        report["missing_events"] = [
+            event for event in differs if event not in found
+        ]
+        report["detail"] = _stale_detail(differs, found)
+    return report
+
+
+#: What an entry missing one of our handlers costs, clause by clause, for
+#: :func:`_stale_detail`. Per event rather than one sentence about "the
+#: stop", because since AG-32 the missing handler is not always the stop —
+#: an entry written yesterday has both invocation handlers and no
+#: ``PreInvocation``, and telling that user their ⏹ would starve a turn
+#: would be a false explanation of a true state.
+_MISSING_COSTS = {
+    hook.PRE_INVOCATION: (
+        "this app's standing guidance would not reach the model, so a write "
+        "carrying ArtifactMetadata would fail inside agy and be retried as a "
+        "shell command"
+    ),
+    hook.POST_INVOCATION: "stopping a turn would starve it rather than end it",
+    hook.STOP: (
+        "a loop ended by a hook this app does not own would go unrecorded"
+    ),
+}
+
+
+def _stale_detail(differs: list[str], found: dict[str, str]) -> str:
+    """Why an entry of ours is not this build's, in a sentence.
+
+    Two causes reach ``stale`` and a user can act on only one of them if
+    they are told which: another checkout owns the file, or this build
+    registers handlers the entry predates. Reinstalling is the answer to
+    both, so this explains rather than instructs.
+    """
+    legacy = [
+        event
+        for event in differs
+        if found.get(event, "").endswith(LEGACY_FALLBACKS.get(event, "\0"))
+    ]
+    if legacy:
+        return (
+            "This entry was written before the permission gate moved into "
+            "its own configuration root, so its commands still end in the "
+            "fail-open fallback — a gate that cannot start would wave every "
+            "tool call through instead of blocking it. Reinstalling removes "
+            "the fallback."
+        )
+    absent = [event for event in differs if event not in found]
+    if absent and hook.PRE_TOOL_USE not in differs:
+        costs = [_MISSING_COSTS[event] for event in absent if event in _MISSING_COSTS]
+        return (
+            "The permission gate is installed and is still reviewing every "
+            "tool call, but this build also registers "
+            + ", ".join(absent)
+            + ", which this entry does not have"
+            + (f" — so {', and '.join(costs)}" if costs else "")
+            + ". Reinstalling adds them."
+        )
+    return (
+        "This entry names a different install of AIC-DC, so your own "
+        "sessions would not be gated by this one. Reinstalling takes it "
+        "over."
+    )
 
 
 #: The fixed middles of the two forms :func:`hook_command` emits. Used to
@@ -352,14 +674,39 @@ def _same_command(found: str, want: str) -> bool:
     return _same_interpreter(left[0], right[0])
 
 
-def _installed_command(entry: dict[str, Any]) -> str:
-    for group in entry.get("PreToolUse") or []:
+def _handler_command(handlers: Any) -> str:
+    """The first command in a flat list of handlers, or ``""``."""
+    if not isinstance(handlers, list):
+        return ""
+    for handler in handlers:
+        if isinstance(handler, dict) and handler.get("command"):
+            return str(handler["command"])
+    return ""
+
+
+def _installed_commands(entry: dict[str, Any]) -> dict[str, str]:
+    """What is actually in the file, by event. Absent events are absent.
+
+    Missing rather than empty, because :func:`status` reports *which*
+    handlers an entry does not have and "" would make an event that is
+    there with a blank command indistinguishable from one that is not.
+
+    The two shapes are read the way they are written: ``PreToolUse`` is
+    grouped under a ``matcher``, the invocation events are flat.
+    """
+    found: dict[str, str] = {}
+    for group in entry.get(hook.PRE_TOOL_USE) or []:
         if not isinstance(group, dict):
             continue
-        for handler in group.get("hooks") or []:
-            if isinstance(handler, dict) and handler.get("command"):
-                return str(handler["command"])
-    return ""
+        command = _handler_command(group.get("hooks"))
+        if command:
+            found[hook.PRE_TOOL_USE] = command
+            break
+    for event in hook.INVOCATION_EVENTS:
+        command = _handler_command(entry.get(event))
+        if command:
+            found[event] = command
+    return found
 
 
 def install(
@@ -381,41 +728,38 @@ def install(
     itself gated. The frozen-binary bug produced exactly that, and it is
     not the only way to get there — a virtualenv that has moved, or a
     package uninstalled from under an entry, both end in the same place.
+
+    **Every command is probed, not just the gate's.** The three differ only
+    by an argument, and an argument is precisely what the frozen build got
+    wrong; probing one and writing three would leave the same gap one event
+    to the left.
     """
     target = path or GLOBAL_HOOKS
-    command = hook_command(config_dir, python)
-    problem = hook_runs(command)
-    if problem:
-        logger.error("Refusing to install an agy gate that does not run: %s", problem)
+    commands = hook_commands(config_dir, python)
+    for event in hook.EVENTS:
+        problem = hook_runs(commands[event], event=event)
+        if not problem:
+            continue
+        logger.error(
+            "Refusing to install an agy %s hook that does not run: %s",
+            event,
+            problem,
+        )
         return {
             "state": "unrunnable",
             "path": str(target),
-            "command": command,
+            "command": commands[event],
+            "event": event,
             "detail": (
-                f"The permission gate was not installed, because the command "
-                f"it would write does not run here — {problem}. Installing it "
-                f"anyway would leave `agy` taking the allow-fallback on every "
-                f"tool call while this panel reported the gate as active."
+                f"The permission gate was not installed, because the "
+                f"{event} command it would write does not run here — "
+                f"{problem}. Installing it anyway would write a hook that "
+                f"cannot answer, while this panel reported the gate as "
+                f"active."
             ),
         }
     data = _load(target)
-    data[HOOK_NAME] = {
-        "PreToolUse": [
-            {
-                # AG-R-12: every tool, never a list. A blocked tool is an
-                # error the model can see, and it will reach for whatever
-                # the matcher missed — measured, three routes to one write.
-                "matcher": "*",
-                "hooks": [
-                    {
-                        "type": "command",
-                        "command": command,
-                        "timeout": HOOK_TIMEOUT_SECONDS,
-                    }
-                ],
-            }
-        ]
-    }
+    data[HOOK_NAME] = hook_entry(config_dir, python)
     target.parent.mkdir(parents=True, exist_ok=True)
     # Written whole and moved into place. `agy` may read this file at any
     # instant, and a half-written one would fail to parse — which, for a
@@ -425,6 +769,68 @@ def install(
     os.replace(tmp, target)
     logger.info("Installed the AIC-DC agy gate into %s", target)
     return status(config_dir, path=target, python=python)
+
+
+def installable(config_dir: Path | str, python: str | None = None) -> dict[str, Any]:
+    """Whether the gate *would* install, touching no file.
+
+    AG-21 gave every consultation a **fresh** config root, which leaves
+    nothing to inspect before one starts: :func:`status` on a root that
+    does not exist yet answers ``absent``, and that is true and useless. A
+    caller asking "can a consultation be gated" is really asking whether
+    the commands this build would write can run — the same probe
+    :func:`install` makes before it writes, memoised per process, so the
+    question costs nothing after the first time.
+
+    Two states, deliberately not three: ``ready`` or ``unrunnable``. There
+    is no ``stale`` here, because there is no installed entry to be stale
+    against.
+    """
+    commands = hook_commands(config_dir, python)
+    for event in hook.EVENTS:
+        problem = hook_runs(commands[event], event=event)
+        if problem:
+            return {
+                "state": "unrunnable",
+                "event": event,
+                "command": commands[event],
+                "detail": (
+                    f"The {event} command this build would write does not "
+                    f"run here — {problem}."
+                ),
+                "expected_commands": commands,
+                "agy_present": shutil.which("agy") is not None,
+            }
+    return {
+        "state": "ready",
+        "expected_commands": commands,
+        "agy_present": shutil.which("agy") is not None,
+    }
+
+
+def retire_global() -> bool:
+    """Take our entry back out of the user's own ``hooks.json``.
+
+    Returns whether one was there. This app put it there, this app no
+    longer reads it, and until AG-21 it was the gate — so a machine that
+    upgrades inherits a hook that fires for every ``agy`` the user starts
+    by hand, routing to a socket that belongs to a process which may not be
+    running. The old entry carries the ``|| printf '{"decision":"allow"}'``
+    fallback, so it fails open rather than blocking them, which is exactly
+    what makes it easy not to notice.
+
+    AG-21's stated benefit is that the user's own interactive ``agy`` is
+    untouched. That is not true of an upgraded machine until this runs, so
+    it runs on connect rather than waiting for somebody to find the button
+    in Settings. Removing it needs no permission: it is ours, and it is
+    dead.
+
+    Deliberately **not** latched per process. It is one small JSON read
+    that returns ``False`` without logging when there is nothing there, and
+    a latch would mean a stale entry written between two connects in the
+    same session survives until restart.
+    """
+    return uninstall()
 
 
 def uninstall(*, path: Path | None = None) -> bool:

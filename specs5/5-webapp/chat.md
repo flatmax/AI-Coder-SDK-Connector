@@ -131,6 +131,24 @@ A tool card is the unit that carries what the agent *did*, as opposed to what it
 | Ok | Green dot |
 | Error | Red dot, body expanded |
 | Denied | Amber dot, with the denial reason as the body. The agent saw this reason too |
+| Interrupted | Hollow grey dot, unanimated, body expanded with a note saying the call never returned. No elapsed clock |
+
+**Interrupted is the engine's word, and the only status the browser cannot work out for itself**
+(2026-09-16). Live, a call with no result is a call in flight, and that is what `pending` means; a call
+with no result read back off a *finished* conversation is a call that never returned, and rendering it as
+in flight is a claim about a process that is gone. It was doing exactly that after a restart mid-dialog: a
+question card left over from the killed turn kept a pulsing dot and an elapsed clock counting up from an
+invocation two days earlier, so the panel looked like it was still waiting for an answer to a question no
+process was asking any more. The mark is made once where the fact is known — `render_messages` freezing a
+turn, [../3-engine/history.md](../3-engine/history.md) — and everything downstream carries it through
+rather than re-deriving it. **The clock is what the status is for:** the dot is a colour, the note is
+prose, and the ticking number was the part that read as a live system.
+
+The body opens itself for the same reason an error's does — a collapsed card cannot say why it stopped —
+and the note sits *above* the input rather than replacing it, unlike a denial. A denial is a proposal that
+was refused and the reason is the whole content; an interrupted call is the record of what was in flight,
+so the input is the evidence and must survive. For a lost `AskUserQuestion` that means the question itself
+is still readable on the card.
 
 ### Diff Rendering for Edit and Write
 `Edit` and `Write` inputs are diffs in disguise, and rendering them as raw JSON wastes the panel's most
@@ -166,6 +184,19 @@ protocol-specific need.
 - No re-running a tool call from the transcript. The agent owns its tool loop; a UI that lets the user replay a call outside that loop produces state the agent does not know about
 - No editing a tool input before it runs — that is the permission dialog's job, and only to the extent of allow/deny
 - No hiding tool calls behind a global "show tools" switch. A turn where the agent silently modified nine files is exactly the turn a user needs to see
+- **No answering a lost question on its card, either.** An interrupted `AskUserQuestion` offers one button, *Ask me again*, and all it does is type a sentence into the composer — "the question you asked me was never answered, the dialog was lost when the session restarted, please ask it again" — and stop. Nothing is sent; the user reads it, edits it, sends it or clears it
+
+That button is not the first rule bending. The request it would have to satisfy is *gone*: a pending
+permission lives in `PermissionBroker._pending` and an `asyncio.Future`, both of which die with the
+process, and with them the `permission_id` an answer would have to name
+([../3-engine/permissions.md](../3-engine/permissions.md)). There is nothing to reply to and no re-run
+that could recreate it, because a `can_use_tool` request is raised by the agent mid-turn and not by
+anything the browser can call. What is left is asking the agent for the question again, which is a prompt
+— the one thing this app is for. The button is a shortcut for words the user would otherwise type, and it
+types them where every other offered prompt is typed (`fillComposer`, one implementation shared with the
+message toolbar's paste-to-prompt) precisely so the difference between offering words and speaking for the
+user stays visible in the code. Ordinary interrupted calls get no button at all: a `Bash` that never
+returned may or may not have run, and only the agent is in a position to work that out.
 
 ## Markdown Rendering
 - Dedicated Marked instance for chat, separate from the diff-viewer preview instance

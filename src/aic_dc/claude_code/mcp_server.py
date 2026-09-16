@@ -37,6 +37,8 @@ import logging
 from collections.abc import Awaitable, Callable, Iterable
 from typing import Any
 
+from aic_dc import index_tools
+
 logger = logging.getLogger(__name__)
 
 
@@ -47,9 +49,12 @@ logger = logging.getLogger(__name__)
 # The server name the CLI prefixes onto every tool: `mcp__aic-dc__symbol_map`.
 # `permissions.AIC_DC_MCP_SERVER` must match. That string is what ungates
 # these tools: `can_use_tool` allows `mcp__aic-dc__*` without a dialog, and a
-# rename here without one there turns every `symbol_map` call into a
-# third-party MCP permission prompt.
-SERVER_NAME = "aic-dc"
+# rename without the others turns every `symbol_map` call into a third-party
+# MCP permission prompt. Re-exported from `index_tools` rather than spelled
+# again, because two Antigravity transports now file the same six tools under
+# the same name and a fourth copy of the string is a fourth thing to keep
+# in step.
+SERVER_NAME = index_tools.SERVER_NAME
 
 # Per-response character budget for the two map tools. Chosen as a size a
 # turn can absorb without the CLI spilling the result to disk: a 900-file
@@ -435,10 +440,18 @@ class McpBridge:
         back: after wrapping, the descriptions, schemas and annotations are
         no longer reachable, and those are exactly what wants checking.
 
-        The handlers are closures over ``self`` rather than the methods
-        themselves because the SDK's ``@tool`` decorator hands the handler
-        one positional dict, and unpacking the arguments here keeps each
-        method's signature readable and directly testable.
+        Rendered from :data:`aic_dc.index_tools.SPECS` rather than written
+        out here as six ``@tool`` calls. The text used to live in those
+        calls, which put the product's own prose inside one SDK's packaging
+        and is why the tools reached one engine of three for eleven days
+        (AG-34); the specs are the same strings, moved, with
+        ``tests/test_index_tools.py`` pinning each as a literal so the move
+        was provably byte-exact and a later reword is deliberate.
+
+        The handlers stay closures over ``self``: ``@tool`` hands the
+        handler one positional dict, and the spec knows which keys to lift
+        out of it, so each bridge method keeps its readable, directly
+        testable keyword signature.
 
         Every tool carries ``readOnlyHint``, which is the invariant "every
         bridge tool is read-only" stated to the CLI rather than only to us.
@@ -448,153 +461,16 @@ class McpBridge:
 
         read_only = ToolAnnotations(readOnlyHint=True)
 
-        @tool(
-            "symbol_map",
-            "Structural map of the repository's code: per file, its classes, "
-            "functions, methods and imports, in a compact format with a legend. "
-            "One call answers 'what is the shape of this codebase?' — far "
-            "cheaper than a directory walk plus dozens of Reads. Optionally "
-            "scope to a subtree with path_prefix or to one language. Large maps "
-            "come back in chunks with a cursor for the next call.",
-            {
-                "type": "object",
-                "properties": {
-                    "path_prefix": {
-                        "type": "string",
-                        "description": "Repo-relative directory or path prefix to "
-                        "scope the map to, e.g. 'src/aic_dc/claude_code'.",
-                    },
-                    "language": {
-                        "type": "string",
-                        "description": "Restrict to one language: python, "
-                        "javascript, typescript, c, cpp, matlab.",
-                    },
-                    "cursor": {
-                        "type": "string",
-                        "description": "Continuation token from a previous "
-                        "chunked response.",
-                    },
-                },
-                "required": [],
-            },
-            read_only,
-        )
-        async def symbol_map(args: dict[str, Any]) -> dict[str, Any]:
-            return await self.symbol_map(
-                path_prefix=args.get("path_prefix"),
-                language=args.get("language"),
-                cursor=args.get("cursor"),
-            )
+        def build(spec: index_tools.ToolSpec) -> Any:
+            """One tool. A function, not a loop body, so each closure gets
+            its own ``spec`` binding instead of sharing the last one."""
 
-        @tool(
-            "file_symbols",
-            "The structural block for specific files: symbols with line "
-            "numbers, imports, and incoming reference counts. Use it to orient "
-            "in a large file without reading it, and as the follow-up to a "
-            "symbol_map call.",
-            {
-                "type": "object",
-                "properties": {
-                    "paths": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Repo-relative file paths.",
-                    },
-                },
-                "required": ["paths"],
-            },
-            read_only,
-        )
-        async def file_symbols(args: dict[str, Any]) -> dict[str, Any]:
-            return await self.file_symbols(paths=args.get("paths"))
+            async def handler(args: dict[str, Any]) -> dict[str, Any]:
+                return await spec.invoke(self, args)
 
-        @tool(
-            "find_references",
-            "Where a symbol is used, from the reference graph: definition "
-            "sites, resolved call sites, and the files importing them. Unlike "
-            "Grep this follows aliased imports and does not match the name in "
-            "prose or in an unrelated scope — it answers 'what breaks if I "
-            "change this?'.",
-            {
-                "type": "object",
-                "properties": {
-                    "symbol": {
-                        "type": "string",
-                        "description": "The symbol name: a class, function, "
-                        "method or variable.",
-                    },
-                },
-                "required": ["symbol"],
-            },
-            read_only,
-        )
-        async def find_references(args: dict[str, Any]) -> dict[str, Any]:
-            return await self.find_references(symbol=args.get("symbol"))
+            return tool(spec.name, spec.description, spec.schema, read_only)(handler)
 
-        @tool(
-            "doc_outline",
-            "Document structure for markdown and SVG: headings with line "
-            "numbers, extracted keywords, content-type markers and "
-            "cross-references — and for SVG, the containment hierarchy with box "
-            "labels. There is no built-in equivalent: Read on an SVG returns "
-            "coordinate soup, this returns the labelled nesting.",
-            {
-                "type": "object",
-                "properties": {
-                    "path_prefix": {
-                        "type": "string",
-                        "description": "Repo-relative directory or path prefix "
-                        "to scope the outline to.",
-                    },
-                    "cursor": {
-                        "type": "string",
-                        "description": "Continuation token from a previous "
-                        "chunked response.",
-                    },
-                },
-                "required": [],
-            },
-            read_only,
-        )
-        async def doc_outline(args: dict[str, Any]) -> dict[str, Any]:
-            return await self.doc_outline(
-                path_prefix=args.get("path_prefix"),
-                cursor=args.get("cursor"),
-            )
-
-        @tool(
-            "review_state",
-            "The active code review's facts: reviewed branch, base branch, "
-            "merge-base, and changed files with status — plus how AIC-DC has "
-            "arranged the repository, which changes what `git status` means. "
-            "Returns an explicit not-in-review answer when no review is on.",
-            {"type": "object", "properties": {}, "required": []},
-            read_only,
-        )
-        async def review_state(args: dict[str, Any]) -> dict[str, Any]:
-            return await self.review_state()
-
-        @tool(
-            "ui_state",
-            "What the user is looking at right now: files ticked in the picker, "
-            "the file open in the viewer pane and the selected line range. "
-            "Browser state, so no built-in tool can answer it. The turn's "
-            "opening framing carries a snapshot of this; call the tool to "
-            "re-read it after a long turn.",
-            {"type": "object", "properties": {}, "required": []},
-            read_only,
-        )
-        async def ui_state(args: dict[str, Any]) -> dict[str, Any]:
-            return await self.ui_state()
-
-        return [
-            symbol_map,
-            file_symbols,
-            find_references,
-            doc_outline,
-            review_state,
-            ui_state,
-        ]
+        return [build(spec) for spec in index_tools.SPECS]
 
     def build_server(self) -> Any:
         """The ``McpSdkServerConfig`` for ``ClaudeAgentOptions.mcp_servers``.

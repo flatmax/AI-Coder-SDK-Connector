@@ -356,6 +356,30 @@ configures:
 7. A separate Reload button re-reads from disk (useful if the user edited the file directly)
 8. Close button exits the editor and returns to the card grid
 
+### Step 3 Is Measured Now
+
+Step 3 is the step that broke, and it broke without breaking a single one of steps 1, 2, 4 or 5. On
+2026-09-11 a live session reported *"in settings when I click on engine config and app config buttons,
+there is no way to edit the json files"*: the card highlighted, the RPC answered, the textarea held the
+file and Ctrl+S would have written it — and the editor laid out **two pixels tall**, the two borders of
+`.editor-area` with everything between them clipped. It was one declaration. `flex: 1; min-height: 0`
+inside a host that is a scrolling column flex container asks for a share of free space that had already
+gone negative — the panels above this section had 989px of content in a 473px host — and removes the
+floor the textarea's own `min-height: 200px` would have set. `flex: 0 0 auto` is the fix: the host
+scrolls, so there is no height here to compete for.
+
+**All 124 settings-tab unit tests passed throughout and could not have done otherwise**, because jsdom
+computes no layout. So this is now a layout-harness scene rather than a unit test —
+`settings-editor` in [`layout-harness.js`](../../webapp/src/layout-harness.js), checks [8]–[10] of
+[`layout_probe.py`](../../scripts/layout_probe.py), 61 in that suite. What the scene has to reproduce is
+the *condition* and not just the component: the collapse only happens once the column above has
+overflowed the host, so the tab is mounted in a deliberately short box and the probe asserts the host
+scrolls before it asserts anything about the editor. Check [9] is the control — the same card in a
+1500px host must measure the *same* editor, which is what "content-driven" means and what `flex: 1`
+cannot do. Re-broken to confirm it: with the old rule in place the editor measures 2px, the textarea is
+0px visible inside an `overflow: hidden` box, and the roomy control measures 595px against the cramped
+2px.
+
 ## Editor Toolbar
 
 When an editor is open, a toolbar above the textarea shows the config type icon and label, the file path,

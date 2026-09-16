@@ -43,6 +43,7 @@ import {
 import {
   AUTO_SCROLL_DISENGAGE_PX,
   AUTO_SCROLL_TOLERANCE_PX,
+  fillComposer,
   generateRequestId,
 } from './helpers.js';
 import { resetTurnBlocks } from './blocks.js';
@@ -233,7 +234,12 @@ export async function send(panel) {
   // settled turn (specs5/5-webapp/subagent-browser.md § Tab Lifetime). Safe
   // here because the read-only gate above has already established that the
   // tab we are sending from is not one of them.
-  clearSubagentTabs(panel);
+  //
+  // A consultation's tab stays, which is the one case where "last turn's
+  // feed" is the wrong description of what the user is looking at: they
+  // opened it by hand to read a second opinion, and the prompt being sent
+  // is usually the answer to it (AG-31).
+  clearSubagentTabs(panel, { keepConsultations: true });
   // Stamp the run-timer start the instant the prompt is
   // sent, and kick the panel-level ticker so the live
   // elapsed counter on the streaming card starts moving.
@@ -1220,22 +1226,7 @@ export async function copyMessageText(panel, msg) {
  * any selection. Focuses the textarea after.
  */
 export function pasteMessageToPrompt(panel, msg) {
-  const text = extractMessageText(msg);
-  if (!text) return;
-  const ta = panel.shadowRoot?.querySelector('.input-textarea');
-  if (!ta) {
-    panel._input = `${panel._input}${text}`;
-    return;
-  }
-  const before = ta.value.slice(0, ta.selectionStart);
-  const after = ta.value.slice(ta.selectionEnd);
-  const next = `${before}${text}${after}`;
-  panel._input = next;
-  ta.value = next;
-  const cursor = before.length + text.length;
-  ta.setSelectionRange(cursor, cursor);
-  ta.focus();
-  ta.dispatchEvent(new Event('input', { bubbles: true }));
+  fillComposer(panel, extractMessageText(msg));
 }
 
 // ---------------------------------------------------------------

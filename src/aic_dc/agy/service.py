@@ -47,11 +47,16 @@ Governing spec: ``specs5/plan-ag/`` — AG-14, AG-5, AG-3.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import functools
 import logging
 import shutil
+import uuid
+from pathlib import Path
 from typing import Any
 
-from aic_dc.agy import install
+from aic_dc import framing
+from aic_dc.agy import install, roots
 from aic_dc.agy import tools as agy_tools
 from aic_dc.agy.gate_server import AgyGateServer
 from aic_dc.agy.session import AgyNotInstalledError, AgySession
@@ -111,6 +116,14 @@ class AgyService(AntigravityService):
         # previous session is read back from `engines.agy_model`, which is
         # the half `set_model` was missing until 2026-09-09.
         self._model = model or getattr(self._config, "agy_model", None)
+        # AG-22's other half. The listener is the server this app runs so
+        # that `agy` can consult Claude; the token and the spawn id are how
+        # one `agy` child is told apart from the next on it. All three are
+        # None between spawns, which is also what "no consultant is
+        # reachable" looks like.
+        self._listener: Any = None
+        self._consult_token: str | None = None
+        self._consult_spawn_id: str | None = None
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -124,14 +137,60 @@ class AgyService(AntigravityService):
     # `AttributeError: property has no setter` on every `AgyService`.
 
     def gate_status(self) -> dict[str, Any]:
-        """Whether the gate is installed in the user's `agy` configuration.
+        """Whether the gate is installed in **this app's** `agy` root.
 
         Public because it is the settings surface's whole question, and
         because a user is entitled to ask it without starting a session.
+
+        **The file it reads moved with AG-21.** It used to be
+        ``~/.gemini/config/hooks.json`` — the user's own, shared with every
+        `agy` they run by hand. It is now the master root this app owns, so
+        the answer is about our sessions and only ours.
         """
-        report = install.status(self._config_dir)
+        report = install.status(
+            self._config_dir,
+            path=roots.hooks_file(roots.master_root(self._config_dir)),
+        )
         report["agy_present"] = shutil.which(self._executable) is not None
         return report
+
+    def _ensure_gate(self) -> tuple[Path, dict[str, Any]]:
+        """Provision the master root and put the gate inside it.
+
+        Returns the root and the install report.
+
+        **This is not asked about, and that is the point of AG-21.**
+        Installing a hook into the user's own configuration was a decision
+        with consequences outside this app — every `agy` they ran by hand
+        went through our socket — so it had a button and no default. A hook
+        inside a directory this app created, for a process this app spawns,
+        is not a decision at all. Nothing outside ``<config_dir>/agy-roots``
+        is written.
+
+        **And the old one comes out here**, because "the user's own `agy`
+        is untouched" is false on an upgraded machine until it does, and
+        waiting for somebody to find the Settings button would mean the
+        claim is true of new installs and quietly false of everyone else.
+
+        Raises ``RuntimeError`` if the command will not run: `install`
+        probes before it writes, and a gate that cannot be installed must
+        stop the session rather than be skipped, because `agy` is spawned
+        with ``--dangerously-skip-permissions`` and the hook is the only
+        thing between the model and the tree.
+        """
+        config_root = roots.prepare(
+            roots.master_root(self._config_dir), self._config_dir
+        )
+        if install.retire_global():
+            logger.info(
+                "Removed the pre-AG-21 gate from %s: this root replaces it",
+                install.GLOBAL_HOOKS,
+            )
+        report = install.install(
+            self._config_dir, path=roots.hooks_file(config_root)
+        )
+        report["agy_present"] = shutil.which(self._executable) is not None
+        return config_root, report
 
     async def _list_models(self) -> list[dict[str, Any]]:
         """The models ``agy`` will accept, from ``agy models``.
@@ -280,16 +339,20 @@ class AgyService(AntigravityService):
                     "use the SDK transport with a Gemini API key."
                 ),
             }
-        gate = self.gate_status()
+        try:
+            _, gate = self._ensure_gate()
+        except RuntimeError as exc:
+            gate = self.gate_status()
+            gate["detail"] = str(exc)
         if gate["state"] != "current":
             return {
                 "error": "gate_not_installed",
                 "reason": gate["state"],
                 "message": (
-                    "The AIC-DC permission gate is not installed in "
+                    "The AIC-DC permission gate could not be installed in "
                     f"{gate['path']}, so a turn could not be reviewed before "
-                    "it wrote to your files. Install it from Settings — it "
-                    "stays installed until you remove it there."
+                    "it wrote to your files, and the session was not started."
+                    + (f" {gate['detail']}" if gate.get("detail") else "")
                 ),
                 "gate": gate,
             }
@@ -317,18 +380,58 @@ class AgyService(AntigravityService):
             # in-repo file write through without a dialog, and the
             # user flips it from the action bar mid-session.
             permission_mode=lambda: self._permission_mode,
+            # AG-15's standing rules, in the app's own configuration
+            # directory rather than the default one. Omitted here until
+            # 2026-09-12, which was a real fault and not only an
+            # inconsistency with the SDK transport: a grant the user made
+            # on this transport went to ``~/.config/aic-dc`` while
+            # everything else this service owns went to ``config_dir``, so
+            # a host handed a directory kept its permission state
+            # somewhere else entirely. It surfaced as a probe that hung
+            # for eleven minutes on a dialog nobody could answer, because
+            # the rule it had been given was seeded in the directory the
+            # gate was not reading.
+            config_dir=self._config_dir,
         )
+        # **The master's own config root** (AG-21), stable so that resume
+        # keeps working across restarts, and private so that the hook this
+        # app installs is not in the user's file. The hook goes in with it:
+        # the gate is the only thing between the model and the tree on this
+        # transport, because `agy` runs with `--dangerously-skip-permissions`.
+        #
+        # Resolved *before* the gate server rather than after, because the
+        # server now takes the root: AG-24's schema-read admission is scoped
+        # to a directory inside it, and a gate built without it would admit
+        # nothing and take the consultant with it.
+        config_root, report = self._ensure_gate()
+        if report.get("state") != "current":
+            raise RuntimeError(
+                "The agy permission gate could not be installed into this "
+                "session's config root, so the session would run ungated: "
+                + str(report.get("detail") or report.get("state"))
+            )
         self._agy_gate = AgyGateServer(
             self._config_dir / "agy-sessions" / "gate.sock",
             gate=self._gate,
             config_dir=self._config_dir,
+            config_root=config_root,
+            # AG-32. The gate holds the words and hands them to `agy` at
+            # every `PreInvocation`; they are authored in `tools.py`, beside
+            # the tool schema that makes them necessary.
+            guidance=agy_tools.WRITE_GUIDANCE,
         )
+        # **Before `exec`, because `agy` reads `mcp_config.json` during
+        # startup** — a file that appears afterwards is a file it never
+        # sees, and the failure is silent: the tool is simply absent and
+        # the model explains that it has no way to ask anyone.
+        await self._offer_consultant(config_root)
         session = AgySession(
             self._repo_root,
             gate=self._agy_gate,
             model=self._model,
             executable=self._executable,
             resume=target,
+            config_root=config_root,
         )
         try:
             await session.start()
@@ -350,12 +453,158 @@ class AgyService(AntigravityService):
         session, self._session = self._session, None
         self._agy_gate = None
         self._gate = None
+        # First, so that a consultation still running for a child that is
+        # about to be buried is cancelled rather than left spending the
+        # subscription on an answer nobody will read. Unconditional,
+        # because a session that failed to start can still have had a
+        # token minted for it.
+        await self._retire_consultant()
         if session is None:
             return
         try:
             await session.close()
         except Exception:  # noqa: BLE001 - teardown must not raise
             logger.exception("The agy session did not close cleanly")
+
+    # ------------------------------------------------------------------
+    # The consultant `agy` can reach (AG-22)
+    # ------------------------------------------------------------------
+
+    async def _offer_consultant(self, config_root: Path) -> None:
+        """Start the listener, mint this spawn a bearer, write the config.
+
+        **This is what closes AG-1's asymmetry.** `agy` could already be
+        consulted by Claude; until this ran, Claude could not be consulted
+        by `agy`, because the listener existed and was reachable by
+        nothing.
+
+        **And since AG-34 it offers two servers, not one.** The six
+        `aic-dc` repo-intelligence tools reach `agy` the only way they can
+        — over this socket, because a CLI subprocess cannot be handed a
+        Python callable — so this method now starts a listener whenever
+        there is *either* a consultant to offer or an index bridge to serve.
+        The two are independent on purpose: a Claude CLI is what the second
+        opinion needs and has nothing to do with the symbol map, and until
+        this method separated them an install with no `claude` binary
+        cleared the config document and lost both.
+
+        The token is per spawn and lives in a file only this app writes,
+        under a root only this app owns. Three things about that file are
+        deliberate and stated where they are enforced, in
+        :func:`aic_dc.agy.roots.write_mcp_config`: atomic, ``0600`` inside
+        a ``0700`` directory, and rewritten unconditionally rather than
+        blanked on exit. One token covers both servers, because the bearer
+        identifies the *spawn* — see :class:`_Grant`.
+
+        **A failure here does not fail the session.** Every path leaves no
+        config file rather than a stale one, and `agy` then runs with
+        neither tool — which is what it did before this existed. The
+        alternative is refusing to start an engine because an optional
+        second opinion could not be offered.
+
+        What this does *not* do is make the bearer a security boundary.
+        Any code already running as the user can read that file and call
+        the listener as the master, including by omitting the ``_meta``
+        key the subagent refusal reads — that check is a policy against
+        `agy`'s own dispatcher, not a boundary against local code. The same
+        code already holds the user's Claude credentials, so the bearer
+        grants strictly less than what an attacker in that position has;
+        see AG-R-26. The index server widens that surface by six read-only
+        tools over indexes of a tree the same code can already read.
+        """
+        # Retired first, so that one spawn is one listener holding one
+        # token. A second mint onto a live listener would be legal — it
+        # holds many — but nothing here wants two, and a token whose child
+        # is gone is a token nothing will ever revoke.
+        await self._retire_consultant()
+
+        from aic_dc.claude_code.consult_listener import ConsultationListener
+        from aic_dc.claude_code.consultant import ClaudeConsultant
+
+        def new_consultant() -> Any:
+            return ClaudeConsultant(self._config_dir)
+
+        consultant_factory: Any = None
+        if ClaudeConsultant(self._config_dir).available():
+            consultant_factory = new_consultant
+        else:
+            # Not a warning: an install with no Claude CLI is a supported
+            # install, and `agy` is the transport that survives one. Said
+            # once per spawn rather than silently, because "the tool is
+            # missing" is otherwise indistinguishable from "the tool is
+            # broken" when the model reports it.
+            logger.info(
+                "No Claude second opinion is offered to agy: this install "
+                "has no Claude CLI or SDK to run one"
+            )
+
+        if consultant_factory is None and self.mcp_bridge is None:
+            # Nothing to serve, so no socket and no config document. The
+            # clear is what it always was: this app's own file, removed
+            # rather than left naming a port nothing is listening on.
+            roots.clear_mcp_config(config_root)
+            return
+
+        spawn_id = uuid.uuid4().hex
+        try:
+            listener = ConsultationListener(
+                consultant_factory,
+                index_bridge=self.mcp_bridge,
+            )
+            await listener.start()
+            token = listener.mint(repo_root=self._repo_root, session_id=spawn_id)
+            document = listener.config_entry(token)
+            roots.write_mcp_config(config_root, document)
+        except Exception as exc:  # noqa: BLE001 - an optional tool, not the session
+            logger.warning(
+                "The MCP listener could not be offered to this agy session, "
+                "which will run without a second opinion and without repo "
+                "intelligence: %s",
+                exc,
+            )
+            with contextlib.suppress(Exception):
+                roots.clear_mcp_config(config_root)
+            self._listener = None
+            with contextlib.suppress(Exception):
+                await listener.aclose()
+            return
+        self._listener = listener
+        self._consult_token = token
+        self._consult_spawn_id = spawn_id
+        logger.info(
+            "agy reaches %s on 127.0.0.1:%s for this session",
+            ", ".join(sorted(document.get("mcpServers", {}))),
+            listener.port,
+        )
+
+    async def _retire_consultant(self) -> None:
+        """Revoke this spawn's bearer and stop listening. Never raises.
+
+        Bound to the subprocess and to nothing else: the token dies with
+        the child that was given it, and anything still in flight is
+        cancelled rather than left to finish into a session that has gone.
+
+        The config file goes too. Nothing depends on that — the token it
+        names has just been revoked and buys nothing — but a file shaped
+        like a credential outliving the thing it authenticated is an
+        invitation to reason about it later as though it still worked.
+        Tidiness on the clean path only; the *correctness* is the
+        unconditional overwrite at the next start, which a crash cannot
+        skip.
+        """
+        listener, self._listener = self._listener, None
+        token, self._consult_token = self._consult_token, None
+        self._consult_spawn_id = None
+        if listener is None:
+            return
+        with contextlib.suppress(Exception):
+            roots.clear_mcp_config(roots.master_root(self._config_dir))
+        try:
+            if token:
+                await listener.revoke(token)
+            await listener.aclose()
+        except Exception:  # noqa: BLE001 - teardown must not raise
+            logger.exception("The consultation listener did not close cleanly")
 
     # ------------------------------------------------------------------
     # A turn
@@ -386,8 +635,14 @@ class AgyService(AntigravityService):
                     "turn was not sent, rather than sent without the images."
                 ),
             }
-        if viewer:
-            self._viewer = dict(viewer)
+        # AG-33, and the same three lines as the SDK transport's override on
+        # purpose: this method exists because the *pump* differs, not because
+        # the framing does, and a second arrangement of the same decision
+        # here would be a second thing to keep in step.
+        turn_viewer = framing.resolve(viewer, self._viewer)
+        if viewer is not None:
+            self._viewer = turn_viewer.as_payload() if turn_viewer else None
+        message = framing.compose(framing.build(viewer=turn_viewer), message)
         if self._turns:
             return {
                 "error": (
@@ -410,23 +665,36 @@ class AgyService(AntigravityService):
             request_id,
             repo_root=self._repo_root,
             conversation_id=session.conversation_id,
+            # AG-R-18: the brain and scratch directories are properties of
+            # the root this session's `agy` was spawned against, not of
+            # this server's own `HOME`.
+            config_root=roots.master_root(self._config_dir),
         )
         self._turns[request_id] = translator
         import asyncio
 
-        # Framed here rather than in `_run_agy_turn`, so the *framed* text
-        # is what the mirror records: `agy_tools.WRITE_GUIDANCE` explains
-        # why the guidance is needed at all, and the transcript's job is to
-        # say what the model was actually sent. `history.strip_framing`
-        # removes the block again at read time, so the user sees what they
-        # typed.
+        # **The user's own text, and this turn's framing — never the
+        # standing guidance** (AG-32, then AG-33 the same day).
+        #
+        # This prepended `agy_tools.WRITE_GUIDANCE` inside a framing block
+        # until 2026-09-14: a paragraph the user did not write, in the
+        # message the mirror records as theirs, delivered once per turn to
+        # the master only, where the thing it guards against can happen at
+        # any invocation and in any subagent. It travels on `PreInvocation`
+        # now, which is the vendor's own channel for it.
+        #
+        # The block came back hours later carrying viewer state, and that is
+        # not a reversal — the two facts have different lifetimes. Standing
+        # guidance is true at every invocation, so a per-turn prepend
+        # under-delivered it. "What the user was looking at when they pressed
+        # send" is true of *this turn*, so a per-invocation re-assertion
+        # would over-claim it. Each fact is on the channel whose lifetime
+        # matches, and `framing`'s docstring is where that is argued.
+        #
+        # `history.strip_framing` was going to stay either way: transcripts
+        # written before today still carry the guidance in a block.
         task = asyncio.create_task(
-            self._run_agy_turn(
-                session,
-                translator,
-                request_id,
-                agy_tools.WRITE_GUIDANCE + message,
-            ),
+            self._run_agy_turn(session, translator, request_id, message),
             name=f"agy-turn-{request_id}",
         )
         self._turn_tasks.add(task)
@@ -447,6 +715,14 @@ class AgyService(AntigravityService):
         terminal event, which would emit two.
         """
         await self._open_mirrored_turn(request_id, message)
+        # **Unconditional, and named after this turn.** The consultation
+        # budget is per turn and nothing on an incoming MCP request carries
+        # a turn id, so this push is the only place the identity exists.
+        # Opening it here rather than at the first consultation means a
+        # turn always starts with a full budget, including one that opened
+        # while the previous turn's `finally` had not yet run.
+        if self._listener is not None and self._consult_token:
+            self._listener.begin_turn(self._consult_token, request_id)
         try:
             async for event in session.stream_turn(message, translator=translator):
                 await self._dispatch(event, request_id)
@@ -463,6 +739,13 @@ class AgyService(AntigravityService):
                 await self._dispatch(event, request_id)
         finally:
             self._turns.pop(request_id, None)
+            # In a `finally` because between turns is the closed state: a
+            # consultation that arrives after the host considers the turn
+            # over would otherwise spend the *next* turn's budget before it
+            # opens. Named, so that a slow turn one closing after turn two
+            # has opened closes its own turn and not the live one.
+            if self._listener is not None and self._consult_token:
+                self._listener.end_turn(self._consult_token, request_id)
 
     # ------------------------------------------------------------------
     # Subagent transcripts
@@ -475,6 +758,47 @@ class AgyService(AntigravityService):
     # every other history read here: a listing is one file per subagent and
     # a transcript is one file, but they are on the user's disk and the event
     # loop is serving a live turn.
+
+    def _brain_dir_for(self, conversation_id: str) -> Path:
+        """Which directory to read ``conversation_id``'s transcripts out of.
+
+        Two answers are available and they can disagree (AG-R-32):
+
+        * what the running ``agy`` said, learned from the paths on its own
+          hook payloads — :attr:`AgyGateServer.brain_dir`, measured
+          2026-09-14 to be on all three invocation events as well as the
+          gate's;
+        * what :func:`roots.brain_dir` derives from
+          :data:`roots.PRODUCT_DIR`, a constant this build hard-codes as
+          ``antigravity-cli`` while ``hooks.md`` names two other values for
+          the IDE surfaces.
+
+        The announced one is **preferred and the derived one kept**, not
+        replaced by it: the gate has only spoken about conversations from
+        this process, so browsing a session mirrored before a vendor upgrade
+        has nothing announced to go on. :func:`subagents.choose_brain_dir`
+        picks the first that actually holds the conversation, so an
+        announced directory that is stale for *this* id loses to the derived
+        one rather than shadowing it.
+
+        Synchronous, and called on the executor by both readers below, for
+        the reason this section states: it stats the user's disk. Its answer
+        is passed to every read of one request so containment and reading
+        cannot resolve different directories — see
+        :func:`subagents.choose_brain_dir`.
+        """
+        from aic_dc.agy import subagents
+
+        derived = roots.brain_dir(roots.master_root(self._config_dir))
+        announced = self._agy_gate.brain_dir if self._agy_gate is not None else None
+        candidates = [derived]
+        if announced is not None and announced != derived:
+            candidates.insert(0, announced)
+        chosen = subagents.choose_brain_dir(conversation_id, candidates)
+        # `candidates` is never empty, so `choose_brain_dir` cannot answer
+        # `None` here; the fallback keeps the type honest without inventing a
+        # third behaviour.
+        return chosen if chosen is not None else derived
 
     async def list_subagent_transcripts(
         self, session_id: str | None = None
@@ -512,7 +836,10 @@ class AgyService(AntigravityService):
 
         try:
             loop = asyncio.get_running_loop()
-            return await loop.run_in_executor(None, subagents.rows, target)
+            brain = await loop.run_in_executor(None, self._brain_dir_for, target)
+            return await loop.run_in_executor(
+                None, functools.partial(subagents.rows, target, brain_dir=brain)
+            )
         except Exception as exc:  # noqa: BLE001 - answered, not raised
             logger.exception("list_subagent_transcripts failed for %s", target)
             return {"error": f"Could not read the subagent transcripts: {exc}"}
@@ -552,7 +879,15 @@ class AgyService(AntigravityService):
 
         try:
             loop = asyncio.get_running_loop()
-            owned = await loop.run_in_executor(None, subagents.descendants, target)
+            # One directory for both reads, chosen once. See
+            # `subagents.choose_brain_dir`: resolving it separately for the
+            # containment check and the read would let a machine with both
+            # candidates approve an id against one store and hand back a
+            # transcript from the other.
+            brain = await loop.run_in_executor(None, self._brain_dir_for, target)
+            owned = await loop.run_in_executor(
+                None, functools.partial(subagents.descendants, target, brain_dir=brain)
+            )
             if agent_id not in owned:
                 logger.warning(
                     "Refused subagent %s: not announced by session %s",
@@ -565,7 +900,9 @@ class AgyService(AntigravityService):
                         f"so there is no transcript here to read."
                     )
                 }
-            messages = await loop.run_in_executor(None, subagents.load, agent_id)
+            messages = await loop.run_in_executor(
+                None, functools.partial(subagents.load, agent_id, brain_dir=brain)
+            )
         except Exception as exc:  # noqa: BLE001 - answered, not raised
             logger.exception("get_subagent_transcript failed for %s", agent_id)
             return {"error": f"Could not read subagent {agent_id}: {exc}"}
@@ -695,4 +1032,20 @@ class AgyService(AntigravityService):
             return {"status": "not_running", "request_id": request_id}
         if self._session is not None:
             await self._session.cancel()
+        # **The gate cannot reach a consultation, which is why this is
+        # here.** The starvation above refuses *subsequent* tool calls, and
+        # around an MCP call the gate is blind from `PreToolUse` until the
+        # call returns — so a stop landing mid-consultation would be queued
+        # behind the very thing it is stopping, for up to `agy`'s own three
+        # minutes. This cancels the consultant's process directly.
+        if self._listener is not None and self._consult_spawn_id:
+            with contextlib.suppress(Exception):
+                # Logged rather than discarded. `cancel_session` returns
+                # whether it found anything to stop, and that boolean is the
+                # only evidence anywhere that the stop reached the
+                # consultation rather than merely the master — the hooks are
+                # silent for the whole call, so nothing else in the record
+                # distinguishes "stopped it" from "it finished on its own".
+                if await self._listener.cancel_session(self._consult_spawn_id):
+                    logger.info("The stop ended a consultation that was in flight")
         return {"status": "ok", "request_id": request_id}

@@ -83,6 +83,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from aic_dc import index_tools
 from aic_dc.agy import tools as agy_tools
 from aic_dc.antigravity.options import MUTATING_TOOLS
 from aic_dc.antigravity.rules import RuleStore, derive_rules
@@ -237,6 +238,81 @@ def normalise_args(tool_name: str, args: dict[str, Any]) -> dict[str, Any]:
     return merged
 
 
+#: How much of one MCP argument the dialog shows before eliding it. The
+#: dialog also ships the whole ``input`` dict, so this bounds a *headline*
+#: rather than what is available to read.
+MCP_ARG_CHARS = 200
+
+
+def mcp_rule_target(tool_name: str, args: dict[str, Any]) -> str | None:
+    """``"<server>/<tool>"`` for an MCP call, or ``None`` for anything else.
+
+    The string a standing ``mcp_tool`` rule is matched on. ``None`` for a
+    call that is not an MCP call *and* for an MCP call whose target cannot
+    be read — both mean "no standing rule can apply here", which is the
+    safe reading of an unknown target.
+    """
+    if tool_name != agy_tools.MCP_TOOL:
+        return None
+    target = agy_tools.mcp_target(args)
+    return None if target is None else f"{target[0]}/{target[1]}"
+
+
+def is_index_read(tool_name: str, args: dict[str, Any]) -> bool:
+    """Whether this ``call_mcp_tool`` is one of AIC⚡DC's own six read tools.
+
+    The Antigravity counterpart of the Claude engine's
+    ``mcp_server_name(tool_name) == AIC_DC_MCP_SERVER`` check, and it has to
+    read the *arguments* because ``agy`` does not put the target in the tool
+    name: one hook payload arrives as ``call_mcp_tool`` with
+    ``{"ServerName": …, "ToolName": …}`` beside it (``agy_tools.MCP_TOOL``).
+
+    **Both halves are checked, and the tool name is the half that matters
+    here.** ``call_mcp_tool`` is classified ``exec`` unconditionally,
+    because a multiplexer's consequence is whatever it dispatches to, and
+    ``aic-dc-antigravity``'s ``second_opinion`` and ``generate_image`` sit
+    on that same seam on purpose — they *should* reach the dialog. Naming
+    the six explicitly is what keeps this narrowing from widening to a
+    server name, so a seventh tool is ungated only by being added to
+    :data:`aic_dc.index_tools.SPECS`, where read-only is the entry
+    condition.
+    """
+    if tool_name != agy_tools.MCP_TOOL:
+        return False
+    target = agy_tools.mcp_target(args)
+    if target is None:
+        return False
+    server, tool = target
+    return server == index_tools.SERVER_NAME and tool in index_tools.TOOL_NAMES
+
+
+def mcp_description(tool_name: str, args: dict[str, Any]) -> str | None:
+    """A one-line rendering of what an MCP call is asking for.
+
+    **Mechanical rather than clever.** This host cannot know which argument
+    of an arbitrary MCP tool is the interesting one — ``second_opinion``
+    calls it ``question``, the next server will call it something else — so
+    every string argument is rendered as ``name: value`` with each value
+    capped, and nothing is guessed. Non-string arguments are named without
+    their values, because a nested object elided to 200 characters is
+    noise rather than a summary.
+    """
+    if tool_name != agy_tools.MCP_TOOL:
+        return None
+    arguments = args.get("Arguments")
+    if not isinstance(arguments, dict) or not arguments:
+        return None
+    parts: list[str] = []
+    for key, value in arguments.items():
+        if isinstance(value, str):
+            single = " ".join(value.split())
+            capped = single if len(single) <= MCP_ARG_CHARS else single[: MCP_ARG_CHARS - 1] + "…"
+            parts.append(f"{key}: {capped}")
+        else:
+            parts.append(str(key))
+    return " · ".join(parts) or None
+
+
 def denormalise_args(tool_name: str, amended: dict[str, Any]) -> dict[str, Any]:
     """The reverse, for ``modified_args`` on the way back to the harness.
 
@@ -331,6 +407,10 @@ class _AntigravityBroker(PermissionBroker):
 
         tool_class = TOOL_CLASSES.get(tool_name, "exec")
         normalised = normalise_args(tool_name, tool_input)
+        # `"<server>/<tool>"` when this is an MCP call whose target can be
+        # read, and `None` otherwise. Four fields below turn on it, which
+        # is why it is computed once rather than asked four times.
+        mcp_target = mcp_rule_target(tool_name, normalised)
 
         diff = None
         if tool_class == "write":
@@ -353,7 +433,10 @@ class _AntigravityBroker(PermissionBroker):
             # The engine's own tool name, not a Claude equivalent. The
             # dialog reports what was actually called.
             "tool_name": tool_name,
-            "server": None,
+            # Named for an MCP call, because "which server" is the first
+            # thing a user needs to know about one and the tool name they
+            # are shown — `call_mcp_tool` — does not say.
+            "server": mcp_target.split("/", 1)[0] if mcp_target else None,
             "tool_use_id": getattr(context, "tool_use_id", None) or "",
             "agent_id": getattr(context, "agent_id", None),
             "tool_class": tool_class,
@@ -369,12 +452,20 @@ class _AntigravityBroker(PermissionBroker):
                 else GATED_BY_DEFAULT.get(tool_class, True)
             ),
             "input": normalised,
-            "summary": summarise_request(tool_name, normalised, tool_class),
+            "summary": (
+                f"{tool_name}: {mcp_target}"
+                if mcp_target
+                else summarise_request(tool_name, normalised, tool_class)
+            ),
             "blocked_path": None,
             "decision_reason": None,
             "title": None,
             "display_name": None,
-            "description": normalised.get("description") or None,
+            "description": (
+                normalised.get("description")
+                or mcp_description(tool_name, normalised)
+                or None
+            ),
             # AG-15. This was `[]`, on reasoning that was right about the
             # engine and stopped one step short: Antigravity has no
             # `updated_permissions` at any layer, so there is nothing to
@@ -386,9 +477,16 @@ class _AntigravityBroker(PermissionBroker):
             ),
             "suggested_mode": None,
             "diff": diff,
+            # **Not for an MCP call**, though its class is `exec`.
+            # `build_command_payload` falls back to a rendering of the
+            # whole input when there is no `command` key, and an MCP call
+            # has none — so the dialog would show a JSON blob in the slot
+            # labelled "command", with `command_flags` having scanned it
+            # for shell hazards it cannot contain. An MCP call is not a
+            # shell command and this says so by omitting the block.
             "command": (
                 build_command_payload(self._repo_root, tool_name, normalised)
-                if tool_class == "exec"
+                if tool_class == "exec" and not mcp_target
                 else None
             ),
             "question": None,
@@ -453,9 +551,24 @@ class AntigravityPermissionGate:
         denied_reads: Any = None,
         config_dir: Any = None,
         permission_mode: Any = None,
+        own_read_tools: frozenset[str] | None = None,
         **broker_kwargs: Any,
     ) -> None:
         self._repo_root = Path(repo_root)
+        # AG-34. The names *this session registered in-process* for our own
+        # six read-only index tools, and empty for a session that did not.
+        #
+        # Passed in rather than read from `index_tools.TOOL_NAMES` here,
+        # because the two transports learn the same fact in two different
+        # ways and only one of them can trust a bare name. On the SDK
+        # transport we hand the harness the callables ourselves, so
+        # `symbol_map` arriving at this gate *is* ours by construction. On
+        # `agy` the call arrives as `call_mcp_tool` carrying a server name,
+        # which :func:`is_index_read` checks — and a bare `symbol_map` there
+        # would be a tool of the *binary's* that happened to share the
+        # spelling. Defaulting this to the tool names would be the gate
+        # deciding it recognises something on evidence it does not have.
+        self._own_read_tools = own_read_tools or frozenset()
         # AG-15. One store per repository, shared by both transports —
         # a grant the user made on the subscription must not evaporate when
         # they switch to the API key, since it is one engine reached two
@@ -608,7 +721,38 @@ class AntigravityPermissionGate:
           user's own shift-click on the file tree, and it must not be
           softened into an auto-allow by the very change that stops the
           asking.
+
+        And one identity check, before either of them (AG-34).
         """
+        # **Our own six read tools, allowed before anything else is
+        # considered.** The same early return the Claude engine has had in
+        # `can_use_tool` since phase 4, arriving on the two transports that
+        # can now reach the same tools.
+        #
+        # First, and not folded into the class table below, because it is an
+        # identity check rather than a policy: `call_mcp_tool` is
+        # classified `exec` and sits in ALWAYS_ASK — correctly, since it
+        # dispatches an open set — so a check after either would never fire,
+        # and every `symbol_map` call would open a dialog for a tool that
+        # cannot do anything. That is R-12's click-through training with our
+        # own name on it.
+        #
+        # Safe for the reason the Claude engine's is: the six are read-only
+        # by construction, they close over indexes this process already
+        # holds, and the config naming this server is written by
+        # `agy.roots.write_mcp_config` into a root only this app owns — so
+        # the name cannot be claimed by a third-party server the user
+        # configured.
+        # Two spellings of the same check, because the two transports carry
+        # the same tool differently: bare, as a callable this session
+        # registered with the harness, or wrapped in `call_mcp_tool` with a
+        # server name. `_own_read_tools` is empty unless this session did
+        # the registering — see the constructor for why the bare name is
+        # only ours on the transport that named it.
+        if tool_name in self._own_read_tools or is_index_read(tool_name, args):
+            logger.debug("Allowing our own tool %s without a dialog", tool_name)
+            return (True, "")
+
         normalised = normalise_args(tool_name, args)
 
         # AG-15. Checked **before** ALWAYS_ASK, because a standing rule is
@@ -624,6 +768,9 @@ class AntigravityPermissionGate:
             command=normalised.get("command"),
             path=self._absolute_path(normalised),
             tool_name=tool_name,
+            # The target of an MCP call, which is in its arguments rather
+            # than in its name — see `rules.mcp_tool_match`.
+            mcp_tool=mcp_rule_target(tool_name, normalised),
         )
         if standing is not None:
             # A denied read still wins over a standing allow: shift-clicking

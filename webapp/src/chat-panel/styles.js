@@ -828,6 +828,33 @@ export const STYLES = css`
     opacity: 1;
   }
 
+  /* The escalation a system card offers — today only the force restart on
+   * a stop that did not land. Deliberately not hover-revealed like the
+   * badges above: this appears when the user has already pressed stop and
+   * been ignored, and a control they have to discover would be the third
+   * thing in a row that did not do what they asked. */
+  .system-action {
+    margin-top: 0.5rem;
+  }
+  .system-action-button {
+    font: inherit;
+    font-size: 0.85em;
+    padding: 0.3rem 0.75rem;
+    border-radius: 4px;
+    border: 1px solid var(--warning-color, #b58900);
+    background: transparent;
+    color: var(--warning-color, #b58900);
+    cursor: pointer;
+  }
+  .system-action-button:hover:not(:disabled) {
+    background: var(--warning-color, #b58900);
+    color: var(--bg-color, #fff);
+  }
+  .system-action-button:disabled {
+    opacity: 0.6;
+    cursor: default;
+  }
+
   /* Message action toolbars — hover-only copy and paste
    * buttons, at top-right and bottom-right of each card.
    * Both ends because long messages might be partially
@@ -2298,6 +2325,13 @@ export const STYLES = css`
   .tool-card.tool-status-denied {
     border-color: rgba(210, 153, 34, 0.4);
   }
+  /* Grey, and the same grey as the dot below: a call that
+   * never returned is not a failure — nothing reported one —
+   * and dressing it in the error red would say the tool said
+   * no when what happened is that nobody was left to listen. */
+  .tool-card.tool-status-interrupted {
+    border-color: rgba(139, 148, 158, 0.45);
+  }
   /* Two columns: a metadata rail, then the summary. The rail
    * holds everything that says what the call is — caret,
    * status dot, server chip, tool name, invocation time, the
@@ -2411,6 +2445,16 @@ export const STYLES = css`
   }
   .tool-dot.status-denied {
     background: #d29922;
+  }
+  /* Hollow, and it is the hollowness that carries the meaning:
+   * every other dot is a filled circle reporting something that
+   * happened to the call, and this one reports that nothing
+   * did. It does not pulse — the pulse is the panel's one
+   * "still going" signal, and it was a card wearing it two days
+   * after its turn died that this status exists to correct. */
+  .tool-dot.status-interrupted {
+    background: transparent;
+    box-shadow: inset 0 0 0 1px #8b949e;
   }
   @keyframes tool-dot-pulse {
     0%, 100% { opacity: 0.35; }
@@ -2655,6 +2699,46 @@ export const STYLES = css`
     color: var(--text-primary, #c9d1d9);
     word-break: break-word;
   }
+  /* Shaped like the denial note above and tinted like nothing:
+   * the two are the same kind of sentence — this call did not
+   * produce a result, and here is why — and a reader who has
+   * learnt one should not have to learn the other. No accent
+   * colour, because no colour on this palette means "the
+   * process is gone". */
+  .tool-interrupted {
+    padding: 0.4rem 0.5rem;
+    background: rgba(139, 148, 158, 0.07);
+  }
+  .tool-interrupted-label {
+    font-size: 0.7rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: #8b949e;
+    margin-bottom: 0.2rem;
+  }
+  .tool-interrupted-reason {
+    font-size: 0.8125rem;
+    line-height: 1.45;
+    color: var(--text-primary, #c9d1d9);
+    word-break: break-word;
+  }
+  /* Deliberately quiet. It writes the prompt box and sends
+   * nothing, so it must not look like the send button. */
+  .tool-reask {
+    margin-top: 0.4rem;
+    padding: 0.2rem 0.6rem;
+    background: rgba(240, 246, 252, 0.06);
+    border: 1px solid rgba(240, 246, 252, 0.15);
+    border-radius: 4px;
+    color: var(--text-primary, #c9d1d9);
+    font-family: inherit;
+    font-size: 0.75rem;
+    cursor: pointer;
+  }
+  .tool-reask:hover {
+    background: rgba(240, 246, 252, 0.12);
+  }
   .tool-footer {
     display: flex;
     align-items: center;
@@ -2865,6 +2949,31 @@ export const STYLES = css`
   }
   .subagent-stop:hover {
     background: rgba(248, 81, 73, 0.12);
+  }
+  /* A consultation's standing condition, framing the container rather
+   * than sitting in it as a row. Quieter than the prose it frames while
+   * the claim holds, and loud when the claim has been retracted — the
+   * severity comes from the notice, so a breach is not styled like the
+   * assurance it withdrew. Left border rather than a filled block: it is
+   * a margin note about the answer, not a step in it. */
+  .consultation-posture {
+    margin: 0 0.5rem 0.35rem 1.4rem;
+    padding: 0.3rem 0.5rem;
+    border-left: 2px solid var(--border, #30363d);
+    border-radius: 0 3px 3px 0;
+    font-size: 0.75rem;
+    line-height: 1.45;
+    color: var(--text-secondary, #8b949e);
+    background: var(--bg-subtle, rgba(110, 118, 129, 0.08));
+    word-break: break-word;
+  }
+  .consultation-posture.warning {
+    border-left-color: var(--warning, #d29922);
+    color: var(--warning, #d29922);
+  }
+  .consultation-posture.error {
+    border-left-color: var(--error, #f85149);
+    color: var(--error, #f85149);
   }
   .subagent-summary {
     padding: 0 0.5rem 0.35rem 1.4rem;

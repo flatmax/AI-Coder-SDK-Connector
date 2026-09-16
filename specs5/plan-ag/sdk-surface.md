@@ -433,8 +433,19 @@ hook  workspacePaths        : []                                     → unusabl
 
 This is what makes a **global** hook shippable. It will see the user's own unrelated `agy` sessions —
 workspace-local `hooks.json` does not load headlessly — and it can allow-and-return immediately for
-any conversation the host does not own. `workspacePaths` cannot do that job: it is empty in every
-payload captured here, in both `-p` and bidirectional modes.
+any conversation the host does not own.
+
+**`workspacePaths` still cannot do that job, and the reason is no longer that it is empty.** Corrected
+2026-09-11: it is **populated** — `["/tmp/agyhooktest"]`, on `PreToolUse`, `PostInvocation` and `Stop`
+alike. The captures that recorded it empty almost certainly predate `ae23f0bd`, which added
+`--add-dir` to the session's argv; the field is the workspace, and until then no workspace was named.
+
+The conclusion is unchanged and now rests on something better than an empty field: **a path is not an
+identity**. A user's own `agy` session, opened in the same repository, carries the same
+`workspacePaths` as this app's — so routing on it would intercept exactly the sessions
+`probe_agy_isolation.py` exists to keep out, where a conversation id cannot and a cgroup
+([AG-R-14](risks.md#ag-r-14)) cannot. The empty reading was the right answer for a wrong reason, which
+is worth correcting precisely because nothing depends on it.
 
 ### The tool *names* differ, and only the tool names — measured 2026-09-03
 
@@ -511,8 +522,10 @@ does not exist.
   workspace-change event, not the headless bootstrap. The global file *"fires unconditionally"*, so a
   gate installed there intercepts the user's own unrelated `agy` sessions and must pass them through.
   **The natural isolation key does not work:** `workspacePaths` was **empty** in every payload
-  captured here. `conversationId` is the sound one — an adapter knows the conversation it started —
-  and it is unverified.
+  captured here — *superseded 2026-09-11, see § The hook payload's identity above: it is populated
+  once `--add-dir` names a workspace, and it is still the wrong key, because two sessions in one
+  repository share it.* `conversationId` is the sound one — an adapter knows the conversation it
+  started — and it is unverified.
 - **Concurrency.** An `flock` on `presence/<id>.lock` serialises turns; an interactive session and a
   headless turn on the same conversation conflict. An adapter must own its conversation, which is no
   loss — driving the user's open TUI session was never necessary.
@@ -1106,6 +1119,185 @@ inference. It reads *shape*, never semantics — every correction in this file t
 behaviour-wrong case that no reflection would have caught. And nothing runs it on a schedule, so a
 `pip install --upgrade` with no commits after it leaves a window where the report is stale and does
 not say so.
+
+---
+
+## The hook contract is shipped, not inferred — read 2026-09-10
+
+Everything this file records about hooks was **measured by probing**, which was the only route
+available when it was written. It was not the only route available at all: `agy` ships its own
+documentation for the surface, extracted on disk at
+
+```
+~/.gemini/antigravity-cli/builtin/skills/agy-customizations/docs/{hooks,json_configs,mcp_servers,plugins,rules,skills}.md
+```
+
+and embedded in the binary under `assets/external/skills/agy-customizations/docs/`. Six files, and
+**there is no `sdk.md` and no `cli.md`** — recorded because an Antigravity instance asked about this
+integration claimed to have read both, which is the standing reason this file measures rather than
+asks.
+
+`hooks.md` is 330 lines and it is the contract `aic_dc.agy.hook` implements. Reading it confirms the
+probed behaviour and adds four things the probe never saw.
+
+### There are five lifecycle events and this app wires four
+
+| Event | Fires | Structure | Returns | Wired as |
+|---|---|---|---|---|
+| `PreToolUse` | before a tool step | grouped, `matcher` on tool name | `decision`, `reason`, `overwrite`, `permissionOverrides` | the gate — `AgyGateServer.decide` |
+| `PostToolUse` | after a tool step | grouped | `{}` | **not wired**; nothing to say after the fact |
+| `PreInvocation` | **before the model is called** | flat | `injectSteps` | standing guidance — `standing_guidance`, [AG-32](decisions.md#ag-32) |
+| `PostInvocation` | **after tool calls finish** | flat | `injectSteps`, `terminationBehavior` | the aimed stop — `decide_invocation`, [AG-19](decisions.md#ag-19) |
+| `Stop` | when the execution loop terminates | flat | `decision`, `reason` | read-only — `note_stop`, [AG-R-16](risks.md#ag-r-16) |
+
+`PostInvocation`'s `terminationBehavior` takes `"force_continue"`, `"terminate"` or `""`, and
+`"terminate"` is documented as *"Forces the loop to stop"*. `Stop`'s `decision: "continue"` is its
+mirror: it *blocks* a stop and re-enters the loop with `reason` injected as a system message. Both
+matter to the ⏹ button, and the two are wired asymmetrically on purpose: `"terminate"` is what makes
+the aimed stop reach a subagent that asks for nothing, and `"continue"` is a string this app
+guarantees never to send — `note_stop` answers `{}` unconditionally and
+[`hook.report_stop`](../../../src/aic_dc/agy/hook.py) does not forward its return value either. That
+guarantee protects nothing on its own; a hook this app does not own can still answer `continue` and
+hold the turn open. See § *What this changes* below and [AG-R-16](risks.md#ag-r-16).
+
+`PreInvocation` returns `injectSteps`, each one of `{"toolCall": …}`, `{"userMessage": …}` or
+`{"ephemeralMessage": …}`, the last being a transient system message. That is a supported channel
+for putting a sentence in front of the model before every invocation, and since 2026-09-14 it is the
+channel the write guidance travels on: `AgyGateServer.standing_guidance` answers
+`{"injectSteps": [{"ephemeralMessage": …}]}` on every `invocationNum`, where `agy_tools.WRITE_GUIDANCE`
+used to be prepended to the user's own prompt. [AG-32](decisions.md#ag-32) records why the prompt
+channel was wrong on three counts and what the switch cost.
+
+**The hook builds that frame, not the host.** `injectSteps` can carry a `toolCall`, so a socket
+answer trusted verbatim would let a host bug put a tool call into `agy`'s step list — one that no
+`PreToolUse` matcher sees, because it did not come from the model. The socket protocol therefore
+carries only the prose string, and `hook.inject_guidance` wraps it locally; anything that is not one
+non-empty string injects nothing.
+
+### Four details the probe did not have
+
+- **`permissionOverrides`** — an array of temporary grants (`command(npm test)`, and the
+  `read_file(<path>)` / `write_file(<path>)` / `file(<glob>)` forms § *Defence in depth* records)
+  returnable **from the hook**, beside `decision`. Not used here, and worth knowing exists before
+  someone reaches for a settings file to do the same job.
+- **Tool names are derived, and the derivation is stated**: *"lowercasing the step type and removing
+  the `CORTEX_STEP_TYPE_` prefix"*. That is the whole explanation of § *One call, two vocabularies* —
+  the hook's names are the step-type enum's, not the SDK's.
+- **`timeout` defaults to 30 seconds** and the hook command's **working directory is the directory
+  containing `hooks.json`** — for this app, `~/.gemini/config/`. The install writes `3600`, so the
+  default never applies here, but a hook that silently inherited 30s would fail closed on the first
+  dialog a human read slowly.
+- **`transcriptPath` and `artifactDirectoryPath` are common fields on every payload**, and the doc
+  names the per-product directory that differs: `antigravity-cli/` for the CLI, `antigravity/` for
+  Antigravity 2.0, `antigravity-ide/` for the IDE. `aic_dc.agy.subagents` derived that path by hand;
+  since 2026-09-14 the payload's answer is preferred and the derivation kept behind it
+  ([AG-32](decisions.md#ag-32), [AG-R-32](risks.md#ag-r-32)). Both fields are read, on **every** event
+  rather than only tool calls, so a turn that writes nothing but prose still teaches the host where
+  the conversations are. The geometry the reader inverts is
+  `<brain_dir>/<conversation_id>/.system_generated/logs/transcript_full.jsonl` and
+  `<brain_dir>/<conversation_id>`, with the *nearest* enclosing match winning — a conversation id that
+  also names a parent directory otherwise resolves the brain dir too high.
+
+**`workspacePaths` is documented as a common field and was recorded empty here.** § *Two limits that
+remain* recorded it empty in every captured payload and called `conversationId` the sound isolation
+key. The doc did not contradict that measurement, and was read as explaining it: `hooks.md` is the
+*shared* Cortex hook specification across the CLI, the IDE and Antigravity 2.0, and the IDE is the
+surface that passes multi-root folder URIs at initialization. Read the doc as a family contract, not
+as a CLI one — that part stands.
+
+**The measurement did not.** On 2026-09-11 the field came back populated on all three events, and the
+explanation above was therefore explaining something that was not happening: the CLI does pass it,
+once `--add-dir` gives it a workspace to pass. A doc that accounts for a measurement is not evidence
+that the measurement was right, and this is the second time on this transport that a plausible
+account of an observation outlived the observation.
+
+### `SIGINT` ends the session — measured 2026-09-10
+
+The one cancellation question this file left open, now closed. A bidirectional session was given a
+prose-only prompt, allowed to stream 23 `text_delta` fragments, and sent `SIGINT`:
+
+```
+result  status=ERROR  response=""
+EOF
+returncode 1        stderr: error: interrupted
+```
+
+The process does **not** survive to take another turn. That matches 1.1.28's changelog — *"interrupts
+such as Ctrl+C still exit non-zero"* — and it settles :mod:`aic_dc.agy.session`'s docstring claim
+with a measurement rather than an inference. Two further reads on the same question:
+
+- `strings` over the binary carries `warning: ignoring unsupported stream input message event %q` and,
+  beside it, `stream input content block type %q is not supported (only %q)`. There is no `cancel`,
+  `interrupt`, `stop` or `halt` input event. Content blocks are typed too.
+- `agy models --json` **does not exist** — `agy models` accepts only `-h`/`--help`, and `--json` fails
+  with `flags provided but not defined: -json`. The two-column human output remains the only model
+  discovery surface, so the parser stays.
+
+### A failed turn reports the previous turn's usage — measured 2026-09-10
+
+Found while probing `/fork`. A bidirectional session ran one real turn and then a turn `agy` refused:
+
+```
+turn 1  status=SUCCESS  duration_seconds=1.840465383  input_tokens=5423
+turn 2  status=ERROR    duration_seconds=1.840465383  input_tokens=5423   output_tokens=1
+```
+
+The refused turn's `result` frame **echoes the previous turn's `usage` and `duration_seconds`
+verbatim**. `AgyTranslator._absorb_usage` takes last-wins rather than summing — deliberately, since
+later frames carry running totals — so this does not double the bill. What it does instead is report
+a turn that ran nothing as having cost 5,423 input tokens and taken 1.84 seconds. A misreport rather
+than a multiplication, and in the same family as [AG-R-6](risks.md#ag-r-6): a cost number that is
+wrong in a way nothing in the UI can distinguish from right. The fix, if it is wanted, is to skip
+absorption on a non-`SUCCESS` status.
+
+**Fixed 2026-09-11.** `AgyTranslator._absorb_result` absorbs the result frame's usage only for
+`SUCCESS` and for a frame that named no status at all — a frame naming nothing is not a frame naming
+a failure, and dropping its usage would lose a real measurement. What a failed turn keeps is whatever
+its own **step** frames accumulated, which is the honest answer in both directions: a turn that did
+work before failing keeps the tokens it spent, and a turn that ran nothing reports nothing rather
+than reporting the previous turn's. See
+[`delivery.md` § Two numbers the footer was reading wrong](delivery.md#two-numbers-the-footer-was-reading-wrong-and-one-it-was-not-reading-at-all-2026-09-11).
+
+### `agy` compacts its own context, and says nothing on the stream — 2026-09-10
+
+Read from the binary, and it bears directly on whether a long-lived conversation is a good idea:
+
+```
+AntigravityCompactionConfig      applyCompactionInfo
+"Context summary serialization truncated history: start step index moved from %d to %d.
+ This will break prompt cache reuse."
+"...appended to it while context compaction was rewriting it"
+```
+
+So context management is `agy`'s, not the host's — a resumed conversation does not grow without
+bound, because the harness rewrites its own early history into a summary. **No frame announces it.**
+The stream vocabulary is `init | step_update | result`, and none of them carries a compaction event,
+so a host driving a long conversation cannot tell which turns are still verbatim and which have been
+replaced by a summary it never saw. For the engine transport that is a feature and costs nothing. For
+a *reviewer* it is the argument in [AG-16](decisions.md#ag-16) arriving as a measurement: at turn ten
+you are talking to something whose memory of turn one is lossy in a way neither side can audit.
+
+### What this changes
+
+**Nothing about the gate**, which the doc confirms in every particular the probe found — including
+that `"ask"` prompts the user (uselessly, headlessly) and that `overwrite` is a shallow top-level
+merge whose result *"is what actually executes and is recorded"*.
+
+**The cancellation story gets one lever and keeps its hole.** `PostInvocation` fires *after* the model
+generation and its tool calls have concluded, so `"terminate"` cannot interrupt prose already
+streaming — the hole in § *Cancellation is where this transport is genuinely weaker* is real and
+`SIGINT` does not close it. What `"terminate"` does close is the *loop*: today ⏹ starves a turn and
+then depends on the agent choosing to wind down after reading the refusals, which is a model's
+judgement standing where a mechanism should be. A `PostInvocation` handler consulting the same gate
+state would end the loop whatever the agent concluded. That is a strictly better stop.
+
+**It was built** — [AG-19](decisions.md#ag-19), `AgyGateServer.decide_invocation`, no new state and no
+dialog: the same latch ⏹ already sets is read at the one moment `agy` acts on it mechanically. Two
+things the section above did not anticipate. The stop now reaches a subagent that emits **only prose**,
+which starvation could never touch, because its loop ends at the end of the invocation it is in. And
+the lever is not exclusive: measured 2026-09-12, a third-party `Stop` hook answering `continue` revives
+a loop this handler ended, eight times in sixteen seconds, bounded only by `--print-timeout` —
+[AG-R-16](risks.md#ag-r-16).
 
 ---
 

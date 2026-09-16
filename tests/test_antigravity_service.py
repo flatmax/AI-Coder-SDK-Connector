@@ -37,12 +37,12 @@ import types
 
 import pytest
 
-from aic_dc import capabilities
+from aic_dc import capabilities, index_tools
 from aic_dc.antigravity.credentials import GEMINI_API, NONE, Credentials
 from aic_dc.antigravity.service import PERMISSION_MODES, AntigravityService
+from aic_dc.capabilities import ANTIGRAVITY, CLAUDE
 from aic_dc.claude_code.hooks import Reindexer
 from aic_dc.claude_code.messages import Event
-from aic_dc.capabilities import ANTIGRAVITY, CLAUDE
 from aic_dc.engine_router import RPC_SURFACES, build_router
 
 
@@ -449,6 +449,166 @@ class TestATurnDoesNotHoldTheRpcOpen:
             await next(iter(svc._turn_tasks))
 
         asyncio.run(body())
+
+
+class TestViewerFraming:
+    """AG-33: the prompt says what the user is looking at.
+
+    ``set_viewer_state`` has existed on this adapter since it was written,
+    and its docstring said *"for turn framing"* — a promise the code did not
+    keep. ``_viewer`` was assigned by two paths and read by none, so the
+    browser's report of the open file was stored and thrown away, on both
+    Antigravity transports, while Claude framed it. The sentences now come
+    from :mod:`aic_dc.framing` and every engine composes them the same way.
+
+    Asserted on the prompt the session receives, because that is the thing
+    the model actually sees. ``FakeSession.stream_turn`` takes it as its
+    first argument, which is why the fake is reused here rather than a
+    ``_run_turn`` patch — this exercises the composition *and* the handoff.
+    """
+
+    def _prompt(self, svc, tmp_path, *args):
+        """Run one gated turn and return the prompt the session was given."""
+        seen = {}
+        release = asyncio.Event()
+        fake, _names = _running(svc, release)
+        real = fake.stream_turn
+
+        def spy(prompt, *, translator=None):
+            seen["prompt"] = prompt
+            return real(prompt, translator=translator)
+
+        fake.stream_turn = spy
+
+        async def body():
+            await _start(svc, *args)
+            release.set()
+            await next(iter(svc._turn_tasks))
+
+        asyncio.run(body())
+        return seen["prompt"]
+
+    def test_the_pushed_viewer_state_reaches_the_prompt(self, tmp_path):
+        """The gap AG-33 closed, on the transport that had it longest."""
+        svc = service(tmp_path)
+        svc.set_viewer_state("src/a.py", start_line=10, end_line=20)
+        assert self._prompt(svc, tmp_path, "r1", "why is this failing?") == (
+            "<aic-dc-ui-context>\n"
+            "Open in the user's editor pane:\n"
+            "- src/a.py (lines 10-20 selected)\n"
+            "</aic-dc-ui-context>\n"
+            "\n"
+            "why is this failing?"
+        )
+
+    def test_it_is_the_same_block_the_claude_engine_sends(self, tmp_path):
+        """AG-9 applied to a sentence: one feature, paid for once."""
+        from aic_dc.claude_code.session import Turn, compose_prompt
+        from aic_dc.framing import Viewer
+
+        svc = service(tmp_path)
+        svc.set_viewer_state("src/a.py", start_line=10, end_line=20)
+        assert self._prompt(svc, tmp_path, "r1", "why is this failing?") == (
+            compose_prompt(
+                Turn(
+                    request_id="r1",
+                    message="why is this failing?",
+                    viewer=Viewer("src/a.py", 10, 20),
+                )
+            )
+        )
+
+    def test_a_turn_with_nothing_to_frame_is_sent_verbatim(self, tmp_path):
+        """The property that makes composing unconditionally safe."""
+        assert self._prompt(service(tmp_path), tmp_path, "r1", "hi") == "hi"
+
+    def test_the_turn_argument_overrides_the_pushed_state(self, tmp_path):
+        svc = service(tmp_path)
+        svc.set_viewer_state("stale.py")
+        prompt = self._prompt(svc, tmp_path, "r1", "hi", None, {"path": "fresh.py"})
+        assert "- fresh.py" in prompt
+        assert "stale.py" not in prompt
+
+    def test_an_explicitly_empty_viewer_clears_a_stale_push(self, tmp_path):
+        """`if viewer:` could not be told "nothing is open"."""
+        svc = service(tmp_path)
+        svc.set_viewer_state("stale.py")
+        assert self._prompt(svc, tmp_path, "r1", "hi", None, {}) == "hi"
+
+    def test_the_mirror_reads_back_the_users_own_words(self, tmp_path):
+        """`note_prompt` stores the prompt verbatim, framing and all.
+
+        That is deliberate — a transcript disagreeing with what the model
+        was sent would be worse — so the strip is the contract that keeps
+        the browsed history honest about who said what.
+        """
+        from aic_dc.claude_code.history import strip_framing
+
+        svc = service(tmp_path)
+        svc.set_viewer_state("src/a.py", start_line=4)
+        prompt = self._prompt(svc, tmp_path, "r1", "why is this failing?")
+        assert strip_framing(prompt) == "why is this failing?"
+
+
+class TestSetViewerState:
+    """The push itself, and why it is the same shape on every engine.
+
+    ``engine_router`` exposes whichever adapter is master under the legacy
+    ``ClaudeCodeService`` name, so ``viewer-framing.js`` calls one method
+    name and reaches all three. That is what makes a *divergent* normaliser
+    here a real defect rather than a tidiness question: the browser cannot
+    tell which one it is talking to, and neither can the user.
+    """
+
+    def test_a_falsy_path_clears_rather_than_stores_a_hole(self, tmp_path):
+        """It stored ``{}`` where Claude stores ``None``.
+
+        Both are falsy, so nothing broke while nothing read it. A reader is
+        the thing that turns the difference into a bug, and AG-33 added one.
+        """
+        svc = service(tmp_path)
+        svc.set_viewer_state("src/a.py")
+        assert svc.set_viewer_state(None)["status"] == "cleared"
+        assert svc._viewer is None
+
+    def test_the_reply_is_the_claude_adapters_reply(self, tmp_path):
+        """Same call, same answer, whichever engine is mounted."""
+        svc = service(tmp_path)
+        assert svc.set_viewer_state("src/a.py", start_line=3) == {
+            "status": "ok",
+            "path": "src/a.py",
+            "start_line": 3,
+        }
+
+    def test_a_line_number_that_is_not_one_is_dropped_not_stored(self, tmp_path):
+        """It validated neither the path's type nor the lines' at all.
+
+        A ``start_line`` of ``"10"`` would have been stored and rendered as
+        ``(cursor on line 10)`` by luck; ``None`` in both slots would have
+        rendered ``(cursor on line None)`` into the model's prompt.
+        """
+        svc = service(tmp_path)
+        svc.set_viewer_state("src/a.py", start_line=None, end_line=None)
+        assert svc._viewer == {"path": "src/a.py"}
+
+    def test_a_path_that_is_not_a_string_clears(self, tmp_path):
+        svc = service(tmp_path)
+        svc.set_viewer_state("src/a.py")
+        svc.set_viewer_state(42)
+        assert svc._viewer is None
+
+    def test_the_agy_transport_inherits_this_one(self, tmp_path):
+        """No second implementation, and none was needed.
+
+        The task this closed was written up as needing *"a
+        ``set_viewer_state`` on ``AgyService``"*. Measured: it already had
+        one by inheritance, and the browser's push already reached it
+        through the router. The missing half was always the read.
+        """
+        from aic_dc.agy.service import AgyService
+
+        assert "set_viewer_state" not in vars(AgyService)
+        assert AgyService.set_viewer_state is AntigravityService.set_viewer_state
 
 
 class TestPermissionPostures:
@@ -1133,3 +1293,166 @@ class TestItReportsThePosturesItAccepts:
         """
         offered = asyncio.run(service(tmp_path).get_current_state())["permission_modes"]
         assert "bypassPermissions" not in offered
+
+
+# ----------------------------------------------------------------------
+# AG-34: the same six repo-intelligence tools this engine's row claimed
+# ----------------------------------------------------------------------
+
+
+def index_sources(flushed=None):
+    """The five tree-shaped callables ``ClaudeCodeService`` hands over.
+
+    Named here as a literal dict rather than built from a real
+    ``ClaudeCodeService``, because the assertion that these are *the same
+    five* belongs on that side — ``test_claude_code_service.py`` compares
+    the property against ``McpBridge``'s own signature. This one only needs
+    a bridge that constructs.
+    """
+    return {
+        "symbol_index": lambda: None,
+        "symbol_index_ready": lambda: True,
+        "doc_index": lambda: None,
+        "doc_index_ready": lambda: True,
+        "flush": flushed or (lambda: None),
+    }
+
+
+class RecordingSession:
+    """Stands in for ``AntigravitySession`` so ``_ensure_session`` completes.
+
+    Records the keyword arguments rather than the config, because what AG-34
+    got wrong was upstream of the config: ``tools`` had been an accepted
+    argument since phase 3 and no caller ever produced a value for it. A
+    test that asserted on ``config_kwargs`` of a hand-built session would
+    have passed throughout those eleven days.
+    """
+
+    last: dict = {}
+
+    def __init__(self, repo_root, **kw):
+        RecordingSession.last = dict(kw, repo_root=repo_root)
+        self.started = False
+
+    async def start(self):
+        self.started = True
+
+    @property
+    def conversation_id(self):
+        return None
+
+
+def ensured(svc, monkeypatch):
+    """Drive ``_ensure_session`` with no harness, and return its kwargs."""
+    from aic_dc.antigravity import service as mod
+
+    monkeypatch.setattr(mod, "AntigravitySession", RecordingSession)
+
+    async def no_resume(requested):
+        return None
+
+    monkeypatch.setattr(svc, "_resume_target", no_resume)
+
+    async def no_mirror():
+        return None
+
+    monkeypatch.setattr(svc, "_sync_mirror", no_mirror)
+    asyncio.run(svc._ensure_session())
+    return RecordingSession.last
+
+
+class TestTheIndexToolsReachThisEngine:
+    """The defect: the engine the user picked decided whether they had a
+    symbol map.
+
+    AG-4 built ``McpBridge`` transport-neutral — seven injected callables,
+    with only the ``@tool`` packaging per engine — and then built it in the
+    Claude adapter alone. So for eleven days this engine's README row
+    claimed six repo-intelligence tools it did not serve, and the
+    ``mcp_servers`` line in ``surface.PENDING_CONFIG`` read as coverage
+    rather than as an intention (AG-34).
+
+    The assertions run from the wiring inward: sources produce a bridge,
+    a bridge produces callables, and ``_ensure_session`` hands them to the
+    session *and* names them to the gate. Each link is separate because
+    each one was individually absent.
+    """
+
+    def test_index_sources_produce_a_bridge(self, tmp_path):
+        from aic_dc.claude_code.mcp_server import McpBridge
+
+        svc = service(tmp_path, index_sources=index_sources())
+        assert isinstance(svc.mcp_bridge, McpBridge)
+
+    def test_no_sources_is_no_bridge_rather_than_a_broken_one(self, tmp_path):
+        """Every test that builds this class without ``main.py`` does that.
+
+        A supported construction, not a degraded one: it is the engine this
+        one was until 2026-09-15.
+        """
+        assert service(tmp_path).mcp_bridge is None
+
+    def test_the_bridge_answers_review_state_from_this_engine(self, tmp_path):
+        """The two callables that are **not** shared, and why.
+
+        Five of the seven describe the one working tree, of which there is
+        one however many engines are mounted. ``review_state`` and
+        ``ui_state`` describe an *engine*, so sharing them would have this
+        adapter report the Claude adapter's review as its own — a wrong
+        answer that looks exactly like a right one.
+        """
+        svc = service(tmp_path, index_sources=index_sources())
+        asyncio.run(svc.set_permission_mode("plan"))
+        snapshot = svc._ui_state_snapshot()
+        assert snapshot["permission_mode"] == "plan"
+        assert snapshot["review_state"] == svc.get_review_state()
+
+    def test_the_ui_snapshot_carries_the_viewer_and_no_file_content(self, tmp_path):
+        """CC-14: paths and modes, never bytes.
+
+        The agent reads files with its own tools; this answers the one
+        question those cannot.
+        """
+        svc = service(tmp_path, index_sources=index_sources())
+        svc.set_viewer_state(path="a.py", start_line=3)
+        snapshot = svc._ui_state_snapshot()
+        assert snapshot["viewer"]["path"] == "a.py"
+        assert set(snapshot) == {"viewer", "review_state", "permission_mode"}
+
+    def test_all_six_reach_the_session(self, tmp_path, monkeypatch):
+        pytest.importorskip("google.antigravity")
+        svc = service(tmp_path, index_sources=index_sources())
+        names = [t.__name__ for t in ensured(svc, monkeypatch)["tools"]]
+        assert names == [spec.name for spec in index_tools.SPECS]
+
+    def test_the_gate_is_told_which_names_are_ours(self, tmp_path, monkeypatch):
+        """So ``pre_verdict`` can allow a bare ``symbol_map`` without asking.
+
+        Derived from the callables actually passed rather than from
+        ``index_tools.TOOL_NAMES``, which is what keeps the two facts from
+        disagreeing: a session handed no tools must not ungate their names.
+        """
+        pytest.importorskip("google.antigravity")
+        svc = service(tmp_path, index_sources=index_sources())
+        ensured(svc, monkeypatch)
+        assert svc._gate._own_read_tools == index_tools.TOOL_NAMES
+
+    def test_a_session_with_no_bridge_ungates_nothing(self, tmp_path, monkeypatch):
+        svc = service(tmp_path)
+        assert ensured(svc, monkeypatch)["tools"] == ()
+        assert svc._gate._own_read_tools == frozenset()
+
+    def test_main_hands_both_transports_the_same_five(self, tmp_path):
+        """The wiring nobody would notice was missing.
+
+        ``main.py`` is where the second engine is constructed, and this
+        argument arriving at only one of the two mounts is the shape of the
+        original defect: an engine that has the feature and one that does
+        not, with no error anywhere.
+        """
+        from pathlib import Path
+
+        from aic_dc import main as mod
+
+        source = Path(mod.__file__).read_text(encoding="utf-8")
+        assert source.count("index_sources=claude_code_service.index_sources") == 2

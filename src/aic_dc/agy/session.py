@@ -12,30 +12,46 @@ precede the first prompt, so there is exactly one window in which to take
 ownership. Claim late and the first tool call is waved through as somebody
 else's session; claim early is impossible.
 
-Cancellation is where this transport is genuinely weaker
-========================================================
+Cancellation, and the three layers it is made of
+================================================
 **There is no halt frame.** The input protocol accepts one event —
 ``user`` — and the binary answers anything else with *"unsupported stream
 input message event"*. The SDK transport has ``conversation.cancel()``,
-which sends a real ``halt_request``; there is no counterpart here.
+which sends a real ``halt_request``; there is no counterpart here. So ⏹ is
+assembled out of what ``agy`` does offer, and AG-19 gives each layer the
+job only it can do:
 
-What there *is* instead is the gate. Every tool call on this transport
-passes through :mod:`~aic_dc.agy.gate_server`, so ⏹ can
-**starve** a turn: from the moment it is pressed, every call is refused
-with a reason naming the user's stop. The agent reads those refusals and
-winds down, which is the same mechanism the Claude adapter already relies
-on — ``cancel_streaming`` denies the turn's open permissions *before* it
-interrupts, precisely because a released dialog is what makes an interrupt
-actionable.
+1. **The gate refuses.** Every tool call on this transport passes through
+   :mod:`~aic_dc.agy.gate_server`, so from the moment ⏹ is pressed each
+   call is denied with a reason naming the user's stop. This is what keeps
+   protecting the working tree, and it is unchanged. It is the same
+   mechanism the Claude adapter relies on — ``cancel_streaming`` denies
+   the turn's open permissions *before* it interrupts, because a released
+   dialog is what makes an interrupt actionable.
+2. **``PostInvocation`` ends the loop.** The gate answers
+   ``terminationBehavior: "terminate"`` while the stop is latched, so the
+   loop stops *mechanically* rather than because the agent read its
+   refusals and agreed to wind down. Measured 2026-09-10: the same prompt
+   ran 4 invocations without it and exactly 1 with it.
+3. **Killing the process is a user's escalation, never this module's.** It
+   ends the whole session to stop one turn, and costs 3.7s to rebuild.
+   :meth:`close` is that act, taken deliberately and separately.
 
-It is weaker in one stated way and the limit is worth knowing rather than
-discovering: **a turn producing only prose cannot be starved**, because it
-is asking permission for nothing. That turn runs to its own end.
-Terminating the process would stop it and would also end the session, so
-this does not do that silently — :meth:`cancel` starves, and
-:meth:`close` is the separate, explicit act of ending the session.
+**The residual gap is kept open on purpose.** ``PostInvocation`` fires
+*between* invocations, so nothing stops token generation inside one — a
+single-invocation prose answer runs to its natural end. Closing that would
+mean killing the process, to save a few seconds of text from a turn that
+holds no locks, runs no commands and touches no files.
 
-Governing spec: ``specs5/plan-ag/`` — AG-14; ``sdk-surface.md``
+So the handling is presentational, in the three parts AG-19 names.
+:meth:`stream_turn` tells the translator the moment the latch is set, and
+from there **frames are still read but stop becoming view** — the process
+stays warm and usable for the next turn while the screen holds still. The
+turn is badged stopped rather than pretending the words never arrived. And
+a stop that outlasts :data:`STOP_OVERDUE_SECONDS` is reported once, with
+the force-restart offered rather than taken.
+
+Governing spec: ``specs5/plan-ag/`` — AG-14, AG-19; ``sdk-surface.md``
 § *The stream, measured in bidirectional mode*.
 """
 
@@ -45,11 +61,12 @@ import asyncio
 import json
 import logging
 import shutil
+import time
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
-from aic_dc.agy import scope
+from aic_dc.agy import roots, scope
 from aic_dc.agy.gate_server import AgyGateServer
 from aic_dc.agy.steps import AgyTranslator, subagent_entries, unwrap
 from aic_dc.claude_code.messages import Event
@@ -64,7 +81,26 @@ INIT_TIMEOUT_SECONDS = 120.0
 #: Passed to ``--print-timeout``. It bounds the whole turn, so it must
 #: outlast any permission dialog — the default is 5m, which a user reading
 #: a diff can exceed without trying.
+#:
+#: **It is also the only ceiling a turn has**, which is a much less
+#: comfortable sentence. See :data:`STOP_OVERDUE_SECONDS`.
 PRINT_TIMEOUT = "12h"
+
+#: How long after ⏹ a turn may go on before the user is told it has not
+#: stopped, and offered the escalation.
+#:
+#: **Not a timeout and not a cancellation.** Nothing is ended here; the
+#: turn is reported, once, and what to do about it stays the user's — which
+#: is [AG-19](../../../specs5/plan-ag/decisions.md#ag-19)'s rule that
+#: killing the process is an explicit escalation rather than something this
+#: app does behind a user who has not asked for it.
+#:
+#: Ten seconds because both things that get a turn here are much faster
+#: than that when they work: an armed stop ends the loop in **one**
+#: invocation, measured at 2.2s, and a revived loop cycles at roughly two
+#: invocations a second ([AG-R-16](../../../specs5/plan-ag/risks.md#ag-r-16)).
+#: A stop that has not landed in ten seconds is not a slow stop.
+STOP_OVERDUE_SECONDS = 10.0
 
 
 class AgyNotInstalledError(RuntimeError):
@@ -84,6 +120,37 @@ class PromptNotSentError(RuntimeError):
     """
 
 
+def _tool_names(init: Any) -> frozenset[str]:
+    """The tool names in an ``init`` payload, or nothing if it named none.
+
+    Deliberately unfussy. Every shape that is not a list of names — a frame
+    with no ``tools`` key, a payload that is not a mapping, a binary that
+    starts declaring its inventory as objects instead of strings — reduces
+    to the empty set, which :attr:`AgySession.advertised_tools` defines as
+    *no claim*. The one thing this must never do is raise: it runs inside
+    the handshake, and a session that cannot start because the inventory
+    was shaped unexpectedly would be a far worse failure than not knowing
+    the inventory.
+
+    ``agy`` 1.2.2 sends strings (57 of them). The mapping arm is there
+    because the SDK's own tool descriptions are objects, so a future
+    binary aligning the two would otherwise take the inventory away
+    silently.
+    """
+    if not isinstance(init, dict):
+        return frozenset()
+    names = init.get("tools")
+    if not isinstance(names, (list, tuple)):
+        return frozenset()
+    found: set[str] = set()
+    for name in names:
+        if isinstance(name, dict):
+            name = name.get("name")
+        if isinstance(name, str) and name:
+            found.add(name)
+    return frozenset(found)
+
+
 class AgySession:
     """A conversation held open across turns.
 
@@ -100,16 +167,42 @@ class AgySession:
         model: str | None = None,
         executable: str = "agy",
         resume: str | None = None,
+        config_root: Path | str | None = None,
+        clock: Any = None,
     ) -> None:
         self._repo_root = Path(repo_root)
         self._gate = gate
         self._model = model
         self._executable = executable
         self._resume = resume or None
+        #: The private ``HOME`` this process runs against (AG-21), or
+        #: ``None`` to inherit the server's whole environment — which is
+        #: what every session did before 2026-09-11, and what a test that
+        #: only reads :meth:`_argv` still does.
+        #:
+        #: ``None`` is not a neutral default in production and is not
+        #: treated as one: :meth:`start` says so in the log, because a
+        #: session running against the user's own ``~/.gemini`` is the
+        #: configuration the global fail-open hook existed for, and it
+        #: should be visible when it happens rather than inferred later
+        #: from where the files ended up.
+        self._config_root = Path(config_root) if config_root else None
         self._proc: Any = None
         self._conversation_id: str | None = None
+        #: The tool names ``agy`` advertised in its ``init`` frame. See
+        #: :attr:`advertised_tools`.
+        self._advertised: frozenset[str] = frozenset()
         self._turn_active = False
         self._cancelled = False
+        self._clock = clock or time.monotonic
+        #: When ⏹ was pressed on the turn in flight, or ``None``. The clock
+        #: for :data:`STOP_OVERDUE_SECONDS`, and cleared with the turn.
+        self._cancelled_at: float | None = None
+        #: Whether this turn has already reported that its stop did not
+        #: land. Once per turn: a turn being overridden produces frames
+        #: continuously, and one card per frame would bury the message it
+        #: is trying to deliver.
+        self._reported_overdue = False
 
     @property
     def conversation_id(self) -> str | None:
@@ -118,6 +211,34 @@ class AgySession:
     @property
     def started(self) -> bool:
         return self._proc is not None
+
+    @property
+    def advertised_tools(self) -> frozenset[str]:
+        """The vendor's own vocabulary, as its ``init`` frame declared it.
+
+        Free, and that is the whole reason it is kept. The ``init`` frame
+        arrives before any prompt is sent, so reading the inventory out of
+        it costs no model turn and no subscription spend — which is what
+        makes it usable as a check on every launch rather than as something
+        a probe script does occasionally by hand
+        ([AG-R-22](../../../specs5/plan-ag/risks.md#ag-r-22)).
+
+        **Empty means no claim, not "no tools".** A frame that carried no
+        list, an older binary, or a test fixture that does not bother
+        emitting one all land here as ``frozenset()``, and a caller
+        comparing an allowlist against it must read that as *this cannot be
+        checked* rather than as *everything is missing*. Getting that
+        backwards would turn a silent binary into a false alarm on every
+        consultation, which is worse than the silence.
+
+        This is an **observation, never a permission**. Nothing in the app
+        widens an allowlist because a name appeared here; a name the gate
+        does not permit stays refused whether ``agy`` advertises it or not.
+        The one thing the inventory buys is the ability to say *the tool
+        this consultation was allowed to call is not a tool this binary
+        has*, in the message where that fact explains the outcome.
+        """
+        return self._advertised
 
     @property
     def read_only(self) -> bool:
@@ -226,10 +347,27 @@ class AgySession:
                 "cannot start. Install the Antigravity CLI or choose another "
                 "engine."
             )
+        # **The environment is built, not inherited** (AG-21). `agy` reads
+        # its whole configuration tree from `HOME`, so this is what puts
+        # the conversation store, the brain directory and — critically —
+        # the hooks file inside a root this app owns. The allowlist is the
+        # other half: a spawn carrying the parent's environment hands
+        # another vendor's agent every credential the developer has
+        # exported, and moving the config root would have done nothing
+        # about that.
+        if self._config_root is not None:
+            environment = roots.environment(self._config_root)
+        else:
+            environment = None
+            logger.warning(
+                "Starting agy with no private config root, so it will read "
+                "and write the user's own ~/.gemini (AG-21)"
+            )
         try:
             self._proc = await asyncio.create_subprocess_exec(
                 *self._argv(),
                 cwd=str(self._repo_root),
+                env=environment,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
@@ -259,6 +397,7 @@ class AgySession:
                         self._conversation_id = str(
                             frame.get("conversation_id") or ""
                         )
+                        self._advertised = _tool_names(init)
                         break
         except TimeoutError as exc:
             await self.close()
@@ -363,6 +502,8 @@ class AgySession:
             )
         self._turn_active = True
         self._cancelled = False
+        self._cancelled_at = None
+        self._reported_overdue = False
         self._gate.resume()
         try:
             try:
@@ -403,6 +544,62 @@ class AgySession:
                     break
         finally:
             self._turn_active = False
+
+    def _overdue_stop(self) -> Event | None:
+        """One report, when a stop has not landed. AG-R-16, AG-19.
+
+        ⏹ is layered and both layers can be outlasted. The gate refuses
+        tool calls, which a prose-only turn never makes; the
+        ``PostInvocation`` terminate ends the loop, which a ``Stop`` hook
+        this app does not own can undo — measured 2026-09-12 as a
+        ping-pong, eight invocations in sixteen seconds, bounded only by
+        ``--print-timeout``. Both look identical from where the user sits:
+        **they pressed stop and the turn is still going.**
+
+        So this reports the condition rather than either cause, and reports
+        it *once*. What it does not do is end anything. AG-19 demoted
+        killing the process to an explicit escalation because it ends a
+        session the user is holding, and a ceiling that fired
+        automatically would eventually fire on a legitimate turn sitting in
+        a permission dialog. The user is told, and the choice stays theirs.
+
+        Checked per frame rather than on a timer, which bounds it honestly:
+        a turn emitting nothing at all is a turn this cannot report on. Both
+        conditions it exists for emit continuously — a revived loop cycles
+        and a prose turn streams — so the case it misses is a turn that is
+        not doing anything, which is a different problem with a different
+        name (``--print-timeout``).
+        """
+        if not self._cancelled or self._reported_overdue:
+            return None
+        if self._cancelled_at is None:
+            return None
+        elapsed = self._clock() - self._cancelled_at
+        if elapsed < STOP_OVERDUE_SECONDS:
+            return None
+        self._reported_overdue = True
+        # The gate knows *why*, and only it does: a loop it has terminated
+        # more than once is one something is putting back.
+        revived = self._gate.was_revived(self._conversation_id or "")
+        logger.warning(
+            "The turn stopped %.0fs ago has not ended (revived=%s)",
+            elapsed,
+            revived,
+        )
+        return Event(
+            "systemEvent",
+            {
+                "subtype": "stop_ignored",
+                "data": {
+                    "seconds": round(elapsed, 1),
+                    # Two different stories for the user, and the honest
+                    # one depends on this: a revived loop is somebody's
+                    # hook overriding them, and the other is a turn that
+                    # asks permission for nothing and cannot be starved.
+                    "revived": revived,
+                },
+            },
+        )
 
     def _gate_subagents(self, frame: dict[str, Any]) -> None:
         """Claim a subagent's conversation, so its tool calls reach the gate.
@@ -484,8 +681,20 @@ class AgySession:
         frames = self.stream_frames(prompt)
         try:
             async for frame in frames:
+                # **Before the frame is translated, not after the loop.**
+                # The pump uses this to stop turning frames into view
+                # (AG-19's presentational half), which only works if it
+                # knows before it renders the frame in hand. The call below
+                # — after the loop, where this used to be the only one —
+                # is still needed for a stop with no frame behind it, and
+                # is idempotent with this.
+                if self._cancelled:
+                    translator.note_cancelled()
                 for event in translator.translate(frame):
                     yield event
+                overdue = self._overdue_stop()
+                if overdue is not None:
+                    yield overdue
         except PromptNotSentError as exc:
             # Reported as an event rather than raised, and then closed out
             # below: the browser is waiting on this stream and an exception
@@ -510,22 +719,48 @@ class AgySession:
             # and no inner one to forget.
             await frames.aclose()
 
+        # After the frames and before the footer, which is the only place
+        # it can go: the turn's own `result` frame says `SUCCESS` for a
+        # loop this app terminated, so nothing in the stream distinguishes
+        # a stop from a turn that finished with nothing to say. The gate
+        # was told, so the gate is asked.
+        #
+        # `_cancelled` first because it is the user's own act and is true
+        # even when the stop only ever starved the turn; the gate's record
+        # is the stronger fact where it exists, and is what makes the
+        # difference visible in the log rather than only in the footer.
+        if self._cancelled:
+            if self._gate.was_terminated(self._conversation_id or ""):
+                logger.info("The stopped turn's loop was ended by the gate")
+            else:
+                logger.info(
+                    "The stopped turn ended without a termination: it was "
+                    "starved, or it finished before the next invocation"
+                )
+            translator.note_cancelled()
+
         for event in translator.stream_complete():
             yield event
 
     async def cancel(self) -> None:
-        """Stop the turn by starving it. See the module docstring.
+        """Latch the stop. See the module docstring for the three layers.
 
-        There is no halt frame on this transport, so ⏹ refuses every
-        subsequent tool call with a reason naming the user's stop. The
-        agent reads those and winds down. A turn producing only prose
-        cannot be starved and runs to its own end; that is stated rather
-        than papered over, and it is why this does not kill the process —
-        doing so would end the whole session to stop one turn.
+        This method is one line of work and two mechanisms, because the
+        gate holds the latch that both of them read: every subsequent tool
+        call is refused with a reason naming the user's stop, **and** the
+        next ``PostInvocation`` answers ``terminate`` off the same flag.
+        The refusal is what protects the tree; the termination is what
+        makes the stop a mechanism rather than a request the agent may
+        decline (AG-19).
+
+        Still not a process kill, and the reason is unchanged: that would
+        end a session the user is still holding. What it no longer relies
+        on is the agent's cooperation.
         """
         if not self._turn_active:
             return
         self._cancelled = True
+        self._cancelled_at = self._clock()
         self._gate.refuse_all(
             "The user stopped this turn in AIC-DC. Do not continue, and do "
             "not try another way of making this change."

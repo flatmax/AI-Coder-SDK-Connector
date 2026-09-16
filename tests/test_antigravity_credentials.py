@@ -213,13 +213,13 @@ class TestNoCredential:
         result = resolve({API_KEY_VAR: KEY}, home=bare_home)
         assert result.require() is result
 
-    def test_an_agy_login_gets_the_agr8_explanation(self, agy_home):
+    def test_agy_state_gets_the_agr8_explanation(self, agy_home):
         """The whole reason this module is a phase-1 deliverable.
 
         A user who is signed in to Antigravity and is told they are not
         authenticated will re-authenticate the wrong program, indefinitely.
-        The message has to say that the login exists, that it is a
-        different program, and what to do instead.
+        The message has to raise the possibility of that login, say it is a
+        different program, and say what to do instead.
         """
         result = resolve({}, home=agy_home)
         assert result.mode == NONE
@@ -228,7 +228,22 @@ class TestNoCredential:
         assert result.warnings, "the actionable half belongs in a warning"
         assert "aistudio.google.com" in result.warnings[0]
 
-    def test_no_agy_login_does_not_invent_one(self, bare_home):
+    def test_the_message_does_not_assert_a_login_it_has_not_seen(self, agy_home):
+        """The six-day misreport this branch used to produce.
+
+        ``_agy_state_exists`` sees a directory, and a directory survives a
+        login lapsing — measured on the author's machine, where this branch
+        asserted "An Antigravity login exists" for six days while every
+        ``agy`` log in that same directory said the opposite. So the
+        remedy stays unconditional and the *login* is offered as a
+        possibility, which is all the check can support.
+        """
+        source = resolve({}, home=agy_home).source
+        assert "may be an Antigravity login" in source
+        assert "login exists" not in source
+        assert "required regardless" in source
+
+    def test_no_agy_state_does_not_invent_a_login(self, bare_home):
         """A message about a login that does not exist is a worse message."""
         result = resolve({}, home=bare_home)
         assert "OAuth" not in result.source
@@ -239,9 +254,10 @@ class TestNoCredential:
 
         Any state at all is evidence of that, and reading a credential
         file would be both more fragile and a secret this module has no
-        business touching.
+        business touching — ``agy``'s refresh token is in the OS keyring,
+        so there is no file here that would answer the question anyway.
         """
-        assert creds._agy_login_exists(agy_home) is True
+        assert creds._agy_state_exists(agy_home) is True
         for child in (agy_home / creds.AGY_STATE_DIR).iterdir():  # pragma: no cover
             raise AssertionError(f"the check should not need contents: {child}")
 

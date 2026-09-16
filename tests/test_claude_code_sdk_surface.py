@@ -174,7 +174,20 @@ class TestCoverageIsDerivedNotGuessed:
             assert name in assigned
 
     def test_registration_is_read_from_hooks_module(self):
-        assert registered_hook_events() == {"PostToolUse", "PreCompact"}
+        """Three, and the third arrives by a different syntax.
+
+        ``PostToolUse`` and ``PreCompact`` are keys of a dict literal.
+        ``PreToolUse`` is assigned into that dict under an ``if`` — it
+        registers only for sessions that have an Antigravity bridge
+        (AG-28) — so the reader has to see subscript assignment too. It
+        did not, and the day the function stopped returning a literal it
+        reported the empty set: full coverage read as no coverage.
+        """
+        assert registered_hook_events() == {
+            "PostToolUse",
+            "PreCompact",
+            "PreToolUse",
+        }
 
 
 # ----------------------------------------------------------------------

@@ -214,7 +214,23 @@ export function renderTemplate(host) {
       request during startup is possible when a session resumes into a
       pending call, so "above the startup overlay" is not theoretical
       (specs5/5-webapp/permission-dialog.md § Placement).
+
+      dockLeft is the one thing the dialog cannot work out for itself: an
+      interact request renders beside the chat rather than over it, and
+      where the chat ends — or whether it is on screen at all — is the
+      panel's geometry, which lives here. Null means "nowhere to dock",
+      and the dialog falls back to the centred modal.
+
+      The traffic goes both ways, because how much room is *enough* is a
+      fact about the request rather than the panel. The dialog says when
+      that changed and the shell re-measures — none of the shell's own
+      triggers (resize, minimize, undock, tab switch) fire when a request
+      arrives, so without this the second question in a queue would
+      inherit the first one's verdict.
     -->
-    <aic-permission-dialog></aic-permission-dialog>
+    <aic-permission-dialog
+      .dockLeft=${host._questionDockLeft}
+      @dock-requirement-changed=${host._onDockRequirementChanged}
+    ></aic-permission-dialog>
   `;
 }

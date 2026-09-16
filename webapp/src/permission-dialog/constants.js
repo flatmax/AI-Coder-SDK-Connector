@@ -21,6 +21,77 @@ export const SETTLING_MS = 700;
 /** Countdown re-render cadence. One second; the label shows seconds. */
 export const COUNTDOWN_TICK_MS = 1000;
 
+/**
+ * The narrowest a docked question **that compares examples** may be, in px.
+ *
+ * A question is docked beside the chat rather than modal over it, because
+ * its options and their examples are written *about* the transcript
+ * (permission-dialog.md § Placement). The floor is the
+ * `.question-compare` breakpoint in styles.js: below it the options and
+ * the example they are being compared against stack, and § interact
+ * requires both on screen at once. Narrower than this and docking would
+ * buy the transcript at the cost of the comparison, so the centred modal
+ * is the better answer there.
+ *
+ * Read by the shell, which decides whether there is room
+ * (app-shell/dialog.js § questionDockLeft). The two numbers have to agree,
+ * so the breakpoint in styles.js names this constant.
+ */
+export const QUESTION_DOCK_MIN_WIDTH = 720;
+
+/**
+ * The narrowest a docked question with **no examples to compare** may be.
+ *
+ * The floor above was applied to every question, and for most of them it was
+ * enforcing a layout they never use: `.question-compare` only renders when an
+ * option carries a `preview`, and a plain list of labels and descriptions is
+ * perfectly legible in half that. The cost of the one number was not
+ * theoretical — 720px plus gutters needs a viewport of about 1480 before the
+ * *default* half-width panel leaves room, so on any panel the user had widened
+ * the dock never engaged at all and the feature was invisible in practice.
+ *
+ * Which floor applies is the *dialog's* answer, not the shell's, because it is
+ * a fact about the pending request: see `dockMinWidth` in index.js. The shell
+ * asks, for the same reason it asks about modality — a copy of the rule in the
+ * shell is a copy that can disagree with the layout actually rendered.
+ */
+export const QUESTION_DOCK_MIN_PLAIN = 420;
+
+/**
+ * Breathing room between a docked question panel and the viewport edges.
+ *
+ * Written into the shadow root as `--question-dock-gutter` rather than
+ * duplicated in the stylesheet: the shell adds it to the `left` it sends
+ * and the stylesheet uses it for the other three sides, and a gutter that
+ * disagreed with itself would sit the panel off-centre in its own region.
+ */
+export const QUESTION_DOCK_GUTTER = 10;
+
+/**
+ * The collapse / expand toggle on a question that could not be docked.
+ *
+ * The dock exists because a question's options are written *about* the
+ * transcript, and below the width floor above there is nowhere to put it — so
+ * the fallback is the centred modal, covering the one thing the user needs to
+ * read to answer. Collapsing is the modal's version of the same answer: park
+ * the question at the top of the screen as its header, hand the transcript
+ * back, expand when ready.
+ *
+ * `▾` collapses and `▴` expands, matching the chat panel's own minimize pair
+ * (chat-panel/tabs.js § tab-strip-minimize, app-shell/styles.js § expand-fab)
+ * — a second collapse gesture in the same app that pointed the other way
+ * would be a worse control than no gesture at all.
+ *
+ * The labels say the request is still pending, because that is the thing a
+ * collapse gesture on a *permission* dialog could plausibly be mistaken for.
+ * Collapsing decides nothing, sends nothing, and stops no clock.
+ */
+export const COLLAPSE_GLYPH = '▾';
+export const EXPAND_GLYPH = '▴';
+export const COLLAPSE_QUESTION_LABEL =
+  'Collapse to the header and read the chat — the question stays pending';
+export const EXPAND_QUESTION_LABEL = 'Expand the question';
+
 /** Under this many seconds remaining the countdown turns amber. */
 export const AMBER_SECONDS = 60;
 

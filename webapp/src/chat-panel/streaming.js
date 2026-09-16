@@ -54,11 +54,15 @@ import {
   drainChunks,
   freezeBlocks,
   markAwaitingPermission,
+  isConsultationWarning,
+  noteConsultationNotice,
+  noteConsultationPosture,
   resetTurnBlocks,
   stageChunk,
   subagentRowFor,
 } from './blocks.js';
 import {
+  findSubagentTab,
   mirrorSubagentBlocks,
   settleLiveSubagentTabs,
   syncSubagentTab,
@@ -638,6 +642,98 @@ export function systemNotice(subtype, data) {
       collapse: true,
     };
   }
+  if (subtype === 'consultation_posture') {
+    // The standing condition, raised once at the head of every
+    // consultation tab before the model has said anything. Its counterpart
+    // for the asking model is the first sentence of the bridge's grounding
+    // header, which is unconditional for the same reason: the consultation
+    // that *tries* to read a file and is stopped announces itself, and the
+    // one that answers from its weights without trying does not. A tab
+    // that only speaks on a refusal is silent in exactly the second case.
+    //
+    // No toast. This is true of every consultation, and a toast on each
+    // one is a notification the reader learns to dismiss — which would
+    // also cost the `consultation_ungrounded` toast beside it, where a
+    // retrieval really was attempted and lost.
+    return {
+      text: message
+        || 'A second opinion runs with no tools and no repository access.',
+      severity: 'info',
+    };
+  }
+  if (subtype === 'consultation_breach') {
+    // The inverse of `consultation_ungrounded`, and the only notice in this
+    // file that should never fire: a tool a consultation was not permitted
+    // to use came back with output rather than an error, so it ran. The card
+    // beside it renders `agy`'s own success, truthfully, which is exactly
+    // why this has to be louder than the card.
+    //
+    // Not folded into `engine_error`, which was the first cut. That entry
+    // prefixes "The engine reported an error", and the engine reported no
+    // error — this app did, about the engine. It also sets `collapse`, so a
+    // later error of that subtype in the same turn would quietly replace
+    // the one row saying containment failed.
+    return {
+      text: message
+        || 'A tool ran inside a second opinion that permits none: the '
+          + 'consultation gate did not hold.',
+      toast: '⚠️ A consultation escaped its gate',
+      severity: 'error',
+    };
+  }
+  if (subtype === 'consultation_unverified') {
+    // The third thing a barred call can end as, beside refused and escaped:
+    // this app could not establish which. No refusal mark came back with it
+    // and no output did either — rejected upstream, or killed between the
+    // request and the result. The row beside `consultation_ungrounded` says
+    // "nothing was read", which is a fact about a refusal and a fabrication
+    // about a call nobody watched finish, so the two cannot share a branch.
+    //
+    // Warning rather than error: nothing is known to have gone wrong. It is
+    // the certainty that is missing, not the containment.
+    //
+    // No `collapse`, for `consultation_ungrounded`'s reason — raised once
+    // per consultation, so there is no second row to supersede, and setting
+    // it would let a later consultation in the same turn erase this one.
+    return {
+      text: message
+        || 'This consultation reached for a tool and ended without saying '
+          + 'what came back from it.',
+      toast: '❔ A consultation call went unaccounted for',
+      severity: 'warning',
+    };
+  }
+  if (subtype === 'consultation_ungrounded') {
+    // AG-R-22. The gate held and the model narrated around it: asked for a
+    // page it could not fetch, `agy` has been measured both declining
+    // honestly and answering with invented page contents, from the same
+    // policy and the same shape of prompt. So the app says that a retrieval
+    // came back empty, because it is the only party that knows for certain
+    // and the answer above cannot be trusted to mention it.
+    //
+    // The sentence names no tool, and the fallback below must not either:
+    // this is raised once, at the first such call, with further refused
+    // cards rendering beneath it, so any list in it is an inventory that
+    // has stopped being kept. The names are on the cards.
+    //
+    // `collapse` is deliberately absent. These are one per consultation by
+    // construction — the pump raises it at the first refusal and not again
+    // — so there is never a second card to supersede, and setting it would
+    // let a second consultation in the same turn overwrite the first's
+    // card, erasing the record of an answer still sitting above it.
+    //
+    // It carries an `agent_id`, so the row below routes it into the
+    // consultation's own tab. Main is not left silent: the answer handed
+    // back opens with the same statement in the bridge's voice, and that is
+    // the first paragraph of the `second_opinion` result card.
+    return {
+      text: message
+        || 'This consultation reached for a tool and got nothing back: a '
+          + 'second opinion runs with no tools and no repository access.',
+      toast: '🚫 The consultation had no tools',
+      severity: 'warning',
+    };
+  }
   if (subtype === 'turn_timeout') {
     const seconds = Number.isFinite(payload.seconds) ? payload.seconds : null;
     const bound = seconds === null ? '' : ` after ${Math.round(seconds)}s`;
@@ -649,6 +745,65 @@ export function systemNotice(subtype, data) {
       toast: '⏱️ The turn timed out',
       severity: 'error',
       collapse: true,
+    };
+  }
+  if (subtype === 'stop_acknowledged') {
+    // ⏹ landed and the screen is now final. Without this the freeze reads
+    // as a hang: text simply stops arriving, which is also what a model
+    // thinking looks like, and the turn's own "stopped" badge cannot
+    // appear until the turn ends — which is the part taking the time.
+    //
+    // No action and no toast. There is nothing for the reader to decide
+    // yet, and a toast would fire on every stop; the escalation belongs to
+    // `stop_ignored` below, which only appears if the wind-down drags.
+    // `collapse` so that a stop during a second turn replaces this rather
+    // than stacking a second copy of the same sentence.
+    return {
+      text:
+        'Stopped. The engine is finishing the reply it had already '
+        + 'started — nothing further will be shown, and anything it '
+        + 'had already done stands.',
+      toast: '',
+      severity: 'info',
+      collapse: true,
+    };
+  }
+  if (subtype === 'stop_ignored') {
+    // The user pressed ⏹ and the turn kept going. Two causes, one
+    // experience, and the card says which because the two call for
+    // different things from the reader:
+    //
+    //   `revived` — a `Stop` hook this app does not own answered
+    //   `continue`, putting back a loop the gate had ended. Measured as a
+    //   ping-pong at roughly two model invocations a second, so it is
+    //   spending money while it says this (`risks.md` AG-R-16).
+    //
+    //   otherwise — the turn is producing prose, which asks permission for
+    //   nothing and so cannot be starved. It runs to its own end and costs
+    //   only the words (AG-19's residual gap).
+    //
+    // The action is offered rather than taken. Restarting ends the session
+    // the user is holding, which is why AG-19 makes it theirs to choose.
+    const seconds = Number.isFinite(payload.seconds)
+      ? `${Math.round(payload.seconds)}s`
+      : 'a while';
+    const why = payload.revived
+      ? 'Something outside AIC⚡DC is restarting it each time the stop takes '
+        + 'effect — most likely a `Stop` hook in your own `hooks.json`. It is '
+        + 'calling the model repeatedly while this message is on screen.'
+      : 'The turn is writing a reply rather than using tools, and a reply '
+        + 'cannot be interrupted part-way. It will finish on its own.';
+    return {
+      text: `You stopped this turn ${seconds} ago and it has not ended. ${why}`,
+      toast: '⏹ The turn has not stopped',
+      severity: 'warning',
+      collapse: true,
+      // Restarting resumes the same conversation, so the context survives;
+      // what is lost is the turn in flight, which is the one the user has
+      // already asked to be rid of.
+      action: payload.revived
+        ? { label: 'Force restart the engine', method: 'ClaudeCodeService.restart_session' }
+        : null,
     };
   }
   if (subtype === 'engine_notice' && message) {
@@ -699,6 +854,14 @@ export function systemNotice(subtype, data) {
  * without `collapse` — `engine_notice` — always append, because two harness
  * notices are two facts and collapsing them would lose one.
  *
+ * **An event that names an agent is that agent's, not the session's.** Every
+ * block on the stream is scoped by `agent_id` and drawn in the matching
+ * subagent tab; this handler was the last producer not to honour that, so a
+ * consultation's own warning landed in Main while its tab — which held the
+ * cards the warning was about — said nothing. Scoped events are routed;
+ * unscoped ones are the session speaking and stay in Main. A scoped event
+ * whose tab is closed falls back to Main rather than being dropped.
+ *
  * `pre_compact` deliberately does not toast. The compaction it announces runs
  * for tens of seconds; the toast expired after three, so the stall it existed
  * to explain was unexplained for most of its duration.
@@ -719,8 +882,52 @@ export function onSystemEvent(panel, event) {
   const notice = systemNotice(subtype, data?.data);
   if (!notice) return;
 
+  // An event about one subagent belongs in that subagent's tab, beside the
+  // cards it is about — the same scoping every block on the payload's
+  // `agent_id` already gets, which this handler was the last producer not to
+  // honour. Only events that carry one are moved; everything else is the
+  // session speaking and stays in Main. A scoped event whose tab is not open
+  // — a consultation the user closed, a reconnect mid-turn — falls back to
+  // Main rather than being dropped, because an unsaid warning is worse than
+  // one in the wrong place.
+  const agentId = typeof data?.data?.agent_id === 'string' ? data.data.agent_id : '';
+
+  // A consultation notice is also the container's standing condition, so it
+  // is recorded before it is placed. Recorded *as well as*, not instead of:
+  // the row still goes where it went, because the tab is still the full view
+  // and a banner on the inline card is not a reason to stop saying it there.
+  // The banner is what reaches a reader who never opens the tab, which under
+  // inline-as-default is most of them (AG-29).
+  noteConsultationPosture(panel, agentId, subtype, notice);
+  // And, for the three that are warnings rather than framing, onto the card
+  // itself. See below for why that replaces the Main fallback rather than
+  // joining it.
+  const onCard = noteConsultationNotice(panel, agentId, subtype, notice);
+  // From the subtype, not from whether anything was recorded: a *repeat* of a
+  // warning records nothing and must still not fall through to Main.
+  const cardOnly = !!agentId && isConsultationWarning(subtype);
+
+  const scoped = agentId ? findSubagentTab(panel, agentId) : null;
+  // A consultation warning with no tab does **not** fall back to Main any
+  // more. The fallback above is a safety net for a scoped event with nowhere
+  // to go, and it was written when every consultation had a tab, so "nowhere"
+  // meant a tab the user had closed. Under inline-as-default a consultation
+  // has no tab until it is asked for, so that exception would become the
+  // normal path and every refusal would file itself as a top-level row in the
+  // main transcript — detached from the stream that caused it, and reading as
+  // though the parent turn had been refused rather than the consultant.
+  //
+  // The card is the third surface, and it is the one the reader is already
+  // looking at. The toast still fires, which is what covers a warning raised
+  // while the reader is scrolled away.
+  const messages = scoped ? scoped.tab.messages : panel.messages;
+
   const turn = requestId ?? null;
-  const last = panel.messages[panel.messages.length - 1];
+  const last = messages[messages.length - 1];
+  // A card-only notice appends nothing, so this guard cannot see a repeat of
+  // one — `noteConsultationNotice` is what deduplicates those, and it already
+  // reported whether this text was new. A repeat must not re-toast.
+  if (cardOnly && !scoped && !onCard) return;
   if (last?.system_event && last.content === notice.text) return;
 
   // `system_event: true` is what `renderMessage` reads for the label and the
@@ -738,17 +945,29 @@ export function onSystemEvent(panel, event) {
     // result payloads already use for something else.
     system_subtype: subtype,
     system_request: turn,
+    // An escalation the card offers and does not take. Only `stop_ignored`
+    // sets one today; `renderMessage` draws a button for whatever is here.
+    system_action: notice.action || null,
   };
   const supersedes =
     notice.collapse
     && last?.system_event
     && last.system_subtype === subtype
     && last.system_request === turn;
-  panel.messages = supersedes
-    ? [...panel.messages.slice(0, -1), row]
-    : [...panel.messages, row];
+  const next = supersedes
+    ? [...messages.slice(0, -1), row]
+    : [...messages, row];
+  if (scoped) {
+    scoped.tab.messages = next;
+  } else if (!cardOnly) {
+    panel.messages = next;
+  }
+
   // The toast is the glance and fires once per distinct report; a retry that
   // only refines the card it replaces does not re-interrupt the reader.
+  // The toast fires whichever surface took the row, and that is the point of
+  // it for a scoped one: the tab is opt-in, so a reader who never opens it is
+  // told something happened by the only channel that reaches every reader.
   if (notice.toast && !supersedes) panel._emitToast(notice.toast, notice.severity);
   panel.requestUpdate();
 }

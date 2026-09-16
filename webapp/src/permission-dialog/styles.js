@@ -55,6 +55,64 @@ export const PERMISSION_DIALOG_STYLES = css`
     border-color: #6e2a2a;
   }
 
+  /* The interact variant: beside the chat, not over it.
+   *
+   * A question is the one class whose content is written *about* the
+   * transcript — the options, their descriptions and their examples only
+   * mean anything against what the agent just said — so a modal over the
+   * chat asks the user to answer from memory. The panel takes the viewer's
+   * region and leaves the picker and chat columns exactly where they were,
+   * so nothing reflows when a question arrives or resolves
+   * (permission-dialog.md § Placement).
+   *
+   * The left edge and the gutter arrive as inline styles: the shell is the
+   * only part of the app that knows where the docked panel ends, and the
+   * gutter is a JS constant so the four sides cannot disagree.
+   *
+   * Top-anchored and content-height rather than filling the region. A
+   * three-option question in a 100vh panel is the empty-letterbox failure
+   * § write hit with the diff editor, and the decision row belongs under
+   * the question rather than a screenful below it. The centred rule above
+   * is already content-height; this only changes which edge it grows from.
+   *
+   * (No backticks in this comment — the whole stylesheet is a tagged
+   * template literal, so one would end it.) */
+  .dialog.docked {
+    top: var(--question-dock-gutter);
+    right: var(--question-dock-gutter);
+    bottom: auto;
+    width: auto;
+    max-height: calc(100vh - 2 * var(--question-dock-gutter));
+    transform: none;
+  }
+
+  /* The collapsed variant: the question parked as its own header.
+   *
+   * The fallback's fallback. A question is docked beside the chat because its
+   * options are written about the transcript; where there is no room to dock,
+   * the centred modal covers that transcript, and this is the way back to it
+   * without answering from memory or denying a question the user does want to
+   * answer (permission-dialog.md § Collapsing the modal fallback).
+   *
+   * Top-anchored rather than staying centred: a one-line bar hanging in the
+   * middle of the screen sits on the transcript it was collapsed to uncover,
+   * which is most of the point missed. Same gutter as the dock, so the two
+   * parked positions line up along the top edge.
+   *
+   * Width is held at the modal's own rather than hugging the header, because
+   * a bar that changed width with the length of the tool name would move the
+   * expand button under the pointer between one request and the next
+   * (§ Anti-Click-Through). The header's own ellipsis handles the overflow.
+   *
+   * (No backticks in this comment — the whole stylesheet is a tagged
+   * template literal, so one would end it.) */
+  .dialog.collapsed {
+    top: var(--question-dock-gutter);
+    bottom: auto;
+    transform: translateX(-50%);
+    max-height: none;
+  }
+
   /* ---------------- header ---------------- */
 
   header {
@@ -104,6 +162,36 @@ export const PERMISSION_DIALOG_STYLES = css`
 
   .countdown.amber { color: #d29922; }
   .countdown.red { color: #f85149; font-weight: 600; }
+
+  /* Collapse / expand, at the right edge of the header after the countdown.
+   * Neutral and quiet on purpose: it is the one control here that decides
+   * nothing, and it must not read as a third option beside Allow and Deny.
+   * Sized and coloured off the chat panel's own minimize button so the two
+   * collapse gestures in the app look like one idea
+   * (chat-panel/styles.js § tab-strip-minimize). */
+  .collapse-toggle {
+    flex: 0 0 auto;
+    background: transparent;
+    border: none;
+    color: #8b949e;
+    padding: 0 4px;
+    margin: -4px -6px -4px 0;
+    cursor: pointer;
+    font-size: 14px;
+    line-height: 1;
+    border-radius: 4px;
+    transition: background 120ms ease, color 120ms ease;
+  }
+
+  .collapse-toggle:hover {
+    background: rgba(240, 246, 252, 0.08);
+    color: #e6edf3;
+  }
+
+  .collapse-toggle:focus-visible {
+    outline: 2px solid #58a6ff;
+    outline-offset: 1px;
+  }
 
   .attribution,
   .why {
@@ -347,7 +435,10 @@ export const PERMISSION_DIALOG_STYLES = css`
   }
 
   /* Narrow viewports stack it: a 3fr pane at 320px wide is a mockup with
-     one word per line, which misrepresents the thing being chosen. */
+     one word per line, which misrepresents the thing being chosen.
+     720px is QUESTION_DOCK_MIN_WIDTH in constants.js — the shell refuses to
+     dock a question into a region narrower than this precisely so a docked
+     comparison never lands on the stacked layout. Move one and move both. */
   @media (max-width: 720px) {
     .question-compare { grid-template-columns: 1fr; }
   }

@@ -110,9 +110,24 @@ See [permission-dialog.md](permission-dialog.md). It is hosted here rather than 
 because the panel can be minimized, docked, dragged mostly off-screen, or showing Settings, and a
 permission request has stalled the turn.
 
+### The shell measures where a question may dock
+
+An `interact` request renders non-modal beside the chat rather than over it
+([permission-dialog.md § Placement](permission-dialog.md#a-question-docks-beside-the-chat-instead)), and
+the one input it cannot work out for itself is where the shell's docked panel ends. The shell passes it
+down as `dockLeft`: the panel's right edge in viewport pixels when the chat is on screen and the region
+left over is wide enough, and null otherwise — which the dialog reads as "no room, be a modal".
+
+- **The same measurement as the viewer inset**, from one function, so the strip the viewer reserves and the region a question fills cannot drift apart by a pixel or disagree about whether the panel is docked at all
+- **Re-measured on the same triggers**: panel resize, minimize, undock, tab switch, window resize. It is taken *before* the inset is written, because the inset writes a custom property on the background and reading a rect after that write is what turns two cheap reads into a forced reflow on the resize-drag path
+- **Null on a non-`files` tab**, even though the panel's geometry is unchanged. The dock exists to keep the transcript readable, and behind the Context tab there is no transcript to keep
+- **Null below a floor the *dialog* supplies**, read off its `dockMinWidth` rather than restated here. Which floor applies depends on the layout the pending request will draw — 720px for a question comparing examples, 420px for a plain list — and that is the dialog's fact, not the panel's. Restating it here would be a copy that can disagree with what rendered
+- **Also re-measured when the dialog says the floor moved.** The triggers above are all ways the shell's *own* geometry changes, and none of them fire when a request arrives. That was safe while the floor was a constant; now the second question in a queue would inherit the first one's verdict, so the dialog emits `dock-requirement-changed` and the shell measures again. The inset is deliberately untouched on that path — the panel's right edge has not moved, only whether a question fits beside it
+
 ## Viewer Background
 
 - Background layer hosts the diff viewer and SVG viewer as siblings, filling the viewport to the right of the docked dialog
+- A docked `interact` question is drawn *over* this region rather than insetting it further. The viewer keeps its layout and its scroll position underneath, where insetting would relayout Monaco and refit every viewBox each time a question arrived and again when it was answered — a viewer that jumped twice per question, to make room for a panel that is gone in a few seconds
 - Only one is visible at a time — CSS class toggle with a short opacity transition
 - Routing by file extension determines which viewer receives each navigate-file event
 - Both viewers keep independent tab state; switching between file types just toggles the layer
@@ -166,6 +181,16 @@ tool exists for.
 - A reconnect re-pushes. Server-side viewer state is in memory and a reconnect usually means a restarted
   process, so the file still in front of the user is one the new process has never heard of
 - The **selection range is never sent** — only the file. See [`../next.md`](../next.md) § C7
+- **The `ClaudeCodeService` prefix is the legacy namespace, not the engine.** `engine_router` mounts
+  whichever adapter is master under that name, so this one call site serves all three engines and the
+  shell has nothing to switch on. That stopped being cosmetic on 2026-09-14: both Antigravity adapters
+  had been receiving this push and discarding it, so the file the user was looking at reached the model on
+  one engine of three, and the browser had no way to tell
+  ([`../plan-ag/decisions.md` AG-33](../plan-ag/decisions.md#ag-33)). Fixed in the adapters, not here.
+  What the state feeds does still differ one way: the `ui_state` tool is Claude's, because `agy`'s only
+  MCP server is the consultation listener
+  ([`../plan-ag/risks.md` AG-R-33](../plan-ag/risks.md#ag-r-33)), so on those engines the turn's framing
+  is the whole report — which is sound for a turn-scoped fact and is why nothing here pushes more often
 
 ### Reserved Strip
 
@@ -406,9 +431,42 @@ Alt+5 is bound even though nothing in the chrome advertises it, for the same rea
 Convert is absent: a bound-but-obscure key is a stable escape, and an unbound digit that silently does
 nothing is indistinguishable from a broken one. Alt+6 and above are unmapped and pass through.
 
-Every shortcut is suppressed while the permission dialog is open. It is modal, its focus is trapped, and
-Alt+2 opening the Context tab behind a pending `Bash` approval would be a distraction at the worst
-possible moment.
+Every shortcut is suppressed while a modal permission dialog is open — the list above, and Alt+Arrow file
+navigation, whose handler lives with the file grid ([`file-navigation.md`](file-navigation.md)). Each of
+them changes something the scrim is covering: Alt+digit switches the tab behind it, Alt+M collapses the
+panel behind it, and Ctrl+Shift+F moves focus to a search field the user cannot see, at the one moment
+focus is meant to be trapped in the dialog.
+
+Alt+Arrow is the case that is more than a distraction. A `write` request puts a Monaco diff on screen, and
+inside an editor Alt+Arrow is word navigation — so the grid handler, which runs capture-phase to get ahead
+of exactly that binding, would consume the keystroke the user aimed at the diff they are reading. The
+result is a caret that did not move and a file swapped in the viewer behind the scrim.
+
+A suppressed keystroke is **not** consumed. The handler declines it and lets it travel, so it reaches
+whatever holds focus inside the dialog. Swallowing it instead is how a suppressed shortcut becomes
+indistinguishable from a broken one, and in the Alt+Arrow case swallowing it is the whole bug.
+
+The shell asks the dialog whether it is currently modal rather than tracking the request queue itself.
+Modality has two inputs — the tool class and whether the shell found room beside the chat — and a second
+copy of that rule can disagree with the scrim actually on screen. Tracking would also mean mirroring a
+queue that drains on decisions, expiries, cancellations and other clients' answers, and a mirror stuck on
+"open" disables the keyboard for the rest of the session. A dialog element that has not upgraded yet
+reports not-modal, which is the right way round: a shortcut firing under a dialog is recoverable, a
+shortcut that silently stopped working is not.
+
+A docked `interact` question is the exception, because it is not modal and the UI behind it is genuinely
+live — suppressing the shortcuts would be claiming otherwise. Using one that takes the chat off screen
+(Alt+2, Alt+3, Alt+5) or the panel out of the dock (Alt+M) takes the dock's precondition with it, so the
+question re-centres as a modal rather than hanging beside a tab it was not placed against.
+
+**Alt+M is taken over by a question that could not be docked**, which is the one shortcut here the shell
+does not get the final say on. The dialog collapses to its header on that key
+([permission-dialog.md § Collapsing the modal fallback](permission-dialog.md#collapsing-the-modal-fallback)),
+and it cannot be a binding in the table above: the suppression rule turns every Alt shortcut off while the
+question is modal, which is exactly when collapsing it is the thing the user wants. The dialog's handler
+runs capture-phase on `window`, ahead of this one on `document`, and consumes the keystroke — which is also
+what stops Alt+M minimizing the shell's panel *as well* once the collapse has made the question non-modal.
+Requests with nothing to park never reach that branch, so Alt+M is the panel's as usual.
 
 ### Ctrl+Shift+F Selection Capture
 
@@ -447,7 +505,10 @@ Components dispatch toast events; the shell catches and renders them. Chat panel
 - Browser tab title reflects the current repo name with no prefix, except while permission requests are pending, when it carries the pending marker and count
 - The startup overlay is dismissed exactly once per connection lifecycle (first connect)
 - The permission dialog is mounted for the shell's entire lifetime and renders above every other surface, including the startup overlay
-- Global keyboard shortcuts are inert while the permission dialog is open
+- Global keyboard shortcuts — including Alt+Arrow — are inert while a modal permission dialog is open, and a suppressed keystroke is declined rather than consumed, so it reaches whatever holds focus inside the dialog
+- Modality is asked of the dialog, never re-derived by the shell; a not-yet-upgraded dialog reports not-modal
+- A docked `interact` question leaves the shortcuts live, and any shortcut that removes the dock's precondition re-centres it as a modal
+- One function measures the docked panel's right edge. The viewer inset and the question dock both read it, so they can never disagree about where the panel ends or whether it is docked at all
 - The permission-mode indicator remains visible in every dialog layout state, including minimized
 - The context-capacity bar is fed only by pushed or tab-initiated context snapshots; it never issues its own RPC
 - The compaction indicator never displays a percentage or an `aria-valuenow`, and never stays active longer than its ceiling: the engine reports only the start and the end of a compaction, so anything between the two would be invented, and a spinner nothing retracts is worse than no notice at all

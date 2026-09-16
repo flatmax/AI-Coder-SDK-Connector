@@ -834,3 +834,135 @@ class TestConsultantModel:
         monkeypatch.setattr("aic_dc.agy.service.AgyService._list_models", _flaky)
         assert asyncio.run(settings.get_consultant_model())["models"] == []
         assert asyncio.run(settings.get_consultant_model())["models"] != []
+
+
+class TestTheAgyGateSurface:
+    """Where the gate lives, and the permission AG-21 gave back.
+
+    These three RPCs existed because the hook was installed **globally**,
+    into ``~/.gemini/config/hooks.json``. While it was there, every ``agy``
+    the user started by hand ran our hook through our socket — sessions
+    this app has nothing to do with, gated by a process that might not be
+    running. That is a thing to be asked about, so there was a button and
+    no default.
+
+    AG-21 moved the hook into a config root this app creates and spawns
+    ``agy`` against. Nothing outside ``<config_dir>/agy-roots`` is written
+    any more, so the asking is over — but the surface is kept, because "is
+    my ``agy`` gated" is still a fair question to be able to ask with no
+    engine running, and because somebody has to take the old global entry
+    back out.
+    """
+
+    def _master_hooks(self, config):
+        from aic_dc.agy import roots
+
+        return roots.hooks_file(roots.master_root(config.config_dir))
+
+    def test_installing_writes_into_the_private_root(self, settings, config):
+        report = settings.install_agy_gate()
+        assert report["state"] == "current"
+        assert self._master_hooks(config).is_file()
+
+    def test_installing_does_not_touch_the_users_own_file(
+        self, settings, tmp_path, monkeypatch
+    ):
+        """The whole of what AG-21 bought, in one assertion."""
+        from aic_dc.agy import install
+
+        theirs = tmp_path / "their-hooks.json"
+        monkeypatch.setattr(install, "GLOBAL_HOOKS", theirs)
+        settings.install_agy_gate()
+        assert not theirs.exists()
+
+    def test_the_status_reports_the_private_root(self, settings, config):
+        assert settings.get_agy_gate()["state"] == "absent"
+        settings.install_agy_gate()
+        report = settings.get_agy_gate()
+        assert report["state"] == "current"
+        assert report["path"] == str(self._master_hooks(config))
+
+    def test_a_pre_ag21_entry_in_the_users_file_is_reported(
+        self, settings, tmp_path, monkeypatch
+    ):
+        """Because this app is what put it there.
+
+        A user who granted that permission is entitled to be told it is
+        still in force. Silence would be the worst version of the change:
+        the code stops writing there, the entry stays, and nothing in the
+        app admits it.
+        """
+        from aic_dc.agy import install
+
+        theirs = tmp_path / "their-hooks.json"
+        monkeypatch.setattr(install, "GLOBAL_HOOKS", theirs)
+        install.install(tmp_path / "cfg", path=theirs)
+
+        report = settings.get_agy_gate()
+        assert report["legacy_global"]["path"] == str(theirs)
+        assert report["legacy_global"]["state"] in {"current", "stale"}
+
+    def test_a_clean_machine_reports_no_legacy_entry(
+        self, settings, tmp_path, monkeypatch
+    ):
+        from aic_dc.agy import install
+
+        monkeypatch.setattr(install, "GLOBAL_HOOKS", tmp_path / "their-hooks.json")
+        assert settings.get_agy_gate()["legacy_global"]["state"] == "absent"
+
+    def test_uninstalling_removes_both(self, settings, config, tmp_path, monkeypatch):
+        """Leaving the global one behind would keep intercepting sessions
+        this app knows nothing about, forever, with no surface that even
+        mentions it."""
+        from aic_dc.agy import install
+
+        theirs = tmp_path / "their-hooks.json"
+        monkeypatch.setattr(install, "GLOBAL_HOOKS", theirs)
+        install.install(tmp_path / "cfg", path=theirs)
+        settings.install_agy_gate()
+
+        result = settings.uninstall_agy_gate()
+
+        assert result["removed"] is True
+        assert result["removed_legacy_global"] is True
+        assert not self._master_hooks(config).exists()
+        assert not theirs.exists()
+
+    def test_uninstalling_leaves_a_strangers_other_hooks_alone(
+        self, settings, tmp_path, monkeypatch
+    ):
+        """The file may be theirs even though our entry is not."""
+        from aic_dc.agy import install
+
+        theirs = tmp_path / "their-hooks.json"
+        monkeypatch.setattr(install, "GLOBAL_HOOKS", theirs)
+        install.install(tmp_path / "cfg", path=theirs)
+        data = json.loads(theirs.read_text(encoding="utf-8"))
+        data["their-lint-hook"] = {"PreToolUse": []}
+        theirs.write_text(json.dumps(data), encoding="utf-8")
+
+        settings.uninstall_agy_gate()
+
+        left = json.loads(theirs.read_text(encoding="utf-8"))
+        assert list(left) == ["their-lint-hook"]
+
+    def test_a_broken_command_is_refused_rather_than_written(
+        self, settings, config, monkeypatch
+    ):
+        """`install` probes before it writes, and the button is now mostly
+        a way to turn "the gate is stale" into a sentence saying why."""
+        from aic_dc.agy import install
+
+        monkeypatch.setattr(
+            install, "hook_runs", lambda *_a, **_k: "exit 127: no such file"
+        )
+        report = settings.install_agy_gate()
+        assert report["state"] == "unrunnable"
+        assert not self._master_hooks(config).exists()
+
+    def test_both_writes_are_localhost_only(self, settings):
+        """They write outside the repository, which is the rule's whole
+        criterion — a private root is still not the caller's to change."""
+        settings._collab = _StubCollab(is_localhost=False)
+        _assert_restricted(settings.install_agy_gate())
+        _assert_restricted(settings.uninstall_agy_gate())

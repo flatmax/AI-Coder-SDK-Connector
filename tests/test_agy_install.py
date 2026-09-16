@@ -1,27 +1,30 @@
-"""Tests for installing the gate into the user's own ``agy`` configuration.
+"""Tests for installing the gate into an ``agy`` configuration root.
 
-This is the module that writes **outside the repository**, into a file
-belonging to Google's CLI that the user may already be using. So the
-assertions here are mostly about restraint: what it must not touch, what
-it must not overwrite, and what happens to *their* sessions when ours is
-not running.
+This module writes **outside the repository**, into a file belonging to
+Google's CLI. Until 2026-09-11 that file was the user's own, shared with
+every ``agy`` they started by hand, so the assertions here were mostly
+about restraint: what it must not touch, what it must not overwrite, and
+what happened to *their* sessions when ours was not running.
 
-The one that matters most is the fallback. ``agy`` **blocks a tool** when
-a hook command cannot be run — exit 127, measured — so a stale entry
-pointing at a deleted virtualenv would stop the user's own ``agy`` working
-entirely. The installed command is wrapped so that cannot happen, and the
-reasoning is only sound because our hook exits 0 on every path it
-controls: a non-zero exit means the interpreter never started, which means
-this host owns nothing, which means allow is right.
+**AG-21 changed who owns the file, and the sharpest test in this module
+inverted with it.** The hook now goes into a config root this app creates
+and spawns ``agy`` against, so the only sessions it can reach are ours.
+``agy`` still **blocks a tool** when a hook command cannot be run — exit
+127, measured — and that is now the *correct* outcome rather than
+collateral damage, so the ``|| printf '{"decision":"allow"}'`` clause
+every command used to end with is deleted rather than replaced. What the
+old clause bought was a stranger's uninterrupted session; what it cost was
+a gate that reported itself installed and allowed everything. The trade
+only ever made sense while the file was somebody else's.
 
-**And the second thing that matters is the edge of that reasoning**, added
-2026-09-05. "A non-zero exit means the interpreter never started" is true
-only while the command's *shape* is right. On a PyInstaller build it was
-not: ``sys.executable`` is the frozen binary, which does not honour
-``-m``, so the command exited 2 on every call of a session this host did
-own — an ungated agent, with Settings reporting the gate installed,
-because ``status`` compares command strings and the string was correct.
-``TestTheCommandMustActuallyRun`` is that hole, closed from both ends.
+The clause is still *recognised*: an entry written before 2026-09-11 still
+carries it, and reading such an entry as healthy would be the same failure
+one release later. ``TestTheCommandMustActuallyRun`` covers that from both
+ends, along with the hole it was written for — on a PyInstaller build
+``sys.executable`` is the frozen binary, which does not honour ``-m``, so
+the command exited 2 on every call of a session this host did own, with
+Settings reporting the gate installed because ``status`` compares command
+strings and the string was correct.
 
 Offline. Never touches the real ``~/.gemini``.
 """
@@ -37,6 +40,23 @@ import pytest
 from aic_dc.agy import install
 
 
+@pytest.fixture(autouse=True)
+def _forget_probes():
+    """The probe cache is per-process, and a test process is many installs.
+
+    :func:`install.hook_runs` memoises a verdict per ``(command, event)``
+    so that AG-21's fresh-root-per-consultation does not pay three
+    interpreter startups every time. That reasoning holds in the server —
+    the command names *this* interpreter and *this* package, and neither
+    moves while it runs — and does not hold here, where a test's whole job
+    is to make the same string answer differently. Cleared between tests so
+    one test's monkeypatch cannot decide the next one's verdict.
+    """
+    install._PROBE_CACHE.clear()
+    yield
+    install._PROBE_CACHE.clear()
+
+
 @pytest.fixture
 def hooks(tmp_path):
     return tmp_path / "hooks.json"
@@ -47,26 +67,40 @@ def cfg(tmp_path):
     return tmp_path / "cfg"
 
 
-def _write_entry(hooks, command):
-    """Put a hook entry on disk without going through ``install``.
+def _write_entry(hooks, config_dir, python=None):
+    """Put a whole hook entry on disk without going through ``install``.
 
-    For the states ``install`` now refuses to create. Same shape it
-    writes, so ``status`` reads it the same way.
+    For the states ``install`` now refuses to create — an entry naming an
+    interpreter or a config directory that is not this one. Built by
+    ``install.hook_entry``, so it is the shape this build writes and
+    ``status`` reads it the same way; what varies is only what the test
+    varies.
     """
     hooks.write_text(
-        json.dumps(
-            {
-                install.HOOK_NAME: {
-                    "PreToolUse": [
-                        {
-                            "matcher": "*",
-                            "hooks": [{"type": "command", "command": command}],
-                        }
-                    ]
-                }
-            }
-        ),
+        json.dumps({install.HOOK_NAME: install.hook_entry(config_dir, python)}),
         encoding="utf-8",
+    )
+
+
+def _write_raw_entry(hooks, command, *, events=install.hook.EVENTS):
+    """An entry built from one command string, for the hand-edited cases.
+
+    ``events`` narrows what is written, which is how a **pre-AG-19**
+    install is reproduced: a gate and nothing else, in a file that predates
+    the invocation handlers. Any subset is expressible, because since AG-32
+    "an older install" is no longer one shape — an entry can be missing the
+    stop, or the guidance, or both.
+    """
+    entry = {}
+    if install.hook.PRE_TOOL_USE in events:
+        entry[install.hook.PRE_TOOL_USE] = [
+            {"matcher": "*", "hooks": [{"type": "command", "command": command}]}
+        ]
+    for event in install.hook.INVOCATION_EVENTS:
+        if event in events:
+            entry[event] = [{"type": "command", "command": command}]
+    hooks.write_text(
+        json.dumps({install.HOOK_NAME: entry}), encoding="utf-8"
     )
 
 
@@ -99,7 +133,7 @@ class TestDetection:
         the state through the function that now prevents it would be
         asserting the old behaviour with new words.
         """
-        _write_entry(hooks, install.hook_command(cfg, "/somewhere/else/python"))
+        _write_entry(hooks, cfg, "/somewhere/else/python")
         report = install.status(cfg, path=hooks)
         assert report["state"] == "stale"
         assert "/somewhere/else/python" in report["command"]
@@ -123,7 +157,7 @@ class TestDetection:
         alias = venv / "python"
         alias.symlink_to(real)
 
-        _write_entry(hooks, install.hook_command(cfg, str(real)))
+        _write_entry(hooks, cfg, str(real))
         assert install.status(cfg, path=hooks, python=str(alias))["state"] == "current"
 
     def test_two_virtualenvs_are_stale_even_sharing_one_binary(
@@ -145,7 +179,7 @@ class TestDetection:
             where.mkdir(parents=True)
             (where / "python").symlink_to(system)
 
-        _write_entry(hooks, install.hook_command(cfg, str(theirs / "python")))
+        _write_entry(hooks, cfg, str(theirs / "python"))
         report = install.status(cfg, path=hooks, python=str(ours / "python"))
         assert report["state"] == "stale"
 
@@ -156,12 +190,12 @@ class TestDetection:
         from, and an entry naming another one would gate a different
         registry — the same interpreter is not the same install.
         """
-        _write_entry(hooks, install.hook_command(tmp_path / "other-cfg"))
+        _write_entry(hooks, tmp_path / "other-cfg")
         assert install.status(cfg, path=hooks)["state"] == "stale"
 
     def test_an_unbalanced_quote_reads_as_stale(self, hooks, cfg):
         """Hand-edited and unparseable, so it is not claimed as ours."""
-        _write_entry(hooks, "'/usr/bin/python -m aic_dc.agy.hook /cfg")
+        _write_raw_entry(hooks, "'/usr/bin/python -m aic_dc.agy.hook /cfg")
         assert install.status(cfg, path=hooks)["state"] == "stale"
 
     def test_unreadable_is_reported_rather_than_guessed(self, hooks, cfg):
@@ -205,14 +239,14 @@ class TestOneInterpreterWithTwoNames:
         self, hooks, cfg, tmp_path
     ):
         binaries = self._venv(tmp_path)
-        _write_entry(hooks, install.hook_command(cfg, str(binaries / "python3")))
+        _write_entry(hooks, cfg, str(binaries / "python3"))
         report = install.status(cfg, path=hooks, python=str(binaries / "python"))
         assert report["state"] == "current"
 
     def test_a_second_checkout_is_still_stale(self, hooks, cfg, tmp_path):
         ours = self._venv(tmp_path, "ours")
         theirs = self._venv(tmp_path, "theirs")
-        _write_entry(hooks, install.hook_command(cfg, str(theirs / "python")))
+        _write_entry(hooks, cfg, str(theirs / "python"))
         report = install.status(cfg, path=hooks, python=str(ours / "python"))
         assert report["state"] == "stale"
 
@@ -220,10 +254,7 @@ class TestOneInterpreterWithTwoNames:
         self, hooks, cfg, tmp_path
     ):
         binaries = self._venv(tmp_path)
-        _write_entry(
-            hooks,
-            install.hook_command(tmp_path / "another-config", str(binaries / "python3")),
-        )
+        _write_entry(hooks, tmp_path / "another-config", str(binaries / "python3"))
         report = install.status(cfg, path=hooks, python=str(binaries / "python"))
         assert report["state"] == "stale"
 
@@ -231,7 +262,7 @@ class TestOneInterpreterWithTwoNames:
         self, hooks, cfg, tmp_path
     ):
         binaries = self._venv(tmp_path)
-        _write_entry(hooks, install.hook_command(cfg, str(binaries / "python9")))
+        _write_entry(hooks, cfg, str(binaries / "python9"))
         report = install.status(cfg, path=hooks, python=str(binaries / "python"))
         assert report["state"] == "stale"
 
@@ -302,28 +333,34 @@ class TestTheInstalledCommand:
         handler = data[install.HOOK_NAME]["PreToolUse"][0]["hooks"][0]
         assert handler["timeout"] >= 600
 
-    def test_a_missing_interpreter_allows_rather_than_blocking(self, tmp_path):
-        """The failure that would otherwise break standalone `agy` entirely.
+    def test_a_missing_interpreter_blocks_rather_than_allowing(self, tmp_path):
+        """AG-21, and the inversion of what this file used to assert.
 
-        `agy` blocks a tool whose hook command cannot run — exit 127. A
-        stale entry pointing at a deleted virtualenv would therefore stop
-        the user's own sessions working, with an error naming a program
-        they may not recognise. Run here as a real shell command, because
-        the guarantee is the shell's `||` and not anything in Python.
+        The command prints nothing and exits non-zero, which is what `agy`
+        reads as "block the tool". That used to be unacceptable because the
+        entry lived in the user's own configuration and their interactive
+        sessions would have stopped working; it is now correct, because the
+        only sessions that read this entry are ones this app spawned, and a
+        session whose gate cannot start is a session that must not run.
 
-        The reasoning is sound rather than merely convenient: our hook
-        exits 0 on every path it controls, so a non-zero exit means the
-        interpreter never started, so this host owns nothing, so allow is
-        correct.
+        Run as a real shell command, because the claim is about what the
+        shell does with the string and not about anything in Python.
         """
         command = install.hook_command(tmp_path / "cfg", python="/no/such/python")
         done = subprocess.run(
             ["sh", "-c", command], input="{}", capture_output=True, text=True
         )
-        assert json.loads(done.stdout) == {"decision": "allow"}
+        assert done.returncode != 0
+        assert done.stdout.strip() == "", "a failed hook printed a decision anyway"
 
     def test_a_working_interpreter_answers_for_itself(self, tmp_path):
-        """And the fallback does not fire when the hook does run."""
+        """And there is exactly one object on stdout, not two.
+
+        The deleted clause *appended*: a runner that died after emitting a
+        partial object would have produced that object followed by a
+        second, which is not JSON at all — so the fallback broke parsing in
+        precisely the case it was added for.
+        """
         command = install.hook_command(tmp_path / "cfg", python=sys.executable)
         done = subprocess.run(
             ["sh", "-c", command],
@@ -334,8 +371,6 @@ class TestTheInstalledCommand:
             text=True,
             timeout=120,
         )
-        # One decision, not two: the fallback appending a second object
-        # would make the output unparseable.
         assert json.loads(done.stdout) == {"decision": "allow"}
 
 
@@ -380,13 +415,19 @@ class TestTheCommandMustActuallyRun:
         command = install.hook_command(cfg, "/elsewhere/bin/python")
         assert " -m aic_dc.agy.hook " in command
 
-    def test_the_fallback_survives_both_forms(self, cfg, monkeypatch):
-        """It is what keeps a stranger's agy working when we are not."""
+    def test_neither_form_carries_a_fallback(self, cfg, monkeypatch):
+        """Frozen or not, the command is the command and nothing else.
+
+        The shape mattered: the frozen build got the *invocation* wrong and
+        the fallback is what turned that into a silent allow instead of a
+        loud failure. Asserted on both forms because the bug lived in the
+        difference between them.
+        """
         for frozen in (True, False):
             monkeypatch.setattr(install.sys, "frozen", frozen, raising=False)
-            assert install.hook_command(cfg).endswith(
-                """|| printf '{"decision":"allow"}'"""
-            )
+            command = install.hook_command(cfg)
+            assert "||" not in command
+            assert "printf" not in command
 
     def test_the_real_command_answers_a_probe(self, cfg):
         assert install.hook_runs(install.hook_command(cfg)) == ""
@@ -473,3 +514,407 @@ class TestTheCliEntryPointTheFrozenBuildNeeds:
         from aic_dc import cli
 
         assert "--agy-hook" not in cli._build_parser().format_help()
+
+
+class TestFourHandlersUnderOneName:
+    """AG-19 added a ``PostInvocation`` handler, AG-R-16 a ``Stop`` one and
+    AG-32 a ``PreInvocation`` one.
+
+    They go under the same hook name as the gate, because ``agy`` merges
+    named hooks per event and one name is what lets ``uninstall`` remove
+    exactly what was added — and because a user reading their own
+    ``hooks.json`` should see one thing belonging to this app, not four.
+    """
+
+    def test_every_event_is_registered(self, hooks, cfg):
+        install.install(cfg, path=hooks)
+        entry = json.loads(hooks.read_text())[install.HOOK_NAME]
+        assert set(entry) == {
+            "PreToolUse",
+            "PreInvocation",
+            "PostInvocation",
+            "Stop",
+        }
+
+    def test_the_registered_events_are_the_ones_the_hook_knows(self, hooks, cfg):
+        """One list, in :data:`hook.EVENTS`, and not a second one here.
+
+        An event written into the file that :func:`hook.parse_argv` does
+        not recognise installs a handler that answers as the *gate* — so
+        ``agy`` would be handed a ``decision`` at an event whose vocabulary
+        has none, or worse, the reverse.
+        """
+        install.install(cfg, path=hooks)
+        entry = json.loads(hooks.read_text())[install.HOOK_NAME]
+        assert set(entry) == set(install.hook.EVENTS)
+
+    def test_the_gate_is_grouped_and_the_others_are_flat(self, hooks, cfg):
+        """Two shapes, and writing the wrong one is a handler that never
+        fires. ``hooks.md``: the invocation events take a list of handlers
+        directly, with no ``matcher`` — there is no tool to match on.
+        """
+        install.install(cfg, path=hooks)
+        entry = json.loads(hooks.read_text())[install.HOOK_NAME]
+        assert entry["PreToolUse"][0]["matcher"] == "*"
+        assert "hooks" in entry["PreToolUse"][0]
+        for event in ("PreInvocation", "PostInvocation", "Stop"):
+            assert "matcher" not in entry[event][0]
+            assert entry[event][0]["type"] == "command"
+            assert entry[event][0]["command"]
+
+    def test_each_event_names_itself_in_its_command(self, hooks, cfg):
+        install.install(cfg, path=hooks)
+        entry = json.loads(hooks.read_text())[install.HOOK_NAME]
+        assert "--event" not in entry["PreToolUse"][0]["hooks"][0]["command"]
+        assert "--event PreInvocation" in entry["PreInvocation"][0]["command"]
+        assert "--event PostInvocation" in entry["PostInvocation"][0]["command"]
+        assert "--event Stop" in entry["Stop"][0]["command"]
+
+    def test_the_gates_command_is_unchanged(self, cfg):
+        """An install written before AG-19 must still read as *this*
+        interpreter, so the thing that is wrong with it is the handlers it
+        does not have rather than the one it does."""
+        assert install.hook_command(cfg) == install.hook_command(
+            cfg, event="PreToolUse"
+        )
+        assert "--event" not in install.hook_command(cfg)
+
+    def test_no_event_carries_a_shell_fallback(self, cfg):
+        """All three lost theirs together, and for one reason.
+
+        The gate's was ``{"decision":"allow"}`` and the invocation hooks'
+        was ``{}`` — different verdicts, the same premise, that the entry
+        lived in a file shared with sessions this app knows nothing about.
+        AG-21 retired the premise, so all of them go rather than the
+        loudest one. ``PreInvocation`` never had one to lose: it is newer
+        than AG-21, which is why :data:`install.LEGACY_FALLBACKS` has no
+        entry for it and this reads the commands rather than that table.
+        """
+        for event, command in install.hook_commands(cfg).items():
+            assert "||" not in command, event
+            assert "printf" not in command, event
+
+    def test_the_invocation_deadline_is_not_the_dialogs(self, hooks, cfg):
+        """An hour is for a human reading a diff. Nothing waits on a human
+        here, and the documented default of 30s is a value we never chose.
+        """
+        install.install(cfg, path=hooks)
+        entry = json.loads(hooks.read_text())[install.HOOK_NAME]
+        assert entry["PreToolUse"][0]["hooks"][0]["timeout"] == 3600
+        for event in ("PreInvocation", "PostInvocation", "Stop"):
+            assert entry[event][0]["timeout"] == install.INVOCATION_TIMEOUT_SECONDS
+            assert entry[event][0]["timeout"] < 3600
+
+    def test_uninstalling_still_removes_exactly_one_entry(self, hooks, cfg):
+        hooks.write_text(json.dumps({"my-linter": {"PostToolUse": []}}), encoding="utf-8")
+        install.install(cfg, path=hooks)
+        assert install.uninstall(path=hooks) is True
+        assert json.loads(hooks.read_text()) == {"my-linter": {"PostToolUse": []}}
+
+
+class TestAnEntryThatPredatesTheStop:
+    """A gate with no stop is ``stale``, and the reasoning is the subject.
+
+    It is a working gate: the tree is still reviewed on every tool call.
+    What it does not have is the mechanism ⏹ is documented to be, so a
+    user pressing stop would get the starvation AG-19 replaced while the
+    panel said the gate was current. A control that reports itself a
+    mechanism while being a request is the same shape of untruth as an
+    ungated agent reporting itself gated, and this state exists to refuse
+    it. The cost is one click, and it converges; calling it ``current``
+    would leave the mechanism unarmed and silent forever.
+    """
+
+    def test_a_gate_only_entry_is_stale(self, hooks, cfg):
+        _write_raw_entry(hooks, install.hook_command(cfg), events=("PreToolUse",))
+        assert install.status(cfg, path=hooks)["state"] == "stale"
+
+    def test_it_names_what_is_missing(self, hooks, cfg):
+        _write_raw_entry(hooks, install.hook_command(cfg), events=("PreToolUse",))
+        report = install.status(cfg, path=hooks)
+        assert report["missing_events"] == [
+            "PreInvocation",
+            "PostInvocation",
+            "Stop",
+        ]
+
+    def test_the_detail_says_the_gate_still_works(self, hooks, cfg):
+        """Two causes reach ``stale`` and a user can act on only one of
+        them if they are told which."""
+        _write_raw_entry(hooks, install.hook_command(cfg), events=("PreToolUse",))
+        detail = install.status(cfg, path=hooks)["detail"]
+        assert "still reviewing every tool call" in detail
+        assert "starve" in detail
+
+        _write_entry(hooks, cfg, "/somewhere/else/python")
+        assert "different install" in install.status(cfg, path=hooks)["detail"]
+
+    def test_the_detail_explains_only_the_handlers_that_are_missing(
+        self, hooks, cfg
+    ):
+        """AG-32's cost, and the reason the explanation is per event.
+
+        An entry written the day before AG-32 has both invocation handlers
+        and no ``PreInvocation``. Telling that user their ⏹ would starve a
+        turn would be a confident, false account of a true state — their
+        stop works; what does not is the guidance.
+        """
+        _write_raw_entry(
+            hooks,
+            install.hook_command(cfg),
+            events=("PreToolUse", "PostInvocation", "Stop"),
+        )
+        report = install.status(cfg, path=hooks)
+        assert report["missing_events"] == ["PreInvocation"]
+        detail = report["detail"]
+        assert "ArtifactMetadata" in detail
+        assert "starve" not in detail
+        assert "unrecorded" not in detail
+
+    def test_reinstalling_makes_it_current(self, hooks, cfg):
+        _write_raw_entry(hooks, install.hook_command(cfg), events=("PreToolUse",))
+        install.install(cfg, path=hooks)
+        report = install.status(cfg, path=hooks)
+        assert report["state"] == "current"
+        assert "detail" not in report
+
+    def test_a_missing_stop_alone_is_enough(self, hooks, cfg):
+        _write_raw_entry(
+            hooks,
+            install.hook_command(cfg),
+            events=("PreToolUse", "PreInvocation", "PostInvocation"),
+        )
+        report = install.status(cfg, path=hooks)
+        assert report["state"] == "stale"
+        assert report["missing_events"] == ["Stop"]
+
+    def test_yesterdays_complete_install_reads_stale(self, hooks, cfg):
+        """Intended rather than tolerated — AG-32.
+
+        Adding a fourth handler makes every existing install stale, which
+        stops the engine until the user reinstalls. The alternative is an
+        entry that reports itself current while a handler this build
+        registers is absent, which is the untruth :func:`status` exists to
+        refuse. It costs one click and it converges.
+        """
+        _write_raw_entry(
+            hooks,
+            install.hook_command(cfg),
+            events=("PreToolUse", "PostInvocation", "Stop"),
+        )
+        assert install.status(cfg, path=hooks)["state"] == "stale"
+        install.install(cfg, path=hooks)
+        assert install.status(cfg, path=hooks)["state"] == "current"
+
+
+class TestEveryCommandIsProbed:
+    """The frozen-binary bug was a correct string naming an unrunnable
+    command. The four commands differ by an argument, which is exactly
+    what that bug got wrong — so probing one and writing four would leave
+    the same gap one event to the left.
+    """
+
+    def test_there_is_a_probe_payload_for_every_event(self, cfg):
+        """A command probed with the wrong payload is barely probed.
+
+        :data:`install._PROBES` is keyed by event and a missing key would
+        make the new handler answer a payload shaped like another event's —
+        which every handler here does answer, harmlessly, so the probe
+        would pass while testing nothing about the shape ``agy`` sends.
+        """
+        assert set(install._PROBES) == set(install.hook.EVENTS)
+        assert "invocationNum" in install._PROBES[install.hook.PRE_INVOCATION]
+
+    def test_the_real_commands_all_answer(self, cfg):
+        for event, command in install.hook_commands(cfg).items():
+            assert install.hook_runs(command, event=event) == ""
+
+    @pytest.mark.parametrize("event", ["PreInvocation", "PostInvocation", "Stop"])
+    def test_an_invocation_hook_may_answer_with_no_decision(self, cfg, event):
+        """``{}`` is this event's correct answer and the gate's forbidden
+        one, so the probe cannot demand a ``decision`` from both."""
+        command = install.hook_commands(cfg)[event]
+        assert install.hook_runs(command, event=event) == ""
+        assert install.hook_runs(command, event="PreToolUse") != ""
+
+    def test_a_command_that_is_not_an_object_is_refused(self):
+        assert install.hook_runs("printf '[]'", event="Stop") != ""
+
+    def test_a_broken_invocation_command_refuses_the_whole_install(
+        self, hooks, cfg, monkeypatch
+    ):
+        """And names the event, because "the gate does not run" would send
+        the user looking at the part that does."""
+        real = install.hook_runs
+
+        def only_the_gate_works(command, *, event=install.hook.PRE_TOOL_USE, **kw):
+            if event == "Stop":
+                return "exit 2: unrecognized arguments"
+            return real(command, event=event, **kw)
+
+        monkeypatch.setattr(install, "hook_runs", only_the_gate_works)
+        report = install.install(cfg, path=hooks)
+        assert report["state"] == "unrunnable"
+        assert report["event"] == "Stop"
+        assert "Stop command" in report["detail"]
+        assert not hooks.exists()
+
+
+class TestALegacyEntryIsNotHealthy:
+    """An install written before AG-21 still carries the fail-open clause.
+
+    Recognising it is the whole reason :data:`install.LEGACY_FALLBACKS`
+    survived the deletion. An entry that ends in ``|| printf
+    '{"decision":"allow"}'`` names this interpreter, this package and this
+    config directory — everything ``status`` used to compare — and is
+    exactly the gate that reports itself current while waving tool calls
+    through. Reading it as healthy would repeat the frozen-binary incident
+    one release later.
+    """
+
+    def _legacy(self, hooks, cfg):
+        entry = install.hook_entry(cfg)
+        for event, tail in install.LEGACY_FALLBACKS.items():
+            handlers = entry[event]
+            handler = handlers[0].get("hooks", [handlers[0]])[0]
+            handler["command"] += tail
+        hooks.write_text(json.dumps({install.HOOK_NAME: entry}), encoding="utf-8")
+
+    def test_it_reads_as_stale_rather_than_current(self, hooks, cfg):
+        self._legacy(hooks, cfg)
+        assert install.status(cfg, path=hooks)["state"] == "stale"
+
+    def test_the_reason_names_the_fallback_and_not_another_checkout(
+        self, hooks, cfg
+    ):
+        """The two causes of `stale` need different actions from a reader.
+
+        "Another checkout owns this file" sends someone looking at their
+        other clone; "this predates AG-21" tells them the truth, which is
+        that the gate in front of them fails open.
+        """
+        self._legacy(hooks, cfg)
+        detail = install.status(cfg, path=hooks)["detail"]
+        assert "fail-open" in detail
+        assert "different install" not in detail
+
+    def test_reinstalling_removes_it(self, hooks, cfg):
+        self._legacy(hooks, cfg)
+        report = install.install(cfg, path=hooks)
+        assert report["state"] == "current"
+        assert "printf" not in hooks.read_text(encoding="utf-8")
+
+    def test_the_probe_strips_it_before_judging(self):
+        """Otherwise the clause answers the probe on the hook's behalf.
+
+        ``false || printf '{"decision":"allow"}'`` exits 0 and prints a
+        perfectly well-formed decision, so a probe that ran the whole
+        string would certify a broken gate as working — which is the one
+        outcome this function exists to prevent.
+        """
+        assert install.hook_runs(
+            """false || printf '{"decision":"allow"}'"""
+        ) != ""
+
+
+class TestInstallable:
+    """"Would it install" — the question AG-21's ephemeral roots created.
+
+    A consultation gets a fresh config root and writes its own hook into
+    it, so before one starts there is no file to inspect: `status` would
+    answer ``absent`` about a gate that is going to work perfectly. What a
+    caller actually wants to know is whether the commands can run.
+    """
+
+    def test_a_working_install_is_ready(self, cfg):
+        assert install.installable(cfg)["state"] == "ready"
+
+    def test_it_writes_nothing(self, cfg, tmp_path):
+        before = sorted(p.name for p in tmp_path.iterdir())
+        install.installable(cfg)
+        assert sorted(p.name for p in tmp_path.iterdir()) == before
+        assert not (tmp_path / "hooks.json").exists()
+
+    def test_a_broken_interpreter_is_unrunnable_and_says_why(
+        self, cfg, monkeypatch
+    ):
+        monkeypatch.setattr(install.sys, "executable", "/nope/not/a/python")
+        report = install.installable(cfg)
+        assert report["state"] == "unrunnable"
+        assert report["detail"]
+
+    def test_it_names_the_event_that_failed(self, cfg, monkeypatch):
+        """Three commands differ by an argument, and an argument is what
+        the frozen build got wrong. "The gate does not run" would send a
+        reader to the part that does."""
+        real = install.hook_runs
+
+        def only_stop_is_broken(command, *, event=install.hook.PRE_TOOL_USE, **kw):
+            if event == "Stop":
+                return "exit 2: unrecognized arguments"
+            return real(command, event=event, **kw)
+
+        monkeypatch.setattr(install, "hook_runs", only_stop_is_broken)
+        report = install.installable(cfg)
+        assert report["state"] == "unrunnable"
+        assert report["event"] == "Stop"
+
+
+class TestRetiringTheGlobalEntry:
+    """The hook this app used to install in the user's own configuration.
+
+    Before AG-21 it *was* the gate, and it fired for every ``agy`` the user
+    started by hand — including sessions this app has nothing to do with,
+    routed to a socket belonging to a process that may not be running. It
+    carried the ``|| printf '{"decision":"allow"}'`` fallback, so those
+    sessions failed open rather than hanging, which is exactly what made
+    the arrangement easy not to notice.
+
+    AG-21's private root replaces it. A new machine never gets one; an
+    upgraded machine keeps one forever unless something takes it out, and
+    "the user's own ``agy`` is untouched" is false the whole time.
+    """
+
+    def test_it_removes_our_entry(self, tmp_path, monkeypatch):
+        theirs = tmp_path / "hooks.json"
+        monkeypatch.setattr(install, "GLOBAL_HOOKS", theirs)
+        install.install(tmp_path / "cfg", path=theirs)
+
+        assert install.retire_global() is True
+        assert not theirs.exists()
+
+    def test_a_clean_machine_is_a_no_op(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(install, "GLOBAL_HOOKS", tmp_path / "hooks.json")
+        assert install.retire_global() is False
+
+    def test_it_is_idempotent(self, tmp_path, monkeypatch):
+        theirs = tmp_path / "hooks.json"
+        monkeypatch.setattr(install, "GLOBAL_HOOKS", theirs)
+        install.install(tmp_path / "cfg", path=theirs)
+
+        assert install.retire_global() is True
+        assert install.retire_global() is False
+
+    def test_it_leaves_the_rest_of_the_file_alone(self, tmp_path, monkeypatch):
+        """Ours to remove; the file is not ours to delete."""
+        theirs = tmp_path / "hooks.json"
+        monkeypatch.setattr(install, "GLOBAL_HOOKS", theirs)
+        install.install(tmp_path / "cfg", path=theirs)
+        data = json.loads(theirs.read_text(encoding="utf-8"))
+        data["their-own-hook"] = {"PreToolUse": [{"command": "true"}]}
+        theirs.write_text(json.dumps(data), encoding="utf-8")
+
+        install.retire_global()
+
+        assert list(json.loads(theirs.read_text(encoding="utf-8"))) == [
+            "their-own-hook"
+        ]
+
+    def test_an_unparseable_file_is_not_touched(self, tmp_path, monkeypatch):
+        """They may be mid-edit, and a broken file is not a licence."""
+        theirs = tmp_path / "hooks.json"
+        theirs.write_text("{not json", encoding="utf-8")
+        monkeypatch.setattr(install, "GLOBAL_HOOKS", theirs)
+
+        assert install.retire_global() is False
+        assert theirs.read_text(encoding="utf-8") == "{not json"

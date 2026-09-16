@@ -173,6 +173,13 @@ does not move), and how it lost each of the two is the point of having it. § C7
 stale entry went in the same commit instead of surviving as an assertion that the gap it had just closed
 was still open.
 
+**What that told us and what it could not.** § C7's finding was *no writer*, and wiring one settled it as
+far as this document can see: a method with a browser caller is not dormant. It was still doing nothing on
+two engines of three, because the adapter that received the push never read what it stored — found
+2026-09-14, [`../plan-ag/decisions.md` AG-33](../plan-ag/decisions.md#ag-33). An inventory of *calls*
+cannot catch that, and neither can the test it generates. The residue is worth naming here rather than
+only there: a live caller proves the wire, not the feature at the far end of it.
+
 § C8 wired `shutdown` from `main.py` and **nothing failed**, which is the other half of what the list is
 worth knowing. The browser direction is asserted both ways; the Python direction is only asserted for
 `INTERNAL_ONLY`, where an entry names a file and the call in it is checked. So a dormant method that

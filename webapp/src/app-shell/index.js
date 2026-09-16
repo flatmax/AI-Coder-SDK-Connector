@@ -58,9 +58,13 @@ import {
 } from './toasts.js';
 import { scheduleReconnect, attemptReconnect } from './reconnect.js';
 import {
+  installEventGate, holdEvents, releaseEvents, disposeEventGate,
+} from './event-gate.js';
+import {
   getDialogRect, onHeaderPointerDown, onHandlePointerDown,
   onPointerMove, onPointerUp, toggleMinimize,
   onWindowResize, handleWindowResize, dialogInlineStyle,
+  syncQuestionDock,
 } from './dialog.js';
 import {
   getFileNav, onGridKeyDown, onGridKeyUp,
@@ -140,6 +144,13 @@ export class AppShell extends JRPCClient {
      * dialog renders with explicit pixel positioning.
      */
     _undockedPos: { type: Object, state: true },
+    /**
+     * Where the docked panel ends, in viewport px, or null when
+     * an `interact` request has nowhere to dock beside the chat
+     * and belongs in the centred modal instead. Measured, not
+     * derived — see `questionDockLeft` in dialog.js.
+     */
+    _questionDockLeft: { type: Number, state: true },
     /**
      * Current primary mode — 'code' or 'doc'. Drives the
      * segmented toggle in the header. Synced with the
@@ -245,6 +256,11 @@ export class AppShell extends JRPCClient {
     this._minimized = loadMinimized(this);
     this._dockedWidth = loadDockedWidth(this);
     this._undockedPos = loadUndockedPos(this);
+    // Null until the first paint has a panel to measure. A
+    // question arriving before then gets the centred modal,
+    // which is the right answer for a shell that has not laid
+    // out yet.
+    this._questionDockLeft = null;
     // Baseline viewport size at the moment _dockedWidth and
     // _undockedPos were last committed (pointerup or
     // resize-driven rescale). Used to rescale proportionally
@@ -425,6 +441,10 @@ export class AppShell extends JRPCClient {
 
   connectedCallback() {
     super.connectedCallback();
+    // Before `addClass`, so no server push can reach an ungated handler.
+    // The gate starts held and is released by `setupDone` once the snapshot
+    // those events are relative to has landed — see AG-R-20 in event-gate.js.
+    installEventGate(this);
     this.addClass(this, 'AcApp');
     const port = getWebSocketPort();
     const host = window.location.hostname || 'localhost';
@@ -671,6 +691,9 @@ export class AppShell extends JRPCClient {
       clearTimeout(this._reconnectTimer);
       this._reconnectTimer = null;
     }
+    // Drops the buffer without replaying it: reducers must not run against a
+    // tree that is going away.
+    disposeEventGate(this);
     super.disconnectedCallback();
   }
 
@@ -701,7 +724,17 @@ export class AppShell extends JRPCClient {
     // the repo name (for the browser tab title), the message
     // history (restored from the last session on the server),
     // selected files, streaming status, and init_complete.
-    this._fetchCurrentState();
+    // AG-R-20: hold server pushes until the baseline they are relative to
+    // has landed, then replay them in order. `finally` rather than `then`,
+    // because a snapshot that *fails* must open the gate too — a wedged gate
+    // would be a worse fault than the race it closes. `fetchCurrentState`
+    // happens to catch its own errors today, but the gate must not depend on
+    // that staying true; the trailing `catch` is only here so releasing does
+    // not leave a rejection unhandled.
+    holdEvents(this);
+    Promise.resolve(this._fetchCurrentState())
+      .finally(() => releaseEvents(this))
+      .catch(() => {});
 
     // Initial context-usage fetch so the capacity bar reflects
     // a resumed session's tokens from the first paint.
@@ -1421,6 +1454,18 @@ export class AppShell extends JRPCClient {
     return toggleMinimize(this);
   }
 
+  /**
+   * The pending question needs a different amount of room than the last one
+   * did, so the cached dock verdict is stale — re-measure.
+   *
+   * The inset is deliberately not touched. This changes only whether a
+   * *question* fits beside the panel; the panel's own right edge has not
+   * moved, so the strip the viewer reserves is the same one it was.
+   */
+  _onDockRequirementChanged() {
+    syncQuestionDock(this);
+  }
+
   _onWindowResize() {
     return onWindowResize(this);
   }
@@ -1635,6 +1680,11 @@ export class AppShell extends JRPCClient {
     // background needs its inset before either viewer opens
     // a file — including the docked width restored from
     // localStorage, which is applied by the same render.
+    //
+    // The question dock is measured first throughout: it reads
+    // a rect, `syncViewerInset` writes a custom property, and
+    // reading after that write forces a reflow.
+    syncQuestionDock(this);
     syncViewerInset(this);
   }
 
@@ -1654,11 +1704,20 @@ export class AppShell extends JRPCClient {
     // through here at all — they mutate the dialog's inline
     // style directly and go via `_scheduleViewerRelayout`,
     // which syncs the inset on its own RAF.
+    //
+    // `activeTab` is in the list for the question dock alone —
+    // it cannot move the dialog's right edge, so the inset sync
+    // it triggers is a wasted read, but switching away from the
+    // chat is exactly when a docked question has to become a
+    // modal again. One read on a tab switch is the cheaper half
+    // of that trade.
     if (
       changed.has('_dockedWidth')
       || changed.has('_undockedPos')
       || changed.has('_minimized')
+      || changed.has('activeTab')
     ) {
+      syncQuestionDock(this);
       if (syncViewerInset(this)) this._scheduleViewerRelayout();
     }
   }

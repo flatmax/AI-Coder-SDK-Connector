@@ -14,6 +14,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { installAppShellTestSetup, mountShell } from './test-helpers.js';
+import { questionDockLeft, syncQuestionDock } from './dialog.js';
 
 describe('AppShell dialog UI', () => {
   installAppShellTestSetup();
@@ -481,6 +482,181 @@ describe('AppShell dialog UI', () => {
       expect(svgRelayout).toHaveBeenCalledTimes(1);
       diffRelayout.mockRestore();
       svgRelayout.mockRestore();
+    });
+  });
+
+  // -------------------------------------------------------------
+  // The question dock
+  //
+  // An `interact` request renders beside the chat rather than
+  // over it, and this is the half that decides whether there is
+  // a "beside" to speak of
+  // (specs5/5-webapp/permission-dialog.md § Placement).
+  //
+  // Every case here is a *refusal* except the first. That is the
+  // point: docking a question where the chat is not visible, or
+  // into a strip too narrow to compare two examples in, is worse
+  // than the modal it replaced — so the fallback has more tests
+  // than the feature.
+  // -------------------------------------------------------------
+
+  describe('question dock', () => {
+    /**
+     * Give the dialog the rect it would have if layout ran, and
+     * the viewport the room to hold a docked question. jsdom
+     * reports zeros for every rect and defaults innerWidth to
+     * 1024; both would make these pass for the wrong reason.
+     */
+    function stubGeometry(shell, { left, width, viewport }) {
+      const dialog = shell.shadowRoot.querySelector('.dialog');
+      dialog.getBoundingClientRect = () => ({
+        left, top: 0, width, height: 800,
+        right: left + width, bottom: 800,
+        x: left, y: 0,
+        toJSON() {},
+      });
+      if (viewport != null) {
+        Object.defineProperty(window, 'innerWidth', {
+          value: viewport, writable: true, configurable: true,
+        });
+      }
+      return dialog;
+    }
+
+    it('docks beside the panel when the chat is on screen', async () => {
+      const shell = mountShell();
+      await shell.updateComplete;
+      stubGeometry(shell, { left: 0, width: 401, viewport: 1600 });
+      // The panel's measured right edge, not its configured
+      // width: the question starts where the chat stops, and
+      // 1199px is comfortably past the compare-layout floor.
+      expect(questionDockLeft(shell)).toBe(401);
+    });
+
+    it('refuses when the panel is minimized', async () => {
+      const shell = mountShell();
+      await shell.updateComplete;
+      stubGeometry(shell, { left: 0, width: 401, viewport: 1600 });
+      shell._minimized = true;
+      await shell.updateComplete;
+      // Collapsed to its tab strip: there is no transcript on
+      // screen to dock beside, so the modal is the honest answer.
+      expect(questionDockLeft(shell)).toBe(null);
+    });
+
+    it('refuses when the panel is floating', async () => {
+      const shell = mountShell();
+      await shell.updateComplete;
+      stubGeometry(shell, { left: 0, width: 401, viewport: 1600 });
+      shell._undockedPos = {
+        left: 120, top: 60, width: 500, height: 400,
+      };
+      await shell.updateComplete;
+      expect(questionDockLeft(shell)).toBe(null);
+    });
+
+    it('refuses on a tab that is not the chat', async () => {
+      const shell = mountShell();
+      await shell.updateComplete;
+      stubGeometry(shell, { left: 0, width: 401, viewport: 1600 });
+      // The Settings tab fills the same panel with something
+      // else. Docking beside it would put the question next to a
+      // full-height opaque box, which is § Placement's own
+      // argument for the modal.
+      shell.activeTab = 'settings';
+      await shell.updateComplete;
+      expect(questionDockLeft(shell)).toBe(null);
+    });
+
+    it('refuses a region too narrow to compare examples in', async () => {
+      const shell = mountShell();
+      await shell.updateComplete;
+      // 1024 − 401 = 623, under the 720 floor plus gutters. A
+      // question docked here would stack an option's example
+      // under its options, and § interact wants both at once.
+      stubGeometry(shell, { left: 0, width: 401, viewport: 1024 });
+      expect(questionDockLeft(shell)).toBe(null);
+      // The same panel in a wider window has the room.
+      stubGeometry(shell, { left: 0, width: 401, viewport: 1600 });
+      expect(questionDockLeft(shell)).toBe(401);
+    });
+
+    it('takes the floor from the request, not from a constant', async () => {
+      // The floor buys the compare grid, and most questions do not draw one.
+      // As one number it made the dock unreachable: 720 plus gutters wants a
+      // viewport near 1480 before even the default half-width panel leaves
+      // room. The dialog answers which floor applies; the shell asks.
+      const shell = mountShell();
+      await shell.updateComplete;
+      // 623px of room — short for a comparison, ample for a list of labels.
+      stubGeometry(shell, { left: 0, width: 401, viewport: 1024 });
+      const dialog = shell.shadowRoot.querySelector('aic-permission-dialog');
+
+      Object.defineProperty(dialog, 'dockMinWidth', {
+        value: 720, configurable: true,
+      });
+      expect(questionDockLeft(shell)).toBe(null);
+
+      Object.defineProperty(dialog, 'dockMinWidth', {
+        value: 420, configurable: true,
+      });
+      expect(questionDockLeft(shell)).toBe(401);
+    });
+
+    it('re-measures when the request says it needs a different width',
+      async () => {
+        // None of the shell's own triggers — resize, minimize, undock, tab
+        // switch — fire when a request arrives. Without this notification the
+        // second question in a queue inherits the first one's verdict and
+        // stays modal in a region it fits.
+        const shell = mountShell();
+        await shell.updateComplete;
+        stubGeometry(shell, { left: 0, width: 401, viewport: 1024 });
+        const dialog = shell.shadowRoot.querySelector('aic-permission-dialog');
+        Object.defineProperty(dialog, 'dockMinWidth', {
+          value: 720, configurable: true,
+        });
+        syncQuestionDock(shell);
+        expect(shell._questionDockLeft).toBe(null);
+
+        // A plain question replaces the compare one. Geometry has not moved.
+        Object.defineProperty(dialog, 'dockMinWidth', {
+          value: 420, configurable: true,
+        });
+        dialog.dispatchEvent(new CustomEvent('dock-requirement-changed', {
+          bubbles: true, composed: true,
+        }));
+        await shell.updateComplete;
+        expect(shell._questionDockLeft).toBe(401);
+      });
+
+    it('publishes the dock to state, and only on a change', async () => {
+      const shell = mountShell();
+      await shell.updateComplete;
+      stubGeometry(shell, { left: 0, width: 401, viewport: 1600 });
+      expect(syncQuestionDock(shell)).toBe(true);
+      expect(shell._questionDockLeft).toBe(401);
+      // A re-render the panel's geometry did not move must not
+      // re-render the dialog underneath a half-answered question.
+      expect(syncQuestionDock(shell)).toBe(false);
+    });
+
+    it('reaches the permission dialog as a property', async () => {
+      // The end of the wire: measured here, bound in render.js,
+      // consumed by the dialog. A geometry helper nothing reads
+      // would pass every test above.
+      const shell = mountShell();
+      await shell.updateComplete;
+      stubGeometry(shell, { left: 0, width: 401, viewport: 1600 });
+      // A tab switch is one of the paths that re-measures; it is
+      // also the one a wasted read was accepted for.
+      shell.activeTab = 'settings';
+      await shell.updateComplete;
+      shell.activeTab = 'files';
+      await shell.updateComplete;
+      await shell.updateComplete;
+      const dialog = shell.shadowRoot.querySelector('aic-permission-dialog');
+      expect(dialog.dockLeft).toBe(401);
     });
   });
 });

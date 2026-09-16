@@ -78,7 +78,8 @@ believe a write. Nothing here is a second copy of any of those.
 It borrowed a fourth, :func:`~aic_dc.claude_code.messages.files_written_by`,
 for which file a ``generate_image`` call wrote — and the first live run
 showed that question has no answer in that table, because the tool takes
-no path argument on either transport. See :data:`BRAIN_DIR`.
+no path argument on either transport. See
+:func:`~aic_dc.agy.roots.brain_dir`.
 
 The one thing it deliberately does *not* borrow is the turn's close.
 ``AgySession.stream_turn`` ends by emitting ``streamComplete``, which
@@ -93,6 +94,7 @@ Governing spec: ``specs5/plan-ag/`` — AG-16, AG-7, AG-13, AG-5, AG-R-3.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
 import os
 import shutil
@@ -101,7 +103,7 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
-from aic_dc.agy import install
+from aic_dc.agy import install, roots
 from aic_dc.agy.gate_server import AgyGateServer, StaticPolicy
 from aic_dc.agy.session import (
     AgyNotInstalledError,
@@ -109,7 +111,6 @@ from aic_dc.agy.session import (
     PromptNotSentError,
 )
 from aic_dc.agy.steps import (
-    BRAIN_DIR,
     AgyTranslator,
     locate_generated_image,
     unwrap,
@@ -220,6 +221,173 @@ SECOND_OPINION_POLICY = StaticPolicy.of(CONTROL_TOOLS, _NO_TOOLS_REASON)
 IMAGE_POLICY = StaticPolicy.of({"generate_image", *CONTROL_TOOLS}, _IMAGE_ONLY_REASON)
 
 
+def _no_tools_or_fail(policy: StaticPolicy) -> StaticPolicy:
+    """Refuse to launch a second opinion under a policy that permits a tool.
+
+    The header the asking model receives says, in this app's voice, that
+    the consultation ran with no tools and no repository access — and
+    that sentence is true of :data:`SECOND_OPINION_POLICY` only because
+    its one entry, ``finish``, retrieves nothing. Nothing in the type
+    system says so. A future edit adding a read tool "just for
+    consultations" would leave the header asserting something false, in
+    the app's own voice, with every test still green: there is no
+    refusal to notice and no breach to raise, because the call would be
+    *permitted*.
+
+    A raise rather than an ``assert``, which is not pedantry: ``assert``
+    is stripped from the bytecode under ``python -O``, so an invariant
+    written that way is absent from exactly the builds that run
+    unattended.
+    """
+    extra = set(policy.allowed) - set(CONTROL_TOOLS)
+    if extra:
+        raise ConsultationError(
+            "A second opinion cannot be launched: its policy permits "
+            + ", ".join(sorted(extra))
+            + ". The answer is handed back under a header saying nothing "
+            "was read or fetched, and that sentence is only true while "
+            "the allowlist holds no tool that can retrieve anything."
+        )
+    return policy
+
+
+def _missing_from_binary(
+    policy: StaticPolicy, advertised: Iterable[str]
+) -> tuple[str, ...]:
+    """Permitted tool names this ``agy`` binary did not advertise.
+
+    The whole of [AG-R-22](../../../specs5/plan-ag/risks.md#ag-r-22)'s
+    renamed-control-tool defence, and it is a set subtraction because
+    that is all the evidence supports. ``agy``'s ``init`` frame lists its
+    tools by name before any prompt is sent, so this costs nothing to
+    compute and nothing to run — no extra turn, no subscription spend, and
+    no probe script anyone has to remember to re-run after an upgrade.
+
+    **Empty ``advertised`` yields nothing**, per
+    :attr:`~aic_dc.agy.session.AgySession.advertised_tools`: a binary that
+    named no tools has told us nothing about its vocabulary, and reading
+    that as *every permitted tool is missing* would fire this on every
+    consultation against an older ``agy`` — an alarm on a working setup,
+    which teaches a reader to ignore the next one.
+
+    Generalised over the policy rather than written against
+    :data:`CONTROL_TOOLS`, so :data:`IMAGE_POLICY` gets the same check for
+    free: a renamed ``generate_image`` strands
+    :meth:`AgyConsultant.generate_image` exactly the way a renamed
+    ``finish`` strands a second opinion, and there is no reason for the
+    first to be diagnosable and the second not.
+    """
+    names = frozenset(advertised)
+    if not names:
+        return ()
+    return tuple(sorted(frozenset(policy.allowed) - names))
+
+
+def _renamed_tool_note(names: Iterable[str]) -> str:
+    """The sentence attached wherever an unadvertised tool explains a failure.
+
+    One wording, two call sites — the timeout and the empty answer — since
+    a reader comparing the consultation's tab against the answer handed
+    back should not have to reconcile two accounts of one fact.
+
+    It names the missing tools and stops. No advice to the asking model
+    about retrying, because a rename is not transient and a retry would
+    spend the same tokens for the same silence; and no guess at what the
+    tool was renamed *to*, because guessing is the thing the allowlist
+    exists to refuse.
+    """
+    return (
+        f" This `agy` build does not advertise {_listed(names)}, which "
+        "this consultation was permitted and needs — most likely the CLI "
+        "renamed it, so the consultation had no way to end its turn. This "
+        "is a version mismatch in AIC-DC rather than anything the "
+        "question did wrong; tell the user."
+    )
+
+
+def _empty_answer_reason(translator: Any) -> str:
+    """Why a consultation produced no prose, told with its tool calls in it.
+
+    **The two surfaces have to say the same thing, and on this path they
+    did not.** P28's malformed-call arm spent the whole turn on a tool
+    call the vendor rejected and wrote nothing: the tab correctly showed
+    ``consultation_unverified``, and the asking model was handed *"Antigravity
+    returned an empty answer"* — a sentence that reads as a transport
+    hiccup and invites a retry. The one surface an agent is actually
+    blocked on was the surface that lost the containment event.
+
+    It matters beyond tidiness because a call with no output is not a
+    call with no effect: an unverified ``read_url_content`` can carry
+    data out in a URL whether or not a page comes back, and an unverified
+    ``run_command`` can write to the disk without printing. The prose
+    being empty says nothing about either.
+    """
+    escaped = tuple(getattr(translator, "breached_tools", ()) or ())
+    unknown = tuple(getattr(translator, "unverified_tools", ()) or ())
+    #: Appended rather than branched on, and last, because it is a fact
+    #: about the *binary* rather than about anything the consultation did:
+    #: a containment failure still leads, since a tool that ran despite the
+    #: policy is worse news than one that was never there to run.
+    missing = tuple(getattr(translator, "unadvertised_tools", ()) or ())
+    note = _renamed_tool_note(missing) if missing else ""
+    opening = (
+        "Antigravity returned an empty answer. The consultation ran and "
+        "produced no prose, which usually means the model spent the turn "
+        "reaching for tools it does not have here."
+    )
+    if escaped:
+        return (
+            f"{opening} It is not only that: {_listed(escaped)} ran despite "
+            f"the policy that permits no tools, so this consultation had a "
+            f"containment failure as well as an empty answer. Tell the "
+            f"user.{note}"
+        )
+    if unknown:
+        return (
+            f"{opening} And {_listed(unknown)} ended in a way this app "
+            f"cannot account for — neither a refusal it can recognise as "
+            f"its own nor a reported result — so do not treat the empty "
+            f"answer as evidence that nothing happened.{note}"
+        )
+    return f"{opening}{note}"
+
+
+def _listed(names: Iterable[str]) -> str:
+    """``a``, ``a and b``, ``a, b and c`` — tool names for a sentence."""
+    items = [str(name) for name in names if str(name)]
+    if not items:
+        return "a tool it did not name"
+    if len(items) == 1:
+        return items[0]
+    return f"{', '.join(items[:-1])} and {items[-1]}"
+
+
+@dataclasses.dataclass
+class _Flight:
+    """One consultation in flight, and what stopping it needs.
+
+    A record per consultation rather than a slot per consultant. The
+    shipped shape held one ``_session`` and one ``_cancelled`` flag for
+    every consultation at once, and both were wrong for two in flight: ⏹
+    on either row closed whichever process had started most recently, and
+    the flag it set was then read by *both* runs, so a consultation that
+    completed normally reported itself stopped.
+
+    The caller keeps its own reference, which is what lets ``_run`` read
+    ``cancelled`` after the registry entry has been dropped — the check
+    that turns a closed process into "stopped before it answered" runs
+    after the teardown that drops it.
+    """
+
+    #: The live session, while there is one. ``None`` until the process is
+    #: up and again once it is closed.
+    session: AgySession | None = None
+    #: Set by :meth:`AgyConsultant.cancel`, read by the run it belongs to.
+    #: Per consultation because it is the difference between a stopped
+    #: answer and a finished one.
+    cancelled: bool = False
+
+
 class AgyConsultant:
     """One-shot ``agy`` calls, from inside a Claude Code turn.
 
@@ -270,11 +438,29 @@ class AgyConsultant:
         self._executable = executable
         self._timeout = timeout_seconds
         self._image_timeout = image_timeout_seconds
-        #: The live session, while a consultation is running. Held so
-        #: :meth:`cancel` has something to stop.
-        self._session: AgySession | None = None
-        self._cancelled = False
+        #: Consultations in flight, by the id their caller gave them. Held
+        #: so :meth:`cancel` has something to stop, and keyed rather than
+        #: slotted so that ⏹ on one row cannot close another
+        #: consultation's process.
+        self._live: dict[str, _Flight] = {}
+        #: Only for a caller that supplied no id of its own — see
+        #: :meth:`_key`.
+        self._minted = 0
         self._counter = 0
+        # Litter from a process that was killed mid-consultation, taken out
+        # here because this is the first place in the program that knows
+        # where it lives. Latched to the first call — see the function.
+        roots.sweep_consultations(self._config_dir)
+        # And the pre-AG-21 hook in the user's own tree, for a user who
+        # only ever consults and never connects the engine — the service
+        # does the same on connect, and neither path can assume the other
+        # ran.
+        if install.retire_global():
+            logger.info(
+                "Removed the pre-AG-21 gate from %s: consultations run in "
+                "their own root",
+                install.GLOBAL_HOOKS,
+            )
 
     def _resolve_model(self) -> str | None:
         """The model for the consultation about to run.
@@ -316,8 +502,20 @@ class AgyConsultant:
 
     @property
     def gate_status(self) -> dict[str, Any]:
-        """The hook's installation state, from the one authority on it."""
-        report = dict(install.status(self._config_dir))
+        """Whether a consultation *could* be gated, from the one authority.
+
+        **Not an installation state any more** (AG-21). A consultation gets
+        a fresh config root and writes its own hook into it, so there is no
+        standing file whose contents could be reported — asking
+        :func:`~aic_dc.agy.install.status` about a directory that will not
+        exist until the next consultation starts would answer ``absent``
+        for a gate that is going to work perfectly.
+
+        What is reportable is whether the command would run, which is the
+        thing that actually failed in the frozen-binary incident. ``ready``
+        or ``unrunnable``.
+        """
+        report = dict(install.installable(self._config_dir))
         report["agy_present"] = shutil.which(self._executable) is not None
         return report
 
@@ -325,17 +523,22 @@ class AgyConsultant:
     def available(self) -> bool:
         """Whether a consultation can be attempted at all.
 
-        **Two conditions, and the second is not a nicety.** Without the
-        hook installed in the user's ``agy`` configuration, our claim on
-        the conversation means nothing: the gate would never be asked,
-        and a consultation would run as an unreviewed agent with the
-        binary's whole tool set and the repository as its cwd. AG-9's
-        "hidden rather than stubbed" is the mild reason to answer false
-        here; AG-5 is the real one.
+        **Two conditions, and the second is not a nicety.** Without a hook
+        that runs, our claim on the conversation means nothing: the gate
+        would never be asked, and a consultation would run as an unreviewed
+        agent with the binary's whole tool set and the repository as its
+        cwd. AG-9's "hidden rather than stubbed" is the mild reason to
+        answer false here; AG-5 is the real one.
+
+        The second condition used to read ``state == "current"`` against
+        the user's global hooks file. It reads ``state == "ready"`` against
+        a probe now, because AG-21 moved the file into a root that is
+        created per consultation — the question changed from *is it
+        installed* to *will it install*.
         """
         return (
             shutil.which(self._executable) is not None
-            and self.gate_status.get("state") == "current"
+            and self.gate_status.get("state") == "ready"
         )
 
     def make_translator(
@@ -356,8 +559,32 @@ class AgyConsultant:
     # Consultations
     # ------------------------------------------------------------------
 
+    def _key(self, consultation_id: str | None) -> str:
+        """The registry key for one consultation.
+
+        The caller's own id whenever there is one, because that is what ⏹
+        sends: the bridge mints it for the row, so a stop can only reach
+        the right process if both sides agree on the name. A direct caller
+        — a probe, a test — has no row and no id, and gets a minted key so
+        that two of them still cannot collide in the registry.
+
+        **Not read off the observer**, though the observer is threaded
+        through the same calls and could carry it. The observer is a sink,
+        and no sink here is load-bearing: a consultation with no browser
+        attached must still be stoppable, so identity arrives as an
+        argument rather than as a property of who happens to be watching.
+        """
+        if consultation_id:
+            return str(consultation_id)
+        self._minted += 1
+        return f"local-{id(self):x}-{self._minted}"
+
     async def second_opinion(
-        self, question: str, context: str = "", observer: Any = None
+        self,
+        question: str,
+        context: str = "",
+        observer: Any = None,
+        consultation_id: str | None = None,
     ) -> str:
         """Ask Antigravity one question and return its answer as text.
 
@@ -365,25 +592,33 @@ class AgyConsultant:
         supplies what it already read. Two independent agents disagreeing
         about a diff is information; one agent given a second chance to
         browse the repository is not.
+
+        ``consultation_id`` is what :meth:`cancel` will be given for this
+        call, and omitting it means "nothing will ask for this one by
+        name".
         """
         question = (question or "").strip()
         if not question:
             raise ConsultationError("A second opinion needs a question to answer.")
 
         prompt = question if not context.strip() else f"{question}\n\n{context.strip()}"
-        translator, _ = await self._run(
-            prompt,
-            policy=SECOND_OPINION_POLICY,
-            observer=observer,
-            timeout=self._timeout,
-        )
+        # **One config root per consultation, removed when it ends**
+        # (AG-21). A consultation has no history, no resumption and no
+        # second turn, so it has no use for a root that outlives it — and
+        # a fresh one means two consultations cannot collide over the one
+        # file that decides what their agent may do.
+        with roots.ephemeral(self._config_dir) as config_root:
+            translator, _ = await self._run(
+                prompt,
+                policy=_no_tools_or_fail(SECOND_OPINION_POLICY),
+                observer=observer,
+                timeout=self._timeout,
+                config_root=config_root,
+                consultation_id=consultation_id,
+            )
         answer = translator.response_text().strip()
         if not answer:
-            raise ConsultationError(
-                "Antigravity returned an empty answer. The consultation ran "
-                "and produced no prose, which usually means the model spent "
-                "the turn reaching for tools it does not have here."
-            )
+            raise ConsultationError(_empty_answer_reason(translator))
         return answer
 
     async def generate_image(
@@ -392,6 +627,7 @@ class AgyConsultant:
         output_name: str = "",
         aspect_ratio: str = "",
         observer: Any = None,
+        consultation_id: str | None = None,
     ) -> ImageResult:
         """Generate an image, collect it into the repository, and verify it.
 
@@ -403,7 +639,7 @@ class AgyConsultant:
         measured on this one.
 
         **Collected, not requested**, and that is the correction the first
-        real run bought (see :data:`BRAIN_DIR`). ``agy``'s ``generate_image``
+        real run bought. ``agy``'s ``generate_image``
         takes a *name*, not a path, so asking it to write inside the
         repository asks for something the tool cannot do — and the first
         run showed what the model does when asked anyway: it reached for
@@ -431,27 +667,35 @@ class AgyConsultant:
             "save it anywhere — that is done for you."
         )
 
-        translator, frames = await self._run(
-            " ".join(instruction),
-            policy=IMAGE_POLICY,
-            observer=observer,
-            timeout=self._image_timeout,
-        )
-        summary = translator.response_text().strip()
-        call = _image_call(frames)
-        if call is None:
-            # No tool call at all: the honest reading is that prose claimed
-            # a picture nobody generated, which is what this wording says.
-            return verify_image_write("", self._repo_root, summary)
-        return verify_image_write(
-            self._collect(call, frames, output_name), self._repo_root, summary
-        )
+        # The root has to outlive the turn by exactly one step: the image
+        # is *collected* rather than requested, so it is still inside this
+        # root when `agy` exits. Collecting after the `with` would tidy the
+        # picture away before copying it.
+        with roots.ephemeral(self._config_dir) as config_root:
+            translator, frames = await self._run(
+                " ".join(instruction),
+                policy=IMAGE_POLICY,
+                observer=observer,
+                timeout=self._image_timeout,
+                config_root=config_root,
+                consultation_id=consultation_id,
+            )
+            summary = translator.response_text().strip()
+            call = _image_call(frames)
+            if call is None:
+                # No tool call at all: the honest reading is that prose
+                # claimed a picture nobody generated, which is what this
+                # wording says.
+                return verify_image_write("", self._repo_root, summary)
+            collected = self._collect(call, frames, output_name, config_root)
+        return verify_image_write(collected, self._repo_root, summary)
 
     def _collect(
         self,
         call: dict[str, Any],
         frames: list[dict[str, Any]],
         output_name: str,
+        config_root: Path,
     ) -> str:
         """Copy the generated image into the repository, and say where.
 
@@ -472,13 +716,14 @@ class AgyConsultant:
         # conversation for the length of one call, so nothing else writes
         # into that directory. The engine, whose conversation outlives the
         # turn, must not pass it.
+        brain = roots.brain_dir(config_root)
         source = locate_generated_image(
-            BRAIN_DIR, conversation_id, image_name, allow_newest=True
+            brain, conversation_id, image_name, allow_newest=True
         )
         if source is None:
             raise ConsultationError(
                 f"Antigravity generated an image named {image_name!r} and it "
-                f"could not be found under {BRAIN_DIR / (conversation_id or '?')}. "
+                f"could not be found under {brain / (conversation_id or '?')}. "
                 "The generation itself succeeded, so this is where the image "
                 "is collected from rather than the generation being at fault."
             )
@@ -509,7 +754,7 @@ class AgyConsultant:
             ) from exc
         return str(destination)
 
-    async def cancel(self) -> bool:
+    async def cancel(self, consultation_id: str | None = None) -> bool:
         """Stop a running consultation. Safe when there is none.
 
         **This kills the process, where the engine's ⏹ deliberately does
@@ -524,17 +769,40 @@ class AgyConsultant:
         would be exactly useless here since a second opinion is prose by
         construction and is already allowed nothing. Killing is the only
         thing that stops it, and it stops it completely.
+
+        **Named, because a row is named.** ⏹ is pressed on one row and
+        sends that row's task id, so this kills that consultation's process
+        and no other — which matters more here than on the SDK transport,
+        because what is stopped is a subprocess and stopping the wrong one
+        loses an answer the user was waiting for. An unknown id returns
+        ``False``, which ``stop_task`` renders as ``not_running``.
+
+        ``None`` stops every live consultation, which is what a caller
+        holding no id means: a probe or a test drives one at a time. The
+        bridge never sends it.
         """
-        session = self._session
-        if session is None:
-            return False
-        self._cancelled = True
-        try:
-            await session.close()
-        except Exception:  # noqa: BLE001 - a cancel that fails is not fatal
-            logger.exception("Stopping the agy consultation failed")
-            return False
-        return True
+        if consultation_id is None:
+            flights = list(self._live.values())
+        else:
+            flight = self._live.get(str(consultation_id))
+            flights = [flight] if flight is not None else []
+        stopped = False
+        for flight in flights:
+            session = flight.session
+            if session is None:
+                continue
+            # Flagged before the close, and on the flight rather than on
+            # the consultant: the run this belongs to reads it to tell a
+            # process that was killed from one that finished, and a shared
+            # flag told every concurrent run the same story.
+            flight.cancelled = True
+            try:
+                await session.close()
+            except Exception:  # noqa: BLE001 - a cancel that fails is not fatal
+                logger.exception("Stopping the agy consultation failed")
+                continue
+            stopped = True
+        return stopped
 
     # ------------------------------------------------------------------
     # The single call site
@@ -547,56 +815,148 @@ class AgyConsultant:
         policy: StaticPolicy,
         observer: Any,
         timeout: float,
+        config_root: Path,
+        consultation_id: str | None = None,
     ) -> tuple[AgyTranslator, list[dict[str, Any]]]:
         """Spawn, ask one thing, drain it, and shut down.
 
         The whole subprocess surface this module touches, in one method,
         so the boundary is checkable by reading it rather than the file.
 
-        The translator is the *bridge's* when there is a browser
-        attached, so the frames are translated exactly once and the tab
-        and the answer are two readings of one pass. Without a browser
-        there is nobody to push to and one is made here, because the
-        answer still has to be assembled from the same frames.
+        The translator is the *bridge's*, so the frames are translated
+        exactly once and the tab and the answer are two readings of one
+        pass.
+
+        **The sink is resolved once, here, and never consulted again.**
+        This loop used to ask ``if observer is not None`` per frame and
+        translate for itself when the answer was no — which made the
+        presence of a browser decide which code assembled the reply, and
+        two assemblers of one answer are two things that can disagree.
+        They did: ``specs5/known-issues.md`` § *An empty consultation tab*.
+        The bridge now always supplies an observer, and the fallback below
+        is construction rather than a branch, so a direct caller passing
+        ``None`` gets the same single pass with nothing attached to it.
         """
         if not self.available:
             raise ConsultationError(self._unavailable_reason())
 
-        self._cancelled = False
         translator = (
-            observer.translator
-            if observer is not None and getattr(observer, "translator", None) is not None
-            else self.make_translator("")
+            getattr(observer, "translator", None) or self.make_translator("")
         )
+        # **Here rather than in `make_translator`, because this is the only
+        # place the policy and the translator are both in scope.** It is
+        # what lets the pump say what a failed call cost the answer
+        # without reading `agy`'s error prose: a tool that is not on this
+        # list cannot have run, so a failed call of one retrieved nothing,
+        # and a card for it is finished whatever state word arrives
+        # afterwards (AG-R-22).
+        #
+        # The policy's `MARK` used to be passed with it, to separate calls
+        # *this app* refused from ones that failed before reaching the
+        # gate. It was the wrong instrument for both jobs it was given —
+        # see `AgyTranslator._is_barred`. It came back for the narrower of
+        # the two, and came back *stamped*: the mark is a fixed string
+        # that this repository's own files contain, so recognising a
+        # refusal by it is a content test that a gate failure plus a read
+        # of this source would pass. `stamped()` mints a token for this
+        # consultation alone and puts it at the head of every refusal the
+        # gate sends, which is the same test made unforgeable.
+        policy = policy.stamped()
+        translator.note_consultation(policy.allowed, policy.refusals)
+        #: One call per frame, whoever is or is not watching. An observer
+        #: translates *and* pushes; a bare translator only translates.
+        feed = observer if observer is not None else translator.translate
         frames: list[dict[str, Any]] = []
 
+        # **No `config_root`, deliberately** (AG-24). The master's gate is
+        # given one so that `agy`'s read of its own MCP tool schema is
+        # admitted by policy rather than by nothing having scoped reads yet;
+        # a consultation is given none, so that admission does not exist
+        # here. Two reasons, and either would be enough: a consultation is
+        # offered no MCP server, so it has no schema to read; and a read
+        # granted around the static policy would falsify the header the
+        # asking model is handed — see `_no_tools_or_fail`.
         gate = AgyGateServer(
             self._socket_path(), policy=policy, config_dir=self._config_dir
         )
+        # **The hook goes into this consultation's own root** (AG-21). It
+        # used to rely on the entry in the user's global
+        # `~/.gemini/config/hooks.json`, which is what made the gate's
+        # correctness a property of somebody else's configuration file —
+        # and what forced the fail-open fallback, since a hook that could
+        # not run would otherwise have broken the user's own interactive
+        # sessions. Written per root rather than once, because the root is
+        # new every time and an unhooked root is an ungated agent.
+        report = install.install(self._config_dir, path=roots.hooks_file(config_root))
+        if report.get("state") != "current":
+            raise ConsultationError(
+                "The consultation could not be gated: "
+                + str(report.get("detail") or report.get("state"))
+                + " Antigravity is not run without a gate, because the "
+                "policy that denies it tools is the gate."
+            )
         session = AgySession(
             self._repo_root,
             gate=gate,
             model=self._resolve_model(),
             executable=self._executable,
+            config_root=config_root,
         )
-        self._session = session
+        # This consultation's own record, registered from here rather than
+        # from the top of the method because until there is a process there
+        # is nothing for ⏹ to stop — which is what the cleared slot used to
+        # say, and it said it for every consultation at once. Held locally
+        # as well: the two `cancelled` checks below read it, and one of them
+        # runs after the teardown has dropped the entry.
+        key = self._key(consultation_id)
+        flight = _Flight(session=session)
+        self._live[key] = flight
         stream: Any = None
         try:
             async with asyncio.timeout(timeout):
                 await session.start()
+                # **The handshake is the only free look at the vendor's
+                # vocabulary** (AG-R-22). `init` has arrived and no prompt
+                # has been sent, so comparing the allowlist against what
+                # `agy` says it has costs no turn and no subscription
+                # spend. What it buys is a name for the worst silent
+                # failure this transport has: if the CLI renames `finish`,
+                # every consultation runs to the bridge timeout with
+                # nothing to show for the tokens, and neither the tab nor
+                # the answer would have said why.
+                #
+                # Nothing is permitted or refused on the strength of it.
+                # See `_missing_from_binary` and
+                # `AgyTranslator.note_unadvertised`.
+                missing = _missing_from_binary(policy, session.advertised_tools)
+                if missing:
+                    logger.warning(
+                        "This agy build does not advertise %s, which this "
+                        "consultation permits. If it renamed the tool, the "
+                        "consultation cannot end its own turn and will run "
+                        "to the timeout (AG-R-22).",
+                        ", ".join(missing),
+                    )
+                    translator.note_unadvertised(missing)
                 stream = session.stream_frames(prompt)
                 async for frame in stream:
                     frames.append(frame)
-                    if observer is not None:
-                        # Translates through the same translator and
-                        # pushes each event into the tab.
-                        observer(frame)
-                    else:
-                        translator.translate(frame)
+                    # The only pass over the stream. `response_text()`
+                    # reads back what this accumulated, so skipping it for
+                    # any reason shortens the answer and not just the tab.
+                    feed(frame)
         except TimeoutError as exc:
+            # The one place a renamed control tool actually shows up, and
+            # until 2026-09-14 the place that said least about it: a
+            # consultation with no way to end its turn reaches exactly this
+            # line, and "did not answer within 120s" is indistinguishable
+            # from a slow model. Read off the translator rather than
+            # recomputed, so the tab and the answer cannot disagree.
+            missing = tuple(getattr(translator, "unadvertised_tools", ()) or ())
             raise ConsultationError(
                 f"Antigravity did not answer within {timeout:.0f}s. The "
                 "consultation was abandoned and its process stopped."
+                + (_renamed_tool_note(missing) if missing else "")
             ) from exc
         except AgyNotInstalledError as exc:
             raise ConsultationError(str(exc)) from exc
@@ -607,7 +967,7 @@ class AgyConsultant:
         except ConsultationError:
             raise
         except Exception as exc:  # noqa: BLE001 - reported as prose, always
-            if self._cancelled:
+            if flight.cancelled:
                 raise ConsultationError(
                     "The consultation was stopped before it answered."
                 ) from exc
@@ -615,7 +975,10 @@ class AgyConsultant:
                 f"The consultation failed: {' '.join(str(exc).split())[:400]}"
             ) from exc
         finally:
-            self._session = None
+            # Dropped before the teardown, so ⏹ cannot aim a close at a
+            # session that is already closing — and cannot report
+            # `stopping` for a consultation that is over.
+            self._live.pop(key, None)
             if stream is not None:
                 # A timeout abandons the loop mid-frame, and an async
                 # generator left suspended runs its `finally` whenever the
@@ -628,7 +991,7 @@ class AgyConsultant:
             # on a socket nobody is listening to.
             await session.close()
 
-        if self._cancelled:
+        if flight.cancelled:
             raise ConsultationError("The consultation was stopped before it answered.")
         return translator, frames
 
@@ -668,12 +1031,13 @@ class AgyConsultant:
                 f"{self._executable!r} is not on PATH, so the Antigravity "
                 "consultant cannot run over the CLI transport."
             )
-        state = self.gate_status.get("state")
+        report = self.gate_status
         return (
-            "The AIC-DC permission gate is not installed in the agy "
-            f"configuration (it reports {state!r}), so a consultation could "
-            "not be reviewed before it ran. Install it from Settings."
-        )
+            "The AIC-DC permission gate cannot run here (it reports "
+            f"{report.get('state')!r}), so a consultation could not be "
+            "gated before it ran. "
+            + str(report.get("detail") or "")
+        ).strip()
 
 
 def choose_consultant(
@@ -824,7 +1188,7 @@ def _image_call(frames: list[dict[str, Any]]) -> dict[str, Any] | None:
     arguments*. ``generate_image`` has none on either transport, so the
     shared table cannot answer this question and adding a third spelling to
     it would encode the wrong belief rather than fix it. See
-    :data:`BRAIN_DIR`.
+    :func:`~aic_dc.agy.roots.brain_dir`.
 
     The last one wins because a turn may generate more than once and the
     caller asked for an image, singular — the most recent is the one the

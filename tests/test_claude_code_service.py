@@ -1278,6 +1278,70 @@ class TestChatStreaming:
         await service.chat_streaming(REQUEST_ID, "hello")
         assert events.calls == []
 
+    async def test_the_pushed_viewer_state_stands_in(self, service):
+        """The arrival path the browser actually uses.
+
+        ``viewer-framing.js`` pushes through ``set_viewer_state`` and leaves
+        the turn argument null — deliberately, because two sources for one
+        field disagree — so this is the path every real turn takes and the
+        turn-argument tests above cover the one nothing calls.
+        """
+        service.set_viewer_state("src/a.py", start_line=4)
+        await send(service, "hello")
+        assert service.session.turns[0].viewer.path == "src/a.py"
+
+    async def test_a_stated_viewer_beats_a_stale_push(self, service):
+        service.set_viewer_state("stale.py")
+        await send(service, viewer={"path": "fresh.py"})
+        assert service.session.turns[0].viewer.path == "fresh.py"
+
+    async def test_an_explicitly_empty_viewer_clears_a_stale_push(self, service):
+        """"Nothing is open" has to outrank the last thing that was."""
+        service.set_viewer_state("stale.py")
+        await send(service, viewer={})
+        assert service.session.turns[0].viewer is None
+
+
+class TestSetViewerState:
+    """The push, which had no test on any engine until AG-33.
+
+    Which is how the Antigravity adapter's copy came to differ from this one
+    without anyone noticing — it cleared to ``{}`` and kept ``start_line:
+    None`` verbatim. Both stored a shape nothing read, so nothing failed.
+    The rule is :func:`aic_dc.framing.viewer_payload` now and all three
+    adapters share it; these assert the contract from this side.
+    """
+
+    def test_a_path_and_a_line_are_stored_and_echoed(self, service):
+        assert service.set_viewer_state("src/a.py", start_line=4) == {
+            "status": "ok",
+            "path": "src/a.py",
+            "start_line": 4,
+        }
+
+    def test_closing_the_pane_clears_it(self, service):
+        """Rather than leaving the agent pointed at a file nobody reads."""
+        service.set_viewer_state("src/a.py")
+        assert service.set_viewer_state(None) == {"status": "cleared"}
+        assert service._viewer_state is None
+
+    def test_a_line_that_is_not_one_is_omitted(self, service):
+        """A stored ``None`` would render as ``(cursor on line None)``."""
+        service.set_viewer_state("src/a.py", start_line=None, end_line=None)
+        assert service._viewer_state == {"path": "src/a.py"}
+
+    def test_it_reaches_the_ui_state_tool_as_well_as_the_prompt(self, service):
+        """The refresh channel Claude has and the other engines do not.
+
+        Worth pinning here because it is the reason turn-scoped framing is
+        enough on this engine: a model that thinks the state is stale can ask
+        for it. ``agy``'s only MCP server is the consultation listener, so
+        its model cannot — AG-R-33.
+        """
+        service.set_viewer_state("src/a.py", start_line=4)
+        snapshot = service._ui_state_snapshot()
+        assert snapshot["viewer"] == {"path": "src/a.py", "start_line": 4}
+
 
 # ---------------------------------------------------------------------------
 # Image pointers, after the fact
@@ -2715,7 +2779,7 @@ class TestBridgeWiring:
         from aic_dc.claude_code import mcp_server as mcp_module
         from aic_dc.claude_code import service as service_module
 
-        def boom_hook(reindexer, broadcast=None):
+        def boom_hook(reindexer, broadcast=None, consultant_bridge=None):
             raise RuntimeError("no sdk")
 
         def boom_server(self):
@@ -2729,15 +2793,65 @@ class TestBridgeWiring:
                 event_callback=events,
                 engine_config=EngineConfig(),
             )
-        assert len(svc.session.health.degradations) == 2
-        assert "re-index hook" in svc.session.health.degradations[0]
-        assert "repo tools" in svc.session.health.degradations[1]
+        # Unordered on purpose: the claim is that both losses are named,
+        # and the order they are built in is not a promise to the reader.
+        # It changed once already, when AG-28 moved the consultant mount
+        # ahead of the hooks so a session without one registers no
+        # `PreToolUse`.
+        reported = svc.session.health.degradations
+        assert len(reported) == 2
+        assert any("re-index hook" in line for line in reported)
+        assert any("repo tools" in line for line in reported)
 
     def test_a_session_that_started_whole_reports_no_loss(self, wired):
         """The banner is silent otherwise, so an empty list is the normal
         state and not a missing report."""
         assert wired.session.health.degradations == []
         assert wired.get_engine_health()["degradations"] == []
+
+    def test_this_engines_own_bridge_is_built_from_index_sources(self, wired):
+        """AG-34: what the other engines are handed is what this one uses.
+
+        ``index_sources`` exists so ``main.py`` can give the two Antigravity
+        transports the same six tools. Naming the five callables twice —
+        once here, once in the property — is how the engines would come to
+        disagree about index readiness with nobody noticing, so the
+        constructor reads the property rather than repeating it.
+
+        Checked two ways because the five are two kinds of object. Three
+        are bound methods, which compare equal across accesses, so those
+        are compared directly. The readiness pair are lambdas closing over
+        ``self`` and a fresh one comes back per access — an equality check
+        there would fail against correct code — so they are compared by what
+        they answer: flip the flag and both move together, which is the fact
+        that matters.
+        """
+        for name in ("symbol_index", "doc_index", "flush"):
+            assert getattr(wired.mcp_bridge, f"_{name}") == wired.index_sources[name]
+        for ready in ("symbol_index_ready", "doc_index_ready"):
+            assert (
+                getattr(wired.mcp_bridge, f"_{ready}")()
+                == wired.index_sources[ready]()
+            ), ready
+        wired._symbol_index_ready = False
+        assert wired.mcp_bridge._symbol_index_ready() is False
+        assert wired.index_sources["symbol_index_ready"]() is False
+
+    def test_index_sources_are_the_five_that_describe_the_tree(self, wired):
+        """Five and not seven, and the two left out are the point.
+
+        ``review_state`` and ``ui_state`` are per-*engine* — each adapter has
+        its own ``ReviewMode`` and its own idea of what the user is looking
+        at — so an engine handed those would report this one's review as its
+        own. Asserted against ``McpBridge``'s own signature so that a new
+        provider argument has to be classified rather than silently omitted.
+        """
+        import inspect
+
+        from aic_dc.claude_code.mcp_server import McpBridge
+
+        accepted = set(inspect.signature(McpBridge).parameters)
+        assert set(wired.index_sources) == accepted - {"review_state", "ui_state"}
 
 
 # ---------------------------------------------------------------------------

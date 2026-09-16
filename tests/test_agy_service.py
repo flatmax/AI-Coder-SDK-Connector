@@ -21,14 +21,16 @@ Offline. No ``agy``; the one lifecycle test uses a fake subprocess.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import inspect
 import json
 import sys
 import types
+from pathlib import Path
 
 import pytest
 
-from aic_dc.agy import install
+from aic_dc.agy import install, roots
 from aic_dc.agy.service import AgyService
 from aic_dc.antigravity.service import AntigravityService
 from aic_dc.capabilities import ANTIGRAVITY
@@ -122,42 +124,94 @@ class TestItMounts:
 class TestItWillNotRunUngated:
     """The refusal is the feature. Running anyway fails silently."""
 
-    def test_a_turn_is_refused_when_the_gate_is_not_installed(
+    def test_a_turn_is_refused_when_the_gate_cannot_be_installed(
         self, tmp_path, monkeypatch
     ):
-        # Pointed at a temp file rather than the real one. Without this the
-        # test reads the developer's own ~/.gemini/config/hooks.json and
-        # passes or fails on whether *they* have the gate installed — which
-        # is how it went green for a day and then red the moment one was.
-        monkeypatch.setattr(install, "GLOBAL_HOOKS", tmp_path / "hooks.json")
+        """AG-21 changed *who* has to have installed it, not whether.
+
+        The gate used to be a standing entry in the user's own
+        ``~/.gemini/config/hooks.json``, so "not installed" was a state a
+        session could find and had to refuse. It is now written into a
+        config root this app owns, on the way to starting the session — so
+        the only way to arrive ungated is for the install to fail, and the
+        refusal has to survive that.
+
+        ``install`` refuses to write a command it cannot run, which is the
+        failure being staged here, and the one that actually shipped: a
+        PyInstaller build whose hook command exited 2 on every call.
+        """
+        monkeypatch.setattr(
+            install, "hook_runs", lambda *_a, **_k: "exit 127: no such file"
+        )
         svc = gated_service(tmp_path)
         result = asyncio.run(svc.connect_engine())
         assert result["error"] == "gate_not_installed"
-        assert result["reason"] == "absent"
-        # The message says where to fix it, and that fixing it sticks —
-        # the gate is not removed on shutdown, so a session started later
-        # finds it ready.
-        assert "Settings" in result["message"]
-        assert "until you remove it" in result["message"]
+        assert result["reason"] == "unrunnable"
+        # And it says *why*. "The gate is not installed" sends a reader to
+        # a Settings button; "the command does not run here" sends them to
+        # the thing that is wrong.
+        assert "exit 127" in result["message"]
 
-    def test_a_stale_gate_is_refused_too(self, tmp_path, monkeypatch):
-        """A gate pointing at another checkout gates *that* one, not this.
+    def test_nothing_is_written_to_the_users_own_hooks_file(
+        self, tmp_path, monkeypatch
+    ):
+        """The permission AG-21 gave back.
 
-        Written rather than installed: since 2026-09-05 ``install`` probes
-        the command and refuses one that does not run, and
-        ``/other/python`` does not. This describes a file an installation
-        that has since moved left behind, which is a state that arrives on
-        disk rather than through the installer.
+        Pointed at a temp path rather than the real one, because a test
+        that got this wrong would install a hook into the developer's
+        ``~/.gemini`` and pass.
         """
-        hooks = tmp_path / "hooks.json"
-        monkeypatch.setattr(install, "GLOBAL_HOOKS", hooks)
+        theirs = tmp_path / "their-hooks.json"
+        monkeypatch.setattr(install, "GLOBAL_HOOKS", theirs)
+        svc = gated_service(tmp_path)
+        asyncio.run(svc.connect_engine())
+        assert not theirs.exists()
+        installed = (
+            tmp_path / "cfg" / "agy-roots" / "master" / ".gemini" / "config"
+            / "hooks.json"
+        )
+        assert installed.is_file()
+
+    def test_connecting_retires_the_pre_ag21_entry(self, tmp_path, monkeypatch):
+        """Not writing there is half of it; the other half is upgrading.
+
+        A machine that ran an older build already has our hook in the
+        user's own file, where it fires for `agy` sessions this app knows
+        nothing about. Leaving it until somebody finds the Settings button
+        would make AG-21's claim true of new installs and quietly false of
+        every existing one.
+        """
+        theirs = tmp_path / "their-hooks.json"
+        monkeypatch.setattr(install, "GLOBAL_HOOKS", theirs)
+        install.install(tmp_path / "old-cfg", path=theirs)
+        assert theirs.is_file()
+
+        asyncio.run(gated_service(tmp_path).connect_engine())
+
+        assert not theirs.exists()
+
+    def test_a_stale_entry_in_our_own_root_is_reinstalled_rather_than_refused(
+        self, tmp_path
+    ):
+        """The state that used to be a dead end is now just a write.
+
+        ``stale`` meant "another checkout owns the user's file", and the
+        only honest answer was to refuse and ask them to reinstall. In a
+        root this app owns there is nobody to ask: whatever is in the file
+        is ours to correct, so `connect` corrects it.
+        """
+        hooks = (
+            tmp_path / "cfg" / "agy-roots" / "master" / ".gemini" / "config"
+            / "hooks.json"
+        )
+        hooks.parent.mkdir(parents=True)
         _write_gate_entry(
             hooks, install.hook_command(tmp_path / "cfg", "/other/python")
         )
         svc = gated_service(tmp_path)
         result = asyncio.run(svc.connect_engine())
-        assert result["error"] == "gate_not_installed"
-        assert result["reason"] == "stale"
+        assert result.get("error") != "gate_not_installed"
+        assert svc.gate_status()["state"] == "current"
 
     def test_a_missing_binary_is_a_named_refusal(self, tmp_path):
         svc = service(tmp_path, executable="agy-does-not-exist")
@@ -352,46 +406,49 @@ class TestTheModelSurface:
         assert counter.read_text().count("x") == 1
 
 
+@pytest.fixture
+def wired(tmp_path, monkeypatch):
+    conv = "b1d377c5-ef66-4d58-a7ca-5aee75acc853"
+    fake = tmp_path / "fake_agy.py"
+    fake.write_text(
+        "import json,sys,os\n"
+        f'conv = "{conv}"\n'
+        "def emit(o):\n"
+        "    sys.stdout.write(json.dumps(o)+'\\n'); sys.stdout.flush()\n"
+        'emit({"event":"init","conversation_id":conv,'
+        '"init":{"cwd":os.getcwd(),"tools":[]}})\n'
+        "for line in sys.stdin:\n"
+        "    if not line.strip():\n"
+        "        continue\n"
+        '    emit({"event":"step_update","step_update":{"step_index":1,'
+        '"state":"DONE","step_type":"agent_response","text_delta":"done."}})\n'
+        '    emit({"event":"result","result":{"status":"SUCCESS",'
+        '"response":"done.","usage":{"total_tokens":7}}})\n',
+        encoding="utf-8",
+    )
+    launcher = tmp_path / "agy"
+    launcher.write_text(
+        f"#!/bin/sh\nexec {sys.executable} {fake}\n", encoding="utf-8"
+    )
+    launcher.chmod(0o755)
+
+    # Nothing global: AG-21 put the entry in the root the service
+    # spawns against, and the service writes it itself on connect.
+    # Pinned anyway so a regression that reaches for the user's own
+    # file lands in a temp path rather than in their home directory.
+    monkeypatch.setattr(install, "GLOBAL_HOOKS", tmp_path / "their-hooks.json")
+
+    events: list = []
+
+    async def callback(name, *args):
+        events.append((name, args))
+
+    svc = service(tmp_path, executable=str(launcher), event_callback=callback)
+    return svc, events
+
+
 class TestATurn:
     """One turn end to end against a fake ``agy``, with the gate installed."""
-
-    @pytest.fixture
-    def wired(self, tmp_path, monkeypatch):
-        conv = "b1d377c5-ef66-4d58-a7ca-5aee75acc853"
-        fake = tmp_path / "fake_agy.py"
-        fake.write_text(
-            "import json,sys,os\n"
-            f'conv = "{conv}"\n'
-            "def emit(o):\n"
-            "    sys.stdout.write(json.dumps(o)+'\\n'); sys.stdout.flush()\n"
-            'emit({"event":"init","conversation_id":conv,'
-            '"init":{"cwd":os.getcwd(),"tools":[]}})\n'
-            "for line in sys.stdin:\n"
-            "    if not line.strip():\n"
-            "        continue\n"
-            '    emit({"event":"step_update","step_update":{"step_index":1,'
-            '"state":"DONE","step_type":"agent_response","text_delta":"done."}})\n'
-            '    emit({"event":"result","result":{"status":"SUCCESS",'
-            '"response":"done.","usage":{"total_tokens":7}}})\n',
-            encoding="utf-8",
-        )
-        launcher = tmp_path / "agy"
-        launcher.write_text(
-            f"#!/bin/sh\nexec {sys.executable} {fake}\n", encoding="utf-8"
-        )
-        launcher.chmod(0o755)
-
-        hooks = tmp_path / "hooks.json"
-        monkeypatch.setattr(install, "GLOBAL_HOOKS", hooks)
-        install.install(tmp_path / "cfg", path=hooks)
-
-        events: list = []
-
-        async def callback(name, *args):
-            events.append((name, args))
-
-        svc = service(tmp_path, executable=str(launcher), event_callback=callback)
-        return svc, events
 
     def test_the_reply_arrives_before_the_turn_finishes(self, wired):
         """The contract the SDK transport learned the hard way.
@@ -460,12 +517,107 @@ class TestATurn:
         assert registry.lookup(conv, config_dir=tmp_path / "cfg") is None
 
     def test_the_installed_hook_names_this_interpreter(self, wired, tmp_path):
-        """A gate pointing elsewhere gates a different build."""
+        """A gate pointing elsewhere gates a different build.
+
+        Read out of the master root rather than out of ``~/.gemini``, and
+        read *after* a connect rather than before one, because AG-21 made
+        the install part of starting the session instead of a precondition
+        of it.
+        """
         svc, _events = wired
+
+        async def go():
+            await svc.connect_engine()
+            await svc.shutdown()
+
+        asyncio.run(go())
         assert svc.gate_status()["state"] == "current"
-        data = json.loads((tmp_path / "hooks.json").read_text(encoding="utf-8"))
+        hooks = (
+            tmp_path / "cfg" / "agy-roots" / "master" / ".gemini" / "config"
+            / "hooks.json"
+        )
+        data = json.loads(hooks.read_text(encoding="utf-8"))
         command = data[install.HOOK_NAME]["PreToolUse"][0]["hooks"][0]["command"]
         assert sys.executable in command
+        assert not (tmp_path / "their-hooks.json").exists()
+
+
+class TestTheMasterGateKnowsItsOwnConfigRoot:
+    """AG-24 § *`agy` does not name MCP tools*, plumbed end to end.
+
+    ``agy`` reads ``<root>/.gemini/antigravity-cli/mcp/<server>/<tool>.json``
+    with ``view_file`` immediately before every MCP call, so the consultant
+    Claude offers is reachable only while that read gets through. It gets
+    through today because nothing scopes reads — and the failure when
+    something does is invisible: no denial in the transcript, and a
+    ``second_opinion`` that simply never happens.
+
+    Staged with the user's own denied-reads list pointed at the master root,
+    which is the narrowest way to make "a policy that scopes reads" real
+    without inventing one.
+    """
+
+    def test_a_schema_read_survives_a_denied_read_covering_the_root(
+        self, wired, tmp_path
+    ):
+        svc, _events = wired
+        master = roots.master_root(tmp_path / "cfg")
+        svc._denied_read_files = [str(master)]
+        # Spelled out rather than taken from `roots.mcp_schema_dir`, so this
+        # asserts the layout `agy` actually uses instead of restating the
+        # helper — a test built from the helper would keep passing if the
+        # helper moved and the vendor did not.
+        schema = (
+            master / ".gemini" / "antigravity-cli" / "mcp" / "aic-dc"
+            / "second_opinion.json"
+        )
+
+        async def go():
+            await svc.connect_engine()
+            answer = await svc._agy_gate.decide(
+                {
+                    "conversationId": svc._session.conversation_id,
+                    "stepIdx": 1,
+                    "toolCall": {
+                        "name": "view_file",
+                        "args": {"AbsolutePath": str(schema)},
+                    },
+                }
+            )
+            await svc.shutdown()
+            return answer
+
+        assert asyncio.run(go()) == {"decision": "allow"}
+
+    def test_the_token_file_in_the_same_root_is_still_denied(self, wired, tmp_path):
+        """The scope of the admission, at the file that makes it matter.
+
+        ``mcp_config.json`` holds the bearer the consultation listener
+        honours. It lives one directory away from the schemas and must not
+        come along with them.
+        """
+        svc, _events = wired
+        master = roots.master_root(tmp_path / "cfg")
+        svc._denied_read_files = [str(master)]
+
+        async def go():
+            await svc.connect_engine()
+            answer = await svc._agy_gate.decide(
+                {
+                    "conversationId": svc._session.conversation_id,
+                    "stepIdx": 1,
+                    "toolCall": {
+                        "name": "view_file",
+                        "args": {
+                            "AbsolutePath": str(roots.mcp_config_file(master))
+                        },
+                    },
+                }
+            )
+            await svc.shutdown()
+            return answer
+
+        assert asyncio.run(go())["decision"] == "deny"
 
 
 class TestTheSessionContractTheServiceReadsThrough:
@@ -549,7 +701,7 @@ class TestTheSessionContractTheServiceReadsThrough:
 
 
 class TestTheWriteGuidance:
-    """Why every `agy` prompt carries a framing block.
+    """Why every `agy` *invocation* carries a standing instruction. AG-32.
 
     `agy` declares `write_to_file` as *"Use this tool to create new
     files"*, with `ArtifactMetadata` documented as *"Required when
@@ -566,9 +718,34 @@ class TestTheWriteGuidance:
     around the broken tool with a `run_command` heredoc — and a write that
     arrives as a shell command has no diff to render, no attributable
     file, and no rule "always allow" could ever match twice.
+
+    **It travelled prepended to the user's own prompt until 2026-09-14**,
+    inside the framing block `history.strip_framing` removes at read time.
+    Three things were wrong with that channel and none of them was the
+    words: the mirror stored a paragraph the user had not written as
+    theirs; the guidance arrived **once per turn**, where the failure it
+    guards against can happen at any invocation; and it reached the
+    **master only**, so a subagent — which never sees the parent's prompt —
+    was never told at all. It now travels on `PreInvocation`, which is the
+    vendor's own channel for it, and the tests for delivery are in
+    `test_agy_gate.py` and `test_agy_gate_server.py`.
     """
 
-    def test_every_prompt_carries_it(self, tmp_path, monkeypatch):
+    def test_the_prompt_is_the_users_own_text(self, tmp_path, monkeypatch):
+        """A turn with no UI state to report is sent exactly as typed.
+
+        This asserted the opposite until AG-32: a browsed transcript stored
+        the framed guidance and stripped it on the way out, which made every
+        reader of the mirror depend on a strip step to tell the truth about
+        who said what.
+
+        Narrower than it was since AG-33 — turn framing *does* ride the
+        prompt when there is something to frame, and `TestViewerFraming`
+        below is where that is asserted. The two halves are compatible
+        because the guidance is standing and the framing is turn-scoped: one
+        belongs on `PreInvocation` and the other cannot go there. What this
+        still guards is that an ordinary turn carries no block at all.
+        """
         from aic_dc.agy import tools as agy_tools
 
         sent = {}
@@ -588,8 +765,9 @@ class TestTheWriteGuidance:
         svc = service(tmp_path)
         asyncio.run(svc.chat_streaming("r1", "please create a hello world script"))
         asyncio.run(asyncio.sleep(0))
-        assert sent["message"].startswith(agy_tools.WRITE_GUIDANCE)
-        assert sent["message"].endswith("please create a hello world script")
+        assert sent["message"] == "please create a hello world script"
+        assert agy_tools.WRITE_GUIDANCE not in sent["message"]
+        assert "aic-dc-ui-context" not in sent["message"]
 
     def test_it_names_the_field_that_causes_the_failure(self):
         """The guidance has to be specific to work.
@@ -603,19 +781,228 @@ class TestTheWriteGuidance:
         assert "ArtifactMetadata" in agy_tools.WRITE_GUIDANCE
         assert "write_to_file" in agy_tools.WRITE_GUIDANCE
 
-    def test_it_is_wrapped_in_the_framing_the_reader_strips(self):
-        """It is for the model, not for the user.
+    def test_it_no_longer_carries_the_framing_it_used_to(self):
+        """It is a system message now, so there is nothing to disguise.
 
-        `history.strip_framing` removes this block at read time, so a
-        browsed transcript shows what the user typed. Storing the framed
-        text and stripping it on the way out is deliberate — the
-        transcript's job is to say what the model was actually sent.
+        The framing existed to hide guidance inside the user's turn. On
+        `PreInvocation` there is no user turn to hide it in, and leaving the
+        tags on would put markup in front of the model for the benefit of a
+        reader that never sees this string.
         """
         from aic_dc.agy import tools as agy_tools
+
+        assert "aic-dc-ui-context" not in agy_tools.WRITE_GUIDANCE
+
+    def test_a_transcript_written_before_today_still_reads_correctly(self):
+        """The strip stays, because the mirrors on disk still carry it.
+
+        Written as a literal rather than from `WRITE_GUIDANCE`, so the
+        coverage survives the constant changing — what has to keep working
+        is reading **yesterday's** files, and yesterday's shape is fixed.
+        """
         from aic_dc.claude_code.history import strip_framing
 
-        framed = agy_tools.WRITE_GUIDANCE + "do the thing"
+        framed = (
+            "<aic-dc-ui-context>\nThe user is working in AIC-DC. When "
+            "creating or editing files in this workspace, call write_to_file "
+            "WITHOUT the ArtifactMetadata field.\n</aic-dc-ui-context>\n"
+            "do the thing"
+        )
         assert strip_framing(framed) == "do the thing"
+
+    def test_the_gate_is_given_the_words_to_deliver(self, tmp_path, monkeypatch):
+        """The one wiring assertion: the service hands the guidance over.
+
+        `standing_guidance` returns `{}` for a server that was given none,
+        so a service that stopped passing it would leave every invocation
+        unguided with every test in `test_agy_gate_server.py` still passing.
+        """
+        from aic_dc.agy import tools as agy_tools
+        from aic_dc.agy.gate_server import AgyGateServer
+
+        captured = {}
+        real = AgyGateServer.__init__
+
+        def spy(self, *args, **kwargs):
+            captured["guidance"] = kwargs.get("guidance")
+            real(self, *args, **kwargs)
+
+        monkeypatch.setattr(AgyGateServer, "__init__", spy)
+        svc = service(tmp_path)
+        monkeypatch.setattr(
+            svc, "_ensure_gate", lambda: (tmp_path / "root", {"state": "current"})
+        )
+        with contextlib.suppress(Exception):
+            # `_ensure_session` goes on to launch `agy`, which is not here.
+            # Only the constructor call above it is under test.
+            asyncio.run(svc._ensure_session())
+        assert captured.get("guidance") == agy_tools.WRITE_GUIDANCE
+
+
+class TestViewerFraming:
+    """AG-33: the model is told what the user is looking at.
+
+    The browser has pushed the open file to whichever adapter is master
+    since phase 3 — `viewer-framing.js` calls
+    `ClaudeCodeService.set_viewer_state`, and `engine_router` routes that
+    name to the mounted adapter whatever engine it is. So the push landed
+    here all along. What was missing is the read: `_viewer` was assigned by
+    two paths and consulted by none, and a user who asked *"why is this
+    failing?"* got an answer that depended on which engine they had chosen
+    in Settings.
+
+    Asserted on the prompt rather than on `_viewer`, because storing it was
+    never the part that broke.
+    """
+
+    def _sent(self, tmp_path, monkeypatch):
+        """Capture the prompt the turn hands to the pump."""
+        sent = {}
+
+        async def fake_run(self, session, translator, request_id, message):
+            sent["message"] = message
+
+        async def fake_ensure(self):
+            return types.SimpleNamespace(conversation_id="b1d377c5")
+
+        monkeypatch.setattr(AgyService, "_run_agy_turn", fake_run)
+        monkeypatch.setattr(AgyService, "_ensure_session", fake_ensure)
+        return sent
+
+    def test_the_pushed_viewer_state_reaches_the_prompt(self, tmp_path, monkeypatch):
+        """The gap AG-33 closed, stated as the symptom.
+
+        `set_viewer_state` then a turn: before AG-33 the prompt was the bare
+        message and the model had no idea a file was open.
+        """
+        sent = self._sent(tmp_path, monkeypatch)
+        svc = service(tmp_path)
+        svc.set_viewer_state("src/a.py", start_line=10, end_line=20)
+        asyncio.run(svc.chat_streaming("r1", "why is this failing?"))
+        asyncio.run(asyncio.sleep(0))
+        assert sent["message"] == (
+            "<aic-dc-ui-context>\n"
+            "Open in the user's editor pane:\n"
+            "- src/a.py (lines 10-20 selected)\n"
+            "</aic-dc-ui-context>\n"
+            "\n"
+            "why is this failing?"
+        )
+
+    def test_it_is_the_same_block_the_claude_engine_sends(self, tmp_path, monkeypatch):
+        """AG-9's rule, applied to a sentence rather than to a module.
+
+        A model asked the same question about the same file has to be told
+        the same fact in the same words on every engine, or the answer
+        depends on a Settings choice made for unrelated reasons.
+        """
+        from aic_dc.claude_code.session import Turn, compose_prompt
+        from aic_dc.framing import Viewer
+
+        sent = self._sent(tmp_path, monkeypatch)
+        svc = service(tmp_path)
+        svc.set_viewer_state("src/a.py", start_line=10, end_line=20)
+        asyncio.run(svc.chat_streaming("r1", "why is this failing?"))
+        asyncio.run(asyncio.sleep(0))
+        assert sent["message"] == compose_prompt(
+            Turn(
+                request_id="r1",
+                message="why is this failing?",
+                viewer=Viewer("src/a.py", 10, 20),
+            )
+        )
+
+    def test_the_turn_argument_overrides_the_pushed_state(
+        self, tmp_path, monkeypatch
+    ):
+        """Claude's precedence, to the letter: a stated viewer answers."""
+        sent = self._sent(tmp_path, monkeypatch)
+        svc = service(tmp_path)
+        svc.set_viewer_state("stale.py")
+        asyncio.run(
+            svc.chat_streaming("r1", "hello", viewer={"path": "fresh.py"})
+        )
+        asyncio.run(asyncio.sleep(0))
+        assert "- fresh.py" in sent["message"]
+        assert "stale.py" not in sent["message"]
+
+    def test_an_explicitly_empty_viewer_clears_a_stale_push(
+        self, tmp_path, monkeypatch
+    ):
+        """`if viewer:` could not be told "nothing is open".
+
+        The falsy-guard meant an empty payload was *silence*, so a closed
+        pane left the last pushed path in front of the model for the rest of
+        the session — pointing it at a file nobody was looking at.
+        """
+        sent = self._sent(tmp_path, monkeypatch)
+        svc = service(tmp_path)
+        svc.set_viewer_state("stale.py")
+        asyncio.run(svc.chat_streaming("r1", "hello", viewer={}))
+        asyncio.run(asyncio.sleep(0))
+        assert sent["message"] == "hello"
+
+    def test_closing_the_pane_stops_the_framing(self, tmp_path, monkeypatch):
+        """The other way a pane closes: a `set_viewer_state` with no path."""
+        sent = self._sent(tmp_path, monkeypatch)
+        svc = service(tmp_path)
+        svc.set_viewer_state("src/a.py")
+        svc.set_viewer_state(None)
+        asyncio.run(svc.chat_streaming("r1", "hello"))
+        asyncio.run(asyncio.sleep(0))
+        assert sent["message"] == "hello"
+
+    def test_the_framing_carries_no_file_content(self, tmp_path, monkeypatch):
+        """CC-14 on this transport too: paths and ranges, never a body."""
+        sent = self._sent(tmp_path, monkeypatch)
+        svc = service(tmp_path)
+        svc.set_viewer_state("src/a.py", start_line=1, end_line=999)
+        asyncio.run(svc.chat_streaming("r1", "hello"))
+        asyncio.run(asyncio.sleep(0))
+        items = [
+            line for line in sent["message"].splitlines() if line.startswith("- ")
+        ]
+        assert items == ["- src/a.py (lines 1-999 selected)"]
+
+    def test_the_mirror_reads_back_the_users_own_words(
+        self, tmp_path, monkeypatch
+    ):
+        """The cost of riding the prompt, and how it is paid.
+
+        The mirror stores what the model was sent, verbatim and framing and
+        all — a transcript that quietly disagreed with the prompt would be
+        worse than one carrying a block the reader strips. So the strip is
+        the contract, asserted here against a real composed prompt rather
+        than against a literal.
+        """
+        from aic_dc.claude_code.history import strip_framing
+
+        sent = self._sent(tmp_path, monkeypatch)
+        svc = service(tmp_path)
+        svc.set_viewer_state("src/a.py", start_line=10, end_line=20)
+        asyncio.run(svc.chat_streaming("r1", "why is this failing?"))
+        asyncio.run(asyncio.sleep(0))
+        assert strip_framing(sent["message"]) == "why is this failing?"
+
+    def test_the_guidance_still_does_not_ride_the_prompt(
+        self, tmp_path, monkeypatch
+    ):
+        """AG-32 is not reversed by AG-33.
+
+        The framing block came back and the guidance did not come back with
+        it. Worth asserting together, because the obvious way to build this
+        feature is to restore the old prepend and add the viewer to it.
+        """
+        from aic_dc.agy import tools as agy_tools
+
+        sent = self._sent(tmp_path, monkeypatch)
+        svc = service(tmp_path)
+        svc.set_viewer_state("src/a.py")
+        asyncio.run(svc.chat_streaming("r1", "hello"))
+        asyncio.run(asyncio.sleep(0))
+        assert "aic-dc-ui-context" in sent["message"]
+        assert agy_tools.WRITE_GUIDANCE not in sent["message"]
+        assert "ArtifactMetadata" not in sent["message"]
 
 
 class TestModelPersistence:
@@ -701,22 +1088,46 @@ class _Reader:
         self.rows_for: list[str] = []
         self.descendants_for: list[str] = []
         self.loaded: list[str] = []
+        #: Every ``brain_dir`` the service handed over. Recorded because
+        #: AG-R-18 is precisely the argument being wrong: the functions
+        #: used to default it to a constant derived from the server's own
+        #: ``HOME`` at import time, which is the one tree no session's
+        #: ``agy`` ever writes to once AG-21 gives it a private root.
+        self.brains: list = []
 
-    def rows(self, conversation_id):
+    def rows(self, conversation_id, *, brain_dir):
         self.rows_for.append(conversation_id)
+        self.brains.append(brain_dir)
         if self._error is not None:
             raise self._error
         return self._rows
 
-    def descendants(self, conversation_id):
+    def descendants(self, conversation_id, *, brain_dir):
         self.descendants_for.append(conversation_id)
+        self.brains.append(brain_dir)
         if self._error is not None:
             raise self._error
         return self._owned
 
-    def load(self, conversation_id):
+    def load(self, conversation_id, *, brain_dir):
         self.loaded.append(conversation_id)
+        self.brains.append(brain_dir)
         return self._messages
+
+
+def _seed_conversation(brain_dir, conversation_id):
+    """A brain directory that really holds ``conversation_id``.
+
+    ``subagents.choose_brain_dir`` is *not* stubbed by :class:`_Reader`: it
+    is the thing under test in the brain-directory cases, and it decides by
+    looking for a transcript on disk. So these tests write one.
+    """
+    from aic_dc.agy import subagents
+
+    logs = Path(brain_dir) / conversation_id / subagents.LOG_SUBPATH
+    logs.mkdir(parents=True, exist_ok=True)
+    (logs / "transcript_full.jsonl").write_text("{}\n", encoding="utf-8")
+    return Path(brain_dir)
 
 
 def _reading_service(tmp_path, monkeypatch, reader, *, mirrored=("sess",), store=None):
@@ -749,6 +1160,95 @@ class TestSubagentTranscripts:
     """
 
     # -- the listing -----------------------------------------------------
+
+    def test_the_brain_it_reads_is_the_root_the_session_runs_against(
+        self, tmp_path, monkeypatch
+    ):
+        """AG-R-18, at the surface where it would have been invisible.
+
+        These readers used to default ``brain_dir`` to a module constant
+        built from ``Path.home()`` at import time. AG-21 gives every
+        session a private root, so that constant names a tree the session's
+        ``agy`` never writes to — and the failure is not an exception, it
+        is a subagent list that is correctly empty for the wrong reason.
+        The argument is required now, and this is what says which value it
+        must carry.
+        """
+        reader = _Reader(rows=[{"agent_id": "child"}])
+        svc = _reading_service(tmp_path, monkeypatch, reader)
+        asyncio.run(svc.list_subagent_transcripts("sess"))
+        expected = (
+            tmp_path / "cfg" / "agy-roots" / "master" / ".gemini"
+            / "antigravity-cli" / "brain"
+        )
+        assert reader.brains == [expected]
+        assert Path.home() not in expected.parents
+
+    def test_the_directory_agy_announced_is_preferred(self, tmp_path, monkeypatch):
+        """AG-32's other half, and AG-R-32's mitigation.
+
+        ``roots.PRODUCT_DIR`` is a constant this build hard-codes, and
+        ``hooks.md`` names two other values for it. The running process says
+        where its conversations are on every hook payload, so on a vendor
+        build this app would otherwise mis-derive, the announced directory
+        is the one that has the transcripts in it.
+        """
+        theirs = _seed_conversation(tmp_path / "announced", "sess")
+        reader = _Reader(rows=[{"agent_id": "child"}])
+        svc = _reading_service(tmp_path, monkeypatch, reader)
+        svc._agy_gate = types.SimpleNamespace(brain_dir=theirs)
+        asyncio.run(svc.list_subagent_transcripts("sess"))
+        assert reader.brains == [theirs]
+
+    def test_the_derivation_still_answers_for_a_session_it_never_ran(
+        self, tmp_path, monkeypatch
+    ):
+        """Preferred, not substituted. Nothing is announced before the
+        session's first invocation, and nothing at all is announced about a
+        conversation mirrored by an earlier run of this app — which is
+        exactly the history the browser opens."""
+        reader = _Reader(rows=[])
+        svc = _reading_service(tmp_path, monkeypatch, reader)
+        svc._agy_gate = types.SimpleNamespace(brain_dir=None)
+        asyncio.run(svc.list_subagent_transcripts("sess"))
+        assert reader.brains == [
+            roots.brain_dir(roots.master_root(tmp_path / "cfg"))
+        ]
+
+    def test_an_announced_directory_without_this_conversation_loses(
+        self, tmp_path, monkeypatch
+    ):
+        """Which is what makes browsing survive a vendor upgrade.
+
+        The announced directory is this process's; a session mirrored before
+        the vendor moved its store lives under the old one. Whichever
+        actually holds the conversation is the one read.
+        """
+        derived = _seed_conversation(
+            roots.brain_dir(roots.master_root(tmp_path / "cfg")), "sess"
+        )
+        reader = _Reader(rows=[])
+        svc = _reading_service(tmp_path, monkeypatch, reader)
+        svc._agy_gate = types.SimpleNamespace(brain_dir=tmp_path / "empty" / "brain")
+        asyncio.run(svc.list_subagent_transcripts("sess"))
+        assert reader.brains == [derived]
+
+    def test_containment_and_reading_share_one_directory(
+        self, tmp_path, monkeypatch
+    ):
+        """Chosen once per request, and this is the reason.
+
+        ``get_subagent_transcript`` checks the announcement with
+        ``descendants`` and then reads with ``load``. Two independent
+        resolutions could approve an id against one store and hand back a
+        transcript from the other.
+        """
+        theirs = _seed_conversation(tmp_path / "announced", "sess")
+        reader = _Reader(owned={"child"}, messages=[{"role": "user", "content": "hi"}])
+        svc = _reading_service(tmp_path, monkeypatch, reader)
+        svc._agy_gate = types.SimpleNamespace(brain_dir=theirs)
+        asyncio.run(svc.get_subagent_transcript("child", "sess"))
+        assert reader.brains == [theirs, theirs]
 
     def test_it_lists_the_session_it_was_given(self, tmp_path, monkeypatch):
         reader = _Reader(rows=[{"agent_id": "child"}])
@@ -1028,3 +1528,359 @@ class TestStoppingOneSubagent:
         answer = asyncio.run(svc.stop_task(self.ANNOUNCED))
         assert answer == {"error": "restricted", "reason": "localhost_only"}
         assert gate.refused == {}
+
+
+class TestTheConsultantAgyCanReach:
+    """AG-22's wiring: the listener was built, and reachable by nothing.
+
+    What closes AG-1's asymmetry is not the listener, it is the file that
+    tells `agy` where the listener is. These tests are about that file and
+    about the token's lifetime, because both were chosen against failure
+    modes rather than inherited from a default.
+    """
+
+    def offer(self, tmp_path, monkeypatch, *, available=True, fail=False, **kw):
+        from aic_dc.claude_code import consult_listener as listener_module
+        from aic_dc.claude_code.consultant import ClaudeConsultant
+
+        monkeypatch.setattr(ClaudeConsultant, "available", lambda self: available)
+        if fail:
+            async def explode(self):
+                raise OSError("no socket for you")
+
+            monkeypatch.setattr(
+                listener_module.ConsultationListener, "start", explode
+            )
+        svc = service(tmp_path, **kw)
+        root = roots.master_root(svc._config_dir)
+        return svc, root
+
+    def test_the_config_names_the_listener_that_is_running(
+        self, tmp_path, monkeypatch
+    ):
+        """The whole point, asserted on the artefact ``agy`` actually reads.
+
+        ``serverUrl`` rather than ``url`` is measured — ``url`` is not read
+        — and the bearer has to be one the listener will honour, so the
+        token is checked against the grant table rather than for being
+        non-empty.
+        """
+        svc, root = self.offer(tmp_path, monkeypatch)
+
+        async def go():
+            await svc._offer_consultant(root)
+            try:
+                body = json.loads(
+                    roots.mcp_config_file(root).read_text(encoding="utf-8")
+                )
+                entry = body["mcpServers"]["aic-dc-claude"]
+                assert entry["serverUrl"] == (
+                    f"http://127.0.0.1:{svc._listener.port}/mcp"
+                )
+                token = entry["headers"]["Authorization"].removeprefix("Bearer ")
+                assert svc._listener.resolve(token) is not None
+                assert token == svc._consult_token
+            finally:
+                await svc._retire_consultant()
+
+        asyncio.run(go())
+
+    def test_nothing_to_serve_means_no_file_rather_than_a_dead_one(
+        self, tmp_path, monkeypatch
+    ):
+        """An install with no Claude CLI is a supported install.
+
+        A config file left behind would send `agy` dialling a port that
+        answers nothing, and the user would read an MCP error for a
+        feature that was never switched on.
+
+        **Nothing to serve, not "no Claude".** Since AG-34 the listener
+        also carries the six index tools, so this service is built with no
+        index sources as well — those two absences together are what make
+        the file pointless. The class below is the case where one of them is
+        present.
+        """
+        svc, root = self.offer(tmp_path, monkeypatch, available=False)
+        assert svc.mcp_bridge is None, "this test needs a service with no bridge"
+        roots.write_mcp_config(root, {"mcpServers": {"stale": {}}})
+
+        asyncio.run(svc._offer_consultant(root))
+        assert not roots.mcp_config_file(root).exists()
+        assert svc._listener is None
+
+    def test_a_listener_that_will_not_start_does_not_fail_the_session(
+        self, tmp_path, monkeypatch
+    ):
+        """An optional second opinion must not stop an engine.
+
+        And it must not leave a config file either: every failure path
+        leaves no file rather than a stale one.
+        """
+        svc, root = self.offer(tmp_path, monkeypatch, fail=True)
+        roots.write_mcp_config(root, {"mcpServers": {"stale": {}}})
+
+        asyncio.run(svc._offer_consultant(root))
+        assert not roots.mcp_config_file(root).exists()
+        assert svc._listener is None
+        assert svc._consult_token is None
+
+    def test_the_token_dies_with_the_child(self, tmp_path, monkeypatch):
+        """Lifetime bound to the subprocess and to nothing else."""
+        svc, root = self.offer(tmp_path, monkeypatch)
+
+        async def go():
+            await svc._offer_consultant(root)
+            listener = svc._listener
+            token = svc._consult_token
+            await svc._retire_consultant()
+            assert listener.resolve(token) is None
+            assert listener.port is None
+            assert svc._listener is None and svc._consult_token is None
+            assert not roots.mcp_config_file(root).exists()
+
+        asyncio.run(go())
+
+    def test_one_spawn_holds_one_token(self, tmp_path, monkeypatch):
+        """A second offer retires the first, so no token outlives its child."""
+        svc, root = self.offer(tmp_path, monkeypatch)
+
+        async def go():
+            await svc._offer_consultant(root)
+            first, first_token = svc._listener, svc._consult_token
+            await svc._offer_consultant(root)
+            try:
+                assert svc._consult_token != first_token
+                assert first.resolve(first_token) is None
+                assert svc._listener.resolve(svc._consult_token) is not None
+            finally:
+                await svc._retire_consultant()
+
+        asyncio.run(go())
+
+
+class TestTheIndexToolsAgyCanReach:
+    """AG-34 on the transport that cannot be handed a callable.
+
+    `agy` is a subprocess, so the six index tools reach it the only way
+    anything reaches it: a second MCP server on the same authenticated
+    loopback listener AG-22 built for the second opinion. The listener is
+    the same object, the bearer is the same bearer and the port is the same
+    port — one socket, two servers.
+
+    The failure this class pins is a **structural** one, and it is the
+    reason the two halves had to be separated rather than the tools simply
+    added: ``_offer_consultant`` started the listener only when a Claude CLI
+    was installed, so on a machine without one the config was cleared and
+    the repo intelligence went with the second opinion. A `agy`-only
+    install is a supported install, and it is the one where the symbol map
+    has nothing to do with whether `claude` is on ``PATH``.
+    """
+
+    def sources(self):
+        """The five tree-shaped callables ``main.py`` passes in."""
+        return {
+            "symbol_index": lambda: None,
+            "symbol_index_ready": lambda: True,
+            "doc_index": lambda: None,
+            "doc_index_ready": lambda: True,
+            "flush": lambda: None,
+        }
+
+    def offer(self, tmp_path, monkeypatch, *, available):
+        return TestTheConsultantAgyCanReach.offer(
+            self,
+            tmp_path,
+            monkeypatch,
+            available=available,
+            index_sources=self.sources(),
+        )
+
+    def served(self, root):
+        body = json.loads(roots.mcp_config_file(root).read_text(encoding="utf-8"))
+        return body["mcpServers"]
+
+    def test_repo_intelligence_survives_an_install_with_no_claude(
+        self, tmp_path, monkeypatch
+    ):
+        """The structural blocker, stated as the behaviour it cost.
+
+        Before this the config was cleared and the listener never started,
+        so the six tools were unreachable on the transport most likely to be
+        the only one a subscription user has.
+        """
+        svc, root = self.offer(tmp_path, monkeypatch, available=False)
+        assert svc.mcp_bridge is not None
+
+        async def go():
+            await svc._offer_consultant(root)
+            try:
+                assert list(self.served(root)) == ["aic-dc"]
+                assert svc._listener is not None
+                assert svc._listener.serves_index
+                assert not svc._listener.serves_consultation
+            finally:
+                await svc._retire_consultant()
+
+        asyncio.run(go())
+
+    def test_both_servers_ride_one_socket_and_one_bearer(self, tmp_path, monkeypatch):
+        """Two entries, one port, one token — not two listeners.
+
+        A second listener would be a second port to bind, a second token to
+        revoke and a second thing to leave running after a turn. The bearer
+        is checked against the listener's own grant table rather than for
+        being non-empty, because a config naming a token the listener will
+        not honour is the failure that looks like the tools being broken.
+        """
+        svc, root = self.offer(tmp_path, monkeypatch, available=True)
+
+        async def go():
+            await svc._offer_consultant(root)
+            try:
+                entries = self.served(root)
+                assert sorted(entries) == ["aic-dc", "aic-dc-claude"]
+                port = svc._listener.port
+                tokens = set()
+                for name, entry in entries.items():
+                    assert f"127.0.0.1:{port}" in entry["serverUrl"], name
+                    tokens.add(entry["headers"]["Authorization"])
+                assert len(tokens) == 1
+                token = tokens.pop().removeprefix("Bearer ")
+                assert svc._listener.resolve(token) is not None
+                assert token == svc._consult_token
+            finally:
+                await svc._retire_consultant()
+
+        asyncio.run(go())
+
+    def test_the_two_servers_are_on_different_paths(self, tmp_path, monkeypatch):
+        """One socket needs two mount points, and `agy` dials the URL.
+
+        Asserted on the artefact the binary reads rather than on the app's
+        routing table: a config that named one path twice would send both
+        servers' traffic to whichever answered.
+        """
+        svc, root = self.offer(tmp_path, monkeypatch, available=True)
+
+        async def go():
+            await svc._offer_consultant(root)
+            try:
+                urls = {e["serverUrl"] for e in self.served(root).values()}
+                assert len(urls) == 2
+            finally:
+                await svc._retire_consultant()
+
+        asyncio.run(go())
+
+    def test_the_index_tools_are_reclaimed_with_the_child(
+        self, tmp_path, monkeypatch
+    ):
+        """The same lifetime the second opinion has, for the same reason.
+
+        A token outliving the subprocess it was minted for is a grant to
+        whatever binds that port next.
+        """
+        svc, root = self.offer(tmp_path, monkeypatch, available=False)
+
+        async def go():
+            await svc._offer_consultant(root)
+            listener, token = svc._listener, svc._consult_token
+            await svc._retire_consultant()
+            assert listener.resolve(token) is None
+            assert listener.port is None
+            assert not roots.mcp_config_file(root).exists()
+
+        asyncio.run(go())
+
+
+class _StubListener:
+    """Records the host's pushes without binding a socket."""
+
+    def __init__(self):
+        self.turns: list = []
+        self.cancelled: list = []
+
+    def begin_turn(self, token, turn_id):
+        self.turns.append(("begin", token, turn_id))
+
+    def end_turn(self, token, turn_id):
+        self.turns.append(("end", token, turn_id))
+
+    async def cancel_session(self, session_id):
+        self.cancelled.append(session_id)
+        return True
+
+    async def revoke(self, token):
+        pass
+
+    async def aclose(self):
+        pass
+
+
+class TestTheTurnDrivesTheBudget:
+    """The consultation budget is per turn, and nothing on the wire says so.
+
+    An MCP request carries no turn id, so the host's push at the moment it
+    writes the prompt is the only place that identity exists. Between turns
+    is a *closed* state: a consultation arriving after the host considers
+    the turn over must be refused rather than quietly spending the next
+    turn's budget before it opens.
+    """
+
+    @pytest.fixture
+    def stubbed(self, wired, monkeypatch):
+        svc, _events = wired
+        stub = _StubListener()
+
+        async def offer(config_root):
+            attach()
+
+        def attach():
+            svc._listener = stub
+            svc._consult_token = "tok"
+            svc._consult_spawn_id = "spawn"
+
+        # Attached now *and* re-attached on spawn: a test that starts no
+        # session still has a listener to push to, and one that does still
+        # goes through the real call site.
+        attach()
+        monkeypatch.setattr(svc, "_offer_consultant", offer)
+        return svc, stub
+
+    def test_a_turn_opens_and_closes_its_own_budget(self, stubbed):
+        svc, stub = stubbed
+
+        async def go():
+            await svc.chat_streaming("r1", "hello")
+            for task in list(svc._turn_tasks):
+                await task
+            await svc.shutdown()
+
+        asyncio.run(go())
+        assert stub.turns == [("begin", "tok", "r1"), ("end", "tok", "r1")]
+
+    def test_the_stop_button_reaches_a_consultation(self, stubbed):
+        """The gate cannot, and that is measured.
+
+        Around an MCP call the hook timeline is ``PreToolUse`` at the start
+        and nothing until ``PostInvocation`` when it returns, so the
+        starvation the stop performs is queued behind the very thing it is
+        stopping — for up to `agy`'s own three minutes.
+        """
+        svc, stub = stubbed
+        # The turn is placed here rather than run, because the fake `agy`
+        # finishes in milliseconds and a stop racing it would pass or fail
+        # on timing rather than on the branch under test.
+        svc._turns["r2"] = object()
+
+        assert asyncio.run(svc.cancel_streaming("r2")) == {
+            "status": "ok",
+            "request_id": "r2",
+        }
+        assert stub.cancelled == ["spawn"]
+
+    def test_a_stop_for_a_turn_that_is_over_reaches_nothing(self, stubbed):
+        """No live turn, no consultation to cancel."""
+        svc, stub = stubbed
+        assert asyncio.run(svc.cancel_streaming("gone"))["status"] == "not_running"
+        assert stub.cancelled == []

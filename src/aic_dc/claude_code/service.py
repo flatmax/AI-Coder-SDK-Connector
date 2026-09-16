@@ -53,6 +53,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from aic_dc import framing
 from aic_dc.claude_code import sdk_surface
 from aic_dc.claude_code.account_usage import AccountUsage
 from aic_dc.claude_code.cost import UNPRICED
@@ -84,7 +85,6 @@ from aic_dc.claude_code.session import (
     SessionLostError,
     Turn,
     TurnInProgressError,
-    ViewerFraming,
 )
 from aic_dc.claude_code.session_store import DISK_WARNING_BYTES, RepoSessionStore
 from aic_dc.claude_code.turn_hud import log_turn_hud
@@ -471,14 +471,14 @@ class ClaudeCodeService:
             broadcast=self._broadcast,
             repo_root=self._repo_root,
         )
+        # Built from `index_sources` rather than naming the five again, so
+        # that what the other engines are handed is provably what this one
+        # uses. Two records of the same five callables is how the engines
+        # would come to disagree about readiness without anyone noticing.
         self.mcp_bridge = McpBridge(
-            symbol_index=self._live_symbol_index,
-            symbol_index_ready=lambda: self._symbol_index_ready,
-            doc_index=self._live_doc_index,
-            doc_index_ready=lambda: self.doc_builder.ready,
+            **self.index_sources,
             review_state=self.get_review_state,
             ui_state=self._ui_state_snapshot,
-            flush=self.reindexer.flush,
         )
         # Filled by the call below, drained onto the health record once the
         # session that owns it exists.
@@ -804,21 +804,6 @@ class ClaudeCodeService:
         repo-wide questions, which is the hardest kind of fault to attribute.
         """
         try:
-            hooks = build_hook_matchers(self.reindexer, self._broadcast)
-        except Exception as exc:
-            logger.warning(
-                "Hooks unavailable: the file tree and the indexes will not "
-                "follow the agent's writes, and a compaction pause will go "
-                "unannounced: %s",
-                exc,
-            )
-            hooks = None
-            self._degradations.append(
-                "The post-write re-index hook did not start, so the file tree "
-                "and the symbol map will not follow the agent's writes — "
-                "refresh them by hand after it edits files."
-            )
-        try:
             mcp_servers = {SERVER_NAME: self.mcp_bridge.build_server()}
         except Exception as exc:
             logger.warning(
@@ -833,7 +818,40 @@ class ClaudeCodeService:
                 "will fall back to Glob, Grep and Read, which answer "
                 "repo-wide questions less well."
             )
+        # Before the hooks, which is the reverse of the order this ran in
+        # until AG-28. The `PreToolUse` matcher exists only to read the id
+        # off a consultation tool call, so a session with no consultant
+        # should not register that event at all — and whether there is one
+        # is only known after this line. Its own failure is already
+        # contained: `_add_consultant` never raises, it degrades.
         mcp_servers = self._add_consultant(mcp_servers)
+        try:
+            hooks = build_hook_matchers(
+                self.reindexer,
+                self._broadcast,
+                # Still a callable rather than the bridge itself. The
+                # attribute is the single source of truth for "is there a
+                # consultant", and a hook holding its own reference would
+                # be a second one to keep in agreement.
+                consultant_bridge=(
+                    (lambda: self.consultant_bridge)
+                    if getattr(self, "consultant_bridge", None) is not None
+                    else None
+                ),
+            )
+        except Exception as exc:
+            logger.warning(
+                "Hooks unavailable: the file tree and the indexes will not "
+                "follow the agent's writes, and a compaction pause will go "
+                "unannounced: %s",
+                exc,
+            )
+            hooks = None
+            self._degradations.append(
+                "The post-write re-index hook did not start, so the file tree "
+                "and the symbol map will not follow the agent's writes — "
+                "refresh them by hand after it edits files."
+            )
         return hooks, mcp_servers
 
     def _add_consultant(self, mcp_servers: Any) -> Any:
@@ -962,6 +980,28 @@ class ClaudeCodeService:
         if getattr(self.doc_builder, "failed", False):
             return None
         return self.doc_builder.doc_index
+
+    @property
+    def index_sources(self) -> dict[str, Any]:
+        """The five of :class:`McpBridge`'s callables that belong to the *tree*.
+
+        Handed to the other engines' adapters by ``main.py``, which is what
+        gives them the same six repo-intelligence tools this one has
+        (AG-34). Five and not seven, and the split is the point: the symbol
+        index, its readiness, the doc index, its readiness and the re-index
+        flush all describe *one working tree*, of which there is one however
+        many engines are mounted. ``review_state`` and ``ui_state`` are the
+        two that do not — each engine has its own ``ReviewMode`` and its own
+        idea of what the user is looking at, so an engine sharing those
+        would report the *other* engine's review as its own.
+        """
+        return {
+            "symbol_index": self._live_symbol_index,
+            "symbol_index_ready": lambda: self._symbol_index_ready,
+            "doc_index": self._live_doc_index,
+            "doc_index_ready": lambda: self.doc_builder.ready,
+            "flush": self.reindexer.flush,
+        }
 
     def _ui_state_snapshot(self) -> dict[str, Any]:
         """What the user is pointing at, for the ``ui_state`` tool.
@@ -1334,10 +1374,11 @@ class ClaudeCodeService:
             # The browser may send the viewer with the turn; when it does
             # not, the last `set_viewer_state` push stands in. Same fact,
             # two arrival paths — and the push is the one that keeps
-            # working when the turn comes from somewhere else.
-            viewer=ViewerFraming.from_dict(
-                viewer if viewer is not None else self._viewer_state
-            ),
+            # working when the turn comes from somewhere else. The
+            # precedence moved to `framing.resolve` with the rest of it, so
+            # that the two Antigravity adapters answer this the same way
+            # rather than nearly (AG-33).
+            viewer=framing.resolve(viewer, self._viewer_state),
         )
 
         try:
@@ -1921,7 +1962,13 @@ class ClaudeCodeService:
         # (it maps to the `subagent_stop` surface for exactly this reason).
         bridge = getattr(self, "consultant_bridge", None)
         if bridge is not None and str(task_id).startswith("consultation-"):
-            stopped = await bridge.cancel()
+            # Passed on, because the row it came from is one of possibly
+            # several: a turn can hold two consultations at once — its own
+            # and a `Task` subagent's — and this id is the only thing that
+            # says which row the ⏹ was pressed on. It used to be dropped
+            # here, so the bridge stopped whichever consultation had started
+            # most recently and answered `stopping` either way.
+            stopped = await bridge.cancel(task_id)
             return {
                 "status": "stopping" if stopped else "not_running",
                 "task_id": task_id,
@@ -2244,20 +2291,23 @@ class ClaudeCodeService:
         participant could otherwise put a path of their choosing in front
         of the model on somebody else's turn. It is a small lever, and it
         is still a lever on what the agent reads.
+
+        The rule itself moved to :func:`aic_dc.framing.viewer_payload` on
+        2026-09-14, when the Antigravity adapters started reading the state
+        they had always stored (AG-33). It was written here and *guessed at*
+        there, and the two guesses differed — one stored ``{}`` for empty
+        and kept ``start_line: None`` verbatim. Divergence in a normaliser
+        the browser cannot see the far side of is not a tidiness question:
+        ``viewer-framing.js`` calls one method name and the router points it
+        at whichever engine is mounted.
         """
         restricted = self._check_localhost_only()
         if restricted is not None:
             return restricted
-        if not path or not isinstance(path, str):
-            self._viewer_state = None
+        self._viewer_state = framing.viewer_payload(path, start_line, end_line)
+        if self._viewer_state is None:
             return {"status": "cleared"}
-        state: dict[str, Any] = {"path": path}
-        if isinstance(start_line, int):
-            state["start_line"] = start_line
-        if isinstance(end_line, int):
-            state["end_line"] = end_line
-        self._viewer_state = state
-        return {"status": "ok", **state}
+        return {"status": "ok", **self._viewer_state}
 
     def _schedule_doc_index_build(self) -> None:
         """Start the doc-index build in the background. Idempotent.

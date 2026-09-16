@@ -9,6 +9,25 @@ recording rather than quietly deleting, because "we planned this and then got it
 strongest available evidence for the conversion's premise — see
 [`../plan/README.md`](../plan/README.md).
 
+## Reviews
+
+- [`rearchitecture-review.md`](rearchitecture-review.md) — **"if we started again", answered against
+  measurements rather than taste.** Three rounds through the `second_opinion` consultant, converged
+  2026-09-11. Concludes *no rewrite*: the descriptor-driven router, per-engine adapters and the
+  no-engine-branching rule stand. Carries a five-item ranking, two claims refuted under measurement
+  (one of them ours), one disagreement left standing, and the recurrence that outranks the ranking —
+  four subsystems that broke while reporting themselves healthy. The transport measurements it produced
+  changed a live decision and live in [AG-20](../plan-ag/decisions.md#ag-20) instead.
+- [`blank-sheet-architecture.md`](blank-sheet-architecture.md) — **the same question with nothing
+  already built.** Three further rounds, converged 2026-09-11. Strips the design to no classes and
+  refills it: five concepts (Workspace, Session, Invocation, ApprovalResolver, EventSink) with one
+  inviolable invariant each, and three deleted — *Consultant*, *child session* and *master* are all
+  configurations rather than kinds. Names the conflation under the empty-tab defect (model-to-model and
+  user-to-model shared a mechanism, so a presentation condition truncated a data payload), replaces
+  "never render a tab" with *no sink may be load-bearing*, and carries four more refutations under
+  measurement — one of ours, caught by the reviewer. Its largest risk is not the architecture: it is
+  three processes refreshing one OAuth credential.
+
 ## Retired Because the Platform Implements It
 
 | Design | Superseded by | Notes |

@@ -74,8 +74,11 @@ PENDING = "pending"
 #: ``options.py`` is the expected way to close it.
 PENDING_OPTIONS: dict[str, str] = {
     "betas": "gates opt-in SDK features; today's only value is "
-    "context-1m-2025-08-07, the 1M-token context window. Worth wiring as "
-    "a config field once we decide whether the cost profile suits AIC-DC.",
+    "context-1m-2025-08-07, and on the models AIC-DC actually runs that "
+    "value buys nothing. Opus 5 carries native_1m in the CLI's own model "
+    "registry, so its window resolver returns 1M on that check before it "
+    "ever looks at betas. Leaving this unset is therefore not a decision "
+    "to stay at 200K — see KNOWN_BETAS for the knob that is.",
     "sandbox": "SandboxSettings would confine tool execution (filesystem "
     "and network) below the permission layer, so a bypassPermissions "
     "session would still be contained. Overlaps can_use_tool but is "
@@ -149,9 +152,14 @@ PENDING_OPTIONS: dict[str, str] = {
 HOOK_EVENTS: dict[str, tuple[str, str]] = {
     "PostToolUse": (HANDLED, "broadcasts the write and queues re-indexing"),
     "PreToolUse": (
-        DECLINED,
-        "a pre-tool veto is a permission decision, and can_use_tool is "
-        "where AIC-DC makes those — two gates would disagree",
+        HANDLED,
+        "registered on the two Antigravity tools alone, and it decides "
+        "nothing: it copies down the tool_use_id so a consultation can "
+        "render inside the card that spawned it (AG-28), which is the one "
+        "fact an in-process MCP handler is never told. The veto half stays "
+        "declined — a pre-tool veto is a permission decision and "
+        "can_use_tool is where AIC-DC makes those, so a decision returned "
+        "here would shadow it and two gates would disagree",
     ),
     "PermissionRequest": (
         DECLINED,
@@ -204,10 +212,22 @@ HOOK_EVENTS: dict[str, tuple[str, str]] = {
 #: clearest "there is a new feature" signal the wheel can give us, so it
 #: fails the test by name rather than sitting in a report nobody opened.
 KNOWN_BETAS: dict[str, str] = {
-    "context-1m-2025-08-07": "the 1M-token context window. Not requested: "
-    "it changes the cost profile of every turn, and the Context tab's "
-    "compaction thresholds are read from the live window, so enabling it "
-    "is a config decision with a UI consequence rather than a flag flip.",
+    "context-1m-2025-08-07": "the 1M-token context window, for models "
+    "that need asking. Not requested, and on Opus 5 that costs us "
+    "nothing to skip: the CLI's model registry gives claude-opus-5 "
+    "context.window 1e6 with native_1m set, and its window resolver "
+    "returns 1M on the native check ahead of the beta check, so a "
+    "session here runs a 1M window today. Verified 2026-09-11 by "
+    "``/autocompact`` on the bundled CLI, which answers ``auto`` — and "
+    "auto for a native-1M model is 1M, because the 200K model-default "
+    "branch is guarded by ``window < 1e6`` and never fires. The real "
+    "control is the CLI's autoCompactWindow setting (env override "
+    "CLAUDE_CODE_AUTO_COMPACT_WINDOW, slash command /autocompact, "
+    "clamped to 100K-1M and applied as min(model window, configured)). "
+    "That is a cap on where autocompact triggers rather than on the "
+    "window itself, which is the distinction the Context tab already "
+    "draws between autoCompactThreshold and maxTokens. Queued as "
+    "next.md § C12.",
 }
 
 #: Client methods that exist for hosts we are not. Checked so the client
@@ -402,10 +422,20 @@ def assigned_option_keys() -> frozenset[str]:
 def registered_hook_events() -> frozenset[str]:
     """Hook events ``hooks.py`` registers, by reading its AST.
 
-    Same reasoning as :func:`assigned_option_keys`: the returned mapping's
-    literal keys are the registration, and reading them from syntax means
-    adding a matcher updates this without touching :data:`HOOK_EVENTS`'s
-    status by hand.
+    Same reasoning as :func:`assigned_option_keys`: the mapping's literal
+    keys are the registration, and reading them from syntax means adding a
+    matcher updates this without touching :data:`HOOK_EVENTS`'s status by
+    hand.
+
+    **Two shapes, because there are two kinds of registration.** The
+    unconditional events are keys of a dict literal. ``PreToolUse`` is
+    added afterwards under an ``if`` — it registers only when the session
+    has an Antigravity bridge to hand the id to (AG-28) — so its name
+    appears as a subscript on the assignment target instead. Reading only
+    the dict literal is what this function did until that branch existed,
+    and it silently reported *nothing* once the function stopped returning
+    a literal at all. Both forms are collected now, and the union is the
+    coverage: an event registered on any path is an event we handle.
     """
     source = _module_source("hooks")
     if not source:
@@ -415,17 +445,25 @@ def registered_hook_events() -> frozenset[str]:
     except SyntaxError:  # pragma: no cover - our own module
         return frozenset()
 
+    found: set[str] = set()
     for node in ast.walk(tree):
         if not isinstance(node, ast.FunctionDef) or node.name != "build_hook_matchers":
             continue
         for inner in ast.walk(node):
-            if isinstance(inner, ast.Return) and isinstance(inner.value, ast.Dict):
-                return frozenset(
+            if isinstance(inner, ast.Dict):
+                found.update(
                     key.value
-                    for key in inner.value.keys
+                    for key in inner.keys
                     if isinstance(key, ast.Constant) and isinstance(key.value, str)
                 )
-    return frozenset()
+            elif isinstance(inner, ast.Assign):
+                for target in inner.targets:
+                    if not isinstance(target, ast.Subscript):
+                        continue
+                    key = target.slice
+                    if isinstance(key, ast.Constant) and isinstance(key.value, str):
+                        found.add(key.value)
+    return frozenset(found)
 
 
 @functools.cache

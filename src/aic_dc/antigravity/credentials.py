@@ -245,13 +245,25 @@ def _truthy(value: str | None) -> bool:
     return (value or "").strip().lower() in ("true", "1")
 
 
-def _agy_login_exists(home: Path) -> bool:
-    """Whether the ``agy`` CLI has state, i.e. the owner is logged in there.
+def _agy_state_exists(home: Path) -> bool:
+    """Whether the ``agy`` CLI has been *used* here. Not whether it is logged in.
 
     Deliberately a directory check rather than a token read: what matters
     is that the *user believes they are authenticated*, and any state at
     all is evidence of that. Reading a credential file would be both more
     fragile and a secret this module has no business touching.
+
+    **Renamed from ``_agy_login_exists`` on 2026-09-14, because the old name
+    was a claim this check cannot make and the message believed it.** The
+    state directory outlives any login: on the author's machine it existed
+    from 2026-09-08 to 2026-09-14 while every CLI log in it said *"You are
+    not logged into Antigravity"*, and for six days the no-credential
+    message asserted a login that had never once been completed. There is
+    also nothing on disk to check instead — ``agy`` keeps its refresh token
+    in the OS keyring (``zalando/go-keyring``, service ``antigravity``),
+    and the only files that appear on a successful login are conversation
+    state. So the trigger stays exactly as it was, and the *wording* it
+    feeds carries the uncertainty this function actually has.
     """
     return (home / AGY_STATE_DIR).is_dir()
 
@@ -625,15 +637,16 @@ def _missing(
         f"no ${API_KEY_VAR}, no key file at {path}, and no Vertex project "
         f"(${VERTEX_FLAG_VARS[0]} is unset)"
     )
-    if _agy_login_exists(home):
+    if _agy_state_exists(home):
         return Credentials(
             mode=NONE,
             source=(
-                f"{looked}. An Antigravity login exists at "
-                f"~/{AGY_STATE_DIR}, but the Python SDK has no OAuth path "
-                "and cannot use it — the agy CLI is a separate program with "
-                "separate authentication. A Gemini API key or a Vertex "
-                "project is required in addition to it."
+                f"{looked}. The agy CLI has been used here "
+                f"(~/{AGY_STATE_DIR}), so there may be an Antigravity login "
+                "on this machine — but the Python SDK has no OAuth path and "
+                "could not use one anyway: the agy CLI is a separate program "
+                "with separate authentication. A Gemini API key or a Vertex "
+                "project is required regardless."
             ),
             warnings=tuple(warnings or [])
             + (

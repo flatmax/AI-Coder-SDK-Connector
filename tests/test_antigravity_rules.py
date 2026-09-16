@@ -10,8 +10,6 @@ Offline. No engine, no network.
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 
 from aic_dc.antigravity.rules import (
@@ -264,4 +262,92 @@ class TestRevocation:
 
         assert rule_id(command_rule(tmp_path, "ls")) != rule_id(
             command_rule(tmp_path, "rm -rf /")
+        )
+
+
+class TestMcpRulesNameTheirTarget:
+    """Hazard 4: ``call_mcp_tool`` is a multiplexer, not a tool.
+
+    Every MCP call on the ``agy`` transport arrives under that one name
+    with the real target in its arguments, so a rule keyed on the name
+    would grant every MCP server the user ever configures at once. Until
+    the ``mcp_tool`` kind existed the opposite failure was live: the exec
+    branch reads ``command``, an MCP call carries none, so no rule was
+    offered and "always allow" was unreachable — a consultation could be
+    approved every single time and never stop asking.
+    """
+
+    def mcp_rule(self, tmp_path, server="aic-dc-claude", tool="second_opinion"):
+        rules = derive_rules(
+            tmp_path,
+            "call_mcp_tool",
+            {"ServerName": server, "ToolName": tool, "Arguments": {"question": "q"}},
+            "exec",
+        )
+        assert len(rules) == 1
+        return rules[0]
+
+    def test_a_rule_is_offered_at_all(self, tmp_path):
+        """The bug this kind exists for, asserted on the artefact."""
+        rule = self.mcp_rule(tmp_path)
+        assert rule[MATCH_KEY] == {
+            "kind": "mcp_tool",
+            "value": "aic-dc-claude/second_opinion",
+        }
+        assert "aic-dc-claude/second_opinion" in rule["label"]
+
+    def test_it_permits_that_server_and_tool(self, tmp_path):
+        s = store(tmp_path)
+        s.add(self.mcp_rule(tmp_path))
+        assert s.allows(
+            command=None,
+            path=None,
+            tool_name="call_mcp_tool",
+            mcp_tool="aic-dc-claude/second_opinion",
+        )
+
+    def test_it_permits_nothing_else(self, tmp_path):
+        """The widening this kind is written to refuse."""
+        s = store(tmp_path)
+        s.add(self.mcp_rule(tmp_path))
+        for other in (
+            "aic-dc-claude/generate_image",
+            "some-other-server/second_opinion",
+            "aic-dc-claude",
+            "aic-dc-claude/second_opinion/extra",
+            "",
+        ):
+            assert not s.allows(
+                command=None,
+                path=None,
+                tool_name="call_mcp_tool",
+                mcp_tool=other,
+            ), other
+
+    def test_a_call_with_no_target_matches_nothing(self, tmp_path):
+        """An unreadable target is not a wildcard."""
+        s = store(tmp_path)
+        s.add(self.mcp_rule(tmp_path))
+        assert not s.allows(command=None, path=None, tool_name="call_mcp_tool")
+
+    def test_no_rule_is_offered_when_the_target_cannot_be_read(self, tmp_path):
+        """The dialog still shows; nothing standing is offered.
+
+        A payload whose ``ServerName``/``ToolName`` this code cannot read
+        is a call whose target is unknown, and the one thing that must not
+        follow from an unknown target is a standing grant.
+        """
+        for args in ({}, {"ServerName": "s"}, {"ServerName": "", "ToolName": "t"},
+                     {"ServerName": "s", "ToolName": 7}):
+            assert derive_rules(tmp_path, "call_mcp_tool", args, "exec") == []
+
+    def test_an_mcp_rule_does_not_leak_into_the_command_path(self, tmp_path):
+        """Granting a consultation must not grant a shell command."""
+        s = store(tmp_path)
+        s.add(self.mcp_rule(tmp_path))
+        assert not s.allows(
+            command="aic-dc-claude/second_opinion", path=None, tool_name="run_command"
+        )
+        assert not s.allows(
+            command="rm -rf /", path=None, tool_name="call_mcp_tool"
         )

@@ -8,6 +8,7 @@
 //   - generateRequestId: backend-compatible request ID
 //   - _AGENT_LABEL_MAX_LENGTH: tab-strip label budget
 //   - localStorage helpers for persisted toggles
+//   - fillComposer: the one way anything writes the prompt box
 //   - Scroll thresholds
 
 /**
@@ -108,6 +109,42 @@ export function formatRunDuration(ms) {
   const hours = Math.floor(totalSeconds / 3600);
   const minutes = Math.floor((totalSeconds % 3600) / 60);
   return `${hours}h ${String(minutes).padStart(2, '0')}m`;
+}
+
+/**
+ * Put text in the composer at the cursor, and leave it there.
+ *
+ * The one way anything in this panel writes the prompt box for the user, so
+ * that "offer some words" is never confused with "speak for them": nothing
+ * here sends. A prompt the user can read, edit and abandon is the only kind
+ * this app puts words into — the same rule the message toolbar's paste-to-
+ * prompt button follows, and it is why re-asking a lost question is not a UI
+ * that re-runs a tool call (specs5/5-webapp/chat.md § What Tool Cards
+ * Deliberately Do Not Do).
+ *
+ * Falls back to appending to `panel._input` when the textarea is not in the
+ * DOM — the panel may be rendering a tab that does not show it — because the
+ * property is what the next render reads.
+ */
+export function fillComposer(panel, text) {
+  if (!panel || typeof text !== 'string' || !text) return;
+  const ta = panel.shadowRoot?.querySelector('.input-textarea');
+  if (!ta) {
+    panel._input = `${panel._input || ''}${text}`;
+    return;
+  }
+  const before = ta.value.slice(0, ta.selectionStart);
+  const after = ta.value.slice(ta.selectionEnd);
+  const next = `${before}${text}${after}`;
+  panel._input = next;
+  ta.value = next;
+  const cursor = before.length + text.length;
+  ta.setSelectionRange(cursor, cursor);
+  ta.focus();
+  // The panel's own input handler owns the draft save, the mention filter and
+  // the slash palette; dispatching is how they hear about a value they did
+  // not see typed.
+  ta.dispatchEvent(new Event('input', { bubbles: true }));
 }
 
 /**

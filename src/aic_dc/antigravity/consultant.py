@@ -168,6 +168,18 @@ DEFAULT_TIMEOUT_SECONDS = 120.0
 STDERR_TAIL_LINES = 6
 
 
+def _ignore(_step: Any) -> None:
+    """The absent sink, as an object rather than as a condition.
+
+    A no-op observer for the case where nobody is watching, so
+    :meth:`Consultant._drive`'s loop calls one thing unconditionally.
+    Naming the absence is the point: ``if observer is not None`` inside a
+    frame loop is where a rendering condition gets to decide what the
+    caller receives, which is the fault behind
+    ``specs5/known-issues.md`` § *An empty consultation tab*.
+    """
+
+
 class ConsultationError(RuntimeError):
     """A consultation could not be completed.
 
@@ -193,6 +205,32 @@ class _Turn:
     #: ``Conversation.last_turn_usage`` — tokens, never a cost (AG-6).
     #: No step carries it, which phase 3's live run found the hard way.
     usage: Any = None
+
+
+@dataclasses.dataclass
+class _Flight:
+    """One consultation in flight, and the two handles it is stopped by.
+
+    A record per consultation rather than a slot per consultant, because
+    two consultations can be in flight at once — the shipped shape held
+    one ``_conversation`` for all of them, so ⏹ on either row reached
+    whichever had started most recently and the other could not be
+    stopped at all.
+
+    Mutable, and the caller keeps its own reference: ``_chat`` reads
+    ``connection`` off this object *after* the registry entry has been
+    dropped, which is what lets a failed consultation still be explained
+    with the harness's own stderr without a second shared slot to go
+    stale. The same shape as ``claude_code/consult_listener.py``'s
+    ``_InFlight``, for the same reason.
+    """
+
+    #: The live conversation, while there is one. ``None`` before the
+    #: harness is up and again the moment the frame loop ends, so a
+    #: stopped consultation cannot be stopped twice.
+    conversation: Any = None
+    #: The connection, kept past the conversation for its stderr.
+    connection: Any = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -244,12 +282,14 @@ class Consultant:
         self._text_model = text_model
         self._image_model = image_model
         self._timeout = timeout_seconds
-        #: The live conversation, while a consultation is running. Held so
-        #: :meth:`cancel` has something to halt (AG-13).
-        self._conversation: Any = None
-        #: The last connection, kept after teardown so a failure can still
-        #: be explained with the harness's own stderr.
-        self._last_connection: Any = None
+        #: Consultations in flight, by the id their caller gave them. Held
+        #: so :meth:`cancel` has something to halt (AG-13), and keyed
+        #: rather than slotted so that ⏹ on one row cannot reach another
+        #: consultation's conversation.
+        self._live: dict[str, _Flight] = {}
+        #: Only for a caller that supplied no id of its own — see
+        #: :meth:`_key`.
+        self._minted = 0
 
     @property
     def credentials(self) -> Credentials:
@@ -294,8 +334,33 @@ class Consultant:
     # Consultations
     # ------------------------------------------------------------------
 
+    def _key(self, consultation_id: str | None) -> str:
+        """The registry key for one consultation.
+
+        The caller's own id whenever there is one, because that is what ⏹
+        sends: the bridge mints it for the row, so a stop can only reach
+        the right conversation if both sides agree on the name. A direct
+        caller — a probe, a test — has no row and no id, and gets a minted
+        key so that two of them still cannot collide in the registry.
+
+        **Not read off the observer**, though the observer is threaded
+        through the same calls and could carry it. The observer is a sink,
+        and no sink in this module is load-bearing: a consultation with no
+        browser attached must still be stoppable, so identity arrives as
+        an argument rather than as a property of who happens to be
+        watching.
+        """
+        if consultation_id:
+            return str(consultation_id)
+        self._minted += 1
+        return f"local-{id(self):x}-{self._minted}"
+
     async def second_opinion(
-        self, question: str, context: str = "", observer: Any = None
+        self,
+        question: str,
+        context: str = "",
+        observer: Any = None,
+        consultation_id: str | None = None,
     ) -> str:
         """Ask Antigravity one question and return its answer as text.
 
@@ -303,6 +368,10 @@ class Consultant:
         is how the caller supplies what it already read. Two independent
         agents disagreeing about a diff is information; one agent given a
         second chance to browse the repository is not.
+
+        ``consultation_id`` is what :meth:`cancel` will be given for this
+        call, and omitting it means "nothing will ask for this one by
+        name".
         """
         question = (question or "").strip()
         if not question:
@@ -310,7 +379,11 @@ class Consultant:
 
         prompt = question if not context.strip() else f"{question}\n\n{context.strip()}"
         turn = await self._chat(
-            prompt, model=self._text_model, builtin_tools=(), observer=observer
+            prompt,
+            model=self._text_model,
+            builtin_tools=(),
+            observer=observer,
+            consultation_id=consultation_id,
         )
         if not turn.text:
             raise ConsultationError(
@@ -324,6 +397,7 @@ class Consultant:
         output_name: str = "",
         aspect_ratio: str = "",
         observer: Any = None,
+        consultation_id: str | None = None,
     ) -> ImageResult:
         """Generate an image into the repository, and verify where it went.
 
@@ -354,6 +428,7 @@ class Consultant:
             model=self._image_model,
             builtin_tools=("GENERATE_IMAGE",),
             observer=observer,
+            consultation_id=consultation_id,
         )
         return self._verify_image(turn.chunks, turn.text)
 
@@ -362,7 +437,7 @@ class Consultant:
     # ------------------------------------------------------------------
 
     async def _drive(
-        self, agent: Any, prompt: str, observer: Any = None
+        self, agent: Any, prompt: str, observer: Any, flight: _Flight
     ) -> _Turn:
         """Send one prompt and drain its steps, inside the agent's lifetime.
 
@@ -383,27 +458,34 @@ class Consultant:
         conversation directly keeps the work inside the lifetime that owns
         the connection.
 
-        The conversation is held for the duration so :meth:`cancel` has
-        something to halt, and dropped in ``finally`` so a stopped
-        consultation cannot be stopped twice.
+        The conversation is held on this consultation's own ``_Flight`` so
+        :meth:`cancel` has something to halt, and dropped in ``finally`` so
+        a stopped consultation cannot be stopped twice.
         """
         conversation = agent.conversation
-        self._conversation = conversation
+        flight.conversation = conversation
+        #: Resolved once, before the loop, so the frame loop has no
+        #: branch on who is watching. On this transport the answer comes
+        #: from ``conversation.last_response`` rather than from the
+        #: observer, so nothing here is load-bearing — but the shape is
+        #: kept identical to ``AgyConsultant._run``, where it was, because
+        #: the fork is easier not to reintroduce when neither loop has one.
+        feed = observer if observer is not None else _ignore
         # Kept past the `finally` below on purpose. `_chat`'s except
-        # handlers run *after* it, so reading stderr off `_conversation`
+        # handlers run *after* it, so reading stderr off `flight.conversation`
         # would always find None and the diagnosis would silently be
         # empty — the failure this whole tail exists to prevent, one
-        # layer up.
-        self._last_connection = getattr(conversation, "connection", None)
+        # layer up. On the flight rather than on the consultant, so a
+        # concurrent consultation's harness cannot be the one quoted.
+        flight.connection = getattr(conversation, "connection", None)
         steps: list[Any] = []
         try:
             await conversation.send(prompt)
             async for step in conversation.receive_steps():
                 steps.append(step)
-                if observer is not None:
-                    observer(step)
+                feed(step)
         finally:
-            self._conversation = None
+            flight.conversation = None
 
         return _Turn(
             text=(conversation.last_response or "").strip(),
@@ -412,7 +494,7 @@ class Consultant:
             usage=turn_usage_of(conversation),
         )
 
-    def _stderr_tail(self) -> str:
+    def _stderr_tail(self, flight: _Flight) -> str:
         """The harness's own last words, for a failure that needs them.
 
         Empty string when there is nothing to add, so callers can
@@ -420,9 +502,15 @@ class Consultant:
         attribute path: this is private SDK surface reached from a failure
         handler, and a diagnostic that raises while explaining a failure
         replaces a useful message with a useless one.
+
+        Takes the flight rather than reading a slot, so the harness quoted
+        is the one that failed. It used to read the consultant's own last
+        connection, which is the right object exactly while one
+        consultation runs at a time: with two, a failure would be
+        explained with whichever harness had started most recently.
         """
         try:
-            lines = list(self._connection_stderr())[-STDERR_TAIL_LINES:]
+            lines = list(self._connection_stderr(flight))[-STDERR_TAIL_LINES:]
         except Exception:  # noqa: BLE001 - a missing diagnosis is not a failure
             logger.debug("Could not read the harness stderr", exc_info=True)
             return ""
@@ -430,7 +518,7 @@ class Consultant:
             return ""
         return "\n\nThe Antigravity harness last said:\n" + "\n".join(lines)
 
-    def _connection_stderr(self) -> Any:
+    def _connection_stderr(self, flight: _Flight) -> Any:
         """The harness's stderr deque, live connection or last one.
 
         The live conversation first — a failure raised mid-turn still has
@@ -438,27 +526,46 @@ class Consultant:
         error paths, which run after the agent's context manager has
         closed and cleared it.
         """
-        live = getattr(self._conversation, "connection", None)
-        connection = live if live is not None else self._last_connection
+        live = getattr(flight.conversation, "connection", None)
+        connection = live if live is not None else flight.connection
         return getattr(connection, "_stderr_lines", ()) or ()
 
-    async def cancel(self) -> bool:
+    async def cancel(self, consultation_id: str | None = None) -> bool:
         """Halt a running consultation. Safe when there is none.
 
         AG-13's ⏹ Stop. The subagent tab offers one on every row, and
         without this it would be decorative — which is worse than absent,
         because a button that does nothing reads as a hung engine rather
         than as a missing feature.
+
+        **Named, because a row is named.** ⏹ is pressed on one row and
+        sends that row's task id, so this halts that consultation and no
+        other. An unknown id returns ``False`` — the honest answer, which
+        ``stop_task`` renders as ``not_running``: the consultation it names
+        either finished or was never here, and reporting ``stopping`` for
+        it would be a claim about something this object cannot see.
+
+        ``None`` halts every live consultation, which is what a caller
+        holding no id means: a probe or a test drives one at a time. The
+        bridge never sends it.
         """
-        conversation = self._conversation
-        if conversation is None:
-            return False
-        try:
-            await conversation.cancel()
-        except Exception:  # noqa: BLE001 - a cancel that fails is not fatal
-            logger.exception("Cancelling the consultation failed")
-            return False
-        return True
+        if consultation_id is None:
+            flights = list(self._live.values())
+        else:
+            flight = self._live.get(str(consultation_id))
+            flights = [flight] if flight is not None else []
+        stopped = False
+        for flight in flights:
+            conversation = flight.conversation
+            if conversation is None:
+                continue
+            try:
+                await conversation.cancel()
+            except Exception:  # noqa: BLE001 - a cancel that fails is not fatal
+                logger.exception("Cancelling the consultation failed")
+                continue
+            stopped = True
+        return stopped
 
     async def _chat(
         self,
@@ -467,6 +574,7 @@ class Consultant:
         model: str,
         builtin_tools: tuple[str, ...],
         observer: Any = None,
+        consultation_id: str | None = None,
     ) -> _Turn:
         """Start a harness, send one prompt, drain the answer, shut down.
 
@@ -522,15 +630,24 @@ class Consultant:
             policies=[policy.deny_all(), *(policy.allow(t.value) for t in enabled)],
             **self._credentials.config_kwargs(),
         )
+        # Registered before the harness starts and dropped in the
+        # `finally`, so the window in which ⏹ can find this consultation is
+        # exactly the window in which there is something to halt. The local
+        # reference outlives the registry entry on purpose: the handlers
+        # below read the connection's stderr off it, and they run before
+        # the `finally` clears the entry but must not depend on that order.
+        key = self._key(consultation_id)
+        flight = _Flight()
+        self._live[key] = flight
         try:
             async with asyncio.timeout(self._timeout):
                 async with Agent(config) as agent:
-                    return await self._drive(agent, prompt, observer)
+                    return await self._drive(agent, prompt, observer, flight)
         except TimeoutError as exc:
             raise ConsultationError(
                 f"Antigravity did not answer within {self._timeout:.0f}s. "
                 "The consultation was abandoned; nothing was written."
-                + self._stderr_tail()
+                + self._stderr_tail(flight)
             ) from exc
         except (
             types.AntigravityConnectionError,
@@ -547,7 +664,12 @@ class Consultant:
             # MCP tool handler whose contract is "every failure comes back
             # as prose the model can act on". An unwrapped SDK error
             # escapes it and reaches the model as a stack trace.
-            raise ConsultationError(_explain(exc) + self._stderr_tail()) from exc
+            raise ConsultationError(_explain(exc) + self._stderr_tail(flight)) from exc
+        finally:
+            # Whatever happened, this consultation is over and ⏹ must not
+            # find it: a stale entry would answer `stopping` for a
+            # conversation that has already gone.
+            self._live.pop(key, None)
 
     # ------------------------------------------------------------------
     # AG-R-3: believe the filesystem, not the tool

@@ -19,6 +19,28 @@ import {
   RESIZE_CORNER,
 } from './constants.js';
 import { saveDockedWidth, saveUndockedPos } from './persistence.js';
+// The dock floor and gutter belong to the panel being placed, not to the
+// shell placing it — the floor is a breakpoint in that component's own
+// stylesheet. Imported rather than copied so the two cannot drift.
+import {
+  QUESTION_DOCK_GUTTER,
+  QUESTION_DOCK_MIN_WIDTH,
+} from '../permission-dialog/constants.js';
+
+/**
+ * The narrowest region the pending question could be docked into.
+ *
+ * Asked of the dialog, which is the only thing that knows what the request's
+ * body will lay out as. Falls back to the wide floor when the element has not
+ * upgraded yet or there is nothing pending — the conservative direction, since
+ * being wrong that way costs a centred modal the user can collapse, and being
+ * wrong the other way docks a comparison into a region that stacks it.
+ */
+function questionDockMinWidth(host) {
+  const dialog = host.shadowRoot?.querySelector('aic-permission-dialog');
+  const width = dialog?.dockMinWidth;
+  return typeof width === 'number' ? width : QUESTION_DOCK_MIN_WIDTH;
+}
 
 /**
  * Query the dialog element's current rect. Used at drag
@@ -289,6 +311,103 @@ export function onPointerUp(host) {
     h: window.innerHeight,
   };
   saveUndockedPos(host);
+}
+
+/**
+ * The viewport x where the docked panel ends, or null when it
+ * isn't occluding a full-height strip.
+ *
+ * Measured from the panel's own rect rather than recomputed
+ * from `_dockedWidth` or the stylesheet's `width: 50%`. The
+ * measured right edge already accounts for `min-width`, the
+ * 1px border, and an in-flight resize drag that has written
+ * `dialog.style.width` without yet committing it to reactive
+ * state — three ways a recomputation would drift.
+ *
+ * Null when undocked (it floats, so there is no strip) or
+ * minimized (collapsed to its tab strip at the top). Both
+ * callers want the same answer for those: the viewer takes
+ * the whole viewport, and a question has nothing to dock
+ * beside.
+ *
+ * Two readers, one measurement, because the pair disagreeing
+ * would put a question panel over the viewer's own left edge:
+ * `syncViewerInset` reserves the strip, `questionDockLeft`
+ * fills what is left of it.
+ */
+export function dockedPanelRight(host) {
+  const dialog = host.shadowRoot?.querySelector('.dialog');
+  if (!dialog || host._minimized || dialog.classList.contains('floating')) {
+    return null;
+  }
+  const rect = dialog.getBoundingClientRect();
+  // Docked means flush against the left edge. The `left` guard
+  // keeps a mid-drag dialog that hasn't picked up the
+  // `floating` class yet from insetting the viewer by a rect
+  // that no longer starts at the edge.
+  if (!(rect.width > 0 && rect.left <= 0)) return null;
+  return Math.round(rect.right);
+}
+
+/**
+ * Where an `interact` request should dock, in viewport px, or
+ * null for "there is nowhere — use the centred modal".
+ *
+ * A question is docked beside the chat because its options are
+ * written about the transcript, and a modal over the chat asks
+ * the user to answer from memory
+ * (specs5/5-webapp/permission-dialog.md § Placement). Three
+ * things have to be true for that to be an improvement:
+ *
+ *   - The panel is docked and expanded, so there is a strip to
+ *     dock beside rather than a floating window to dodge.
+ *   - The chat is actually on screen. On the Settings or
+ *     Context tab the panel is a full-height opaque box with
+ *     no transcript in it, which is the § Placement case the
+ *     modal exists for.
+ *   - What is left is wide enough to hold the question. Below
+ *     the floor an option's example stacks under its options
+ *     instead of beside them, and § interact wants both at
+ *     once — so a user who has dragged the panel out to 80%
+ *     gets the modal back rather than a cramped dock.
+ *
+ * The floor is the pending request's rather than one number for
+ * all of them. As a constant 720 it made the dock unreachable
+ * in practice: with gutters it wants a viewport near 1480 before
+ * even the default half-width panel leaves room, so any panel the
+ * user had widened never docked anything. It buys the compare
+ * grid, and most questions do not draw one — so the ones that do
+ * keep it and the rest dock at 420
+ * (permission-dialog.md § A question docks beside the chat).
+ */
+export function questionDockLeft(host) {
+  if (host.activeTab !== 'files') return null;
+  const left = dockedPanelRight(host);
+  if (left == null) return null;
+  const available = (window.innerWidth || 0) - left;
+  const floor = questionDockMinWidth(host);
+  if (available < floor + 2 * QUESTION_DOCK_GUTTER) {
+    return null;
+  }
+  return left;
+}
+
+/**
+ * Publish the dock geometry to reactive state, so the
+ * permission dialog receives it as a property.
+ *
+ * Reactive rather than read by the dialog itself: the dialog
+ * would have to reach through the shell's shadow root for a
+ * rect, and nothing would tell it when a resize drag moved
+ * one. Setting state here re-renders the binding instead.
+ *
+ * @returns {boolean} whether the value changed.
+ */
+export function syncQuestionDock(host) {
+  const left = questionDockLeft(host);
+  if (host._questionDockLeft === left) return false;
+  host._questionDockLeft = left;
+  return true;
 }
 
 /**

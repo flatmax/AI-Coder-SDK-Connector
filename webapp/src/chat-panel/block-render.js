@@ -29,8 +29,17 @@ import { renderMarkdown } from '../markdown.js';
 import { toRepoPath } from '../repo-path.js';
 import { costLabel, modelUsageLines, taskUsage } from '../turn-cost.js';
 
-import { collectToolPaths, isTodoWrite, latestTodos, toolStatus } from './blocks.js';
+import {
+  collectToolPaths,
+  consultationNotices,
+  consultationPosture,
+  isConsultation,
+  isTodoWrite,
+  latestTodos,
+  toolStatus,
+} from './blocks.js';
 import { revealHealth } from './health-banner.js';
+import { fillComposer } from './helpers.js';
 
 // ---------------------------------------------------------------
 // Terminal-reason badge
@@ -114,12 +123,16 @@ export function renderTerminalBadge(reason) {
 /**
  * Whether a block's body is showing.
  *
- * An explicit click always wins. Absent one, three kinds of card open
+ * An explicit click always wins. Absent one, four kinds of card open
  * themselves:
  *
  *   - A call that failed or was denied, driven by the status flag and never
  *     by string-sniffing the result text (specs5/5-webapp/chat.md § Card
  *     Anatomy).
+ *   - A call that never returned, for the same reason: the body is where it
+ *     says so in words, and where an interrupted `AskUserQuestion` offers the
+ *     only way back to a question the restart lost. A collapsed card leaves
+ *     that on a tooltip over a 0.5rem dot.
  *   - An edit-shaped call, because the diff *is* what the card is about: the
  *     header names the file and nothing else, so a collapsed `Edit` row hides
  *     the only part a reader is scanning for. An earlier draft kept these
@@ -138,7 +151,9 @@ export function blockExpanded(panel, block) {
   if (typeof explicit === 'boolean') return explicit;
   if (block?.kind !== 'tool') return false;
   const status = toolStatus(block);
-  if (status === 'error' || status === 'denied') return true;
+  if (status === 'error' || status === 'denied' || status === 'interrupted') {
+    return true;
+  }
   if (status === 'awaiting') return false;
   return diffSegments(block).length > 0;
 }
@@ -175,13 +190,32 @@ function subagentBlocksKey(row) {
  * inline made a delegated turn read as though it had happened twice
  * (specs5/5-webapp/chat.md § Subagent Activity).
  *
- * No auto-expand branch, deliberately, and in particular not one for a live
- * subagent: the head already carries the running status and the tool the
- * subagent is in, which is the part worth watching from the main transcript.
+ * No auto-expand branch for a delegated subagent, deliberately, and in
+ * particular not one for a live one: the head already carries the running
+ * status and the tool it is in, which is the part worth watching from the
+ * main transcript.
+ *
+ * A **consultation** is the exception, and it is expanded by default because
+ * the duplication argument above does not hold for it. A `Task` subagent's
+ * nested blocks are its tool calls and its result is a terse summary, so the
+ * two are different things and drawing both is a repeat. For a consultation
+ * the nested stream *is* the answer — there are no tool calls, the gate
+ * permits none — and the one thing collapsing it saves the reader is the
+ * answer they asked for. So this is the default surface (AG-29), and the
+ * `second_opinion` card beside it stays collapsed under `blockExpanded`,
+ * which leaves exactly one copy on screen.
+ *
+ * The check is `typeof === 'boolean'` rather than `=== true` so that an
+ * explicit collapse is a value this can read back. Against `=== true` a user
+ * who closed a consultation would store `false`, be told `false !== true` is
+ * just "unset", and get the default back — a disclosure that reopens itself.
  */
 export function subagentBlocksExpanded(panel, row) {
   const key = subagentBlocksKey(row);
-  return key ? panel?._blockExpansion?.get(key) === true : false;
+  if (!key) return false;
+  const explicit = panel?._blockExpansion?.get(key);
+  if (typeof explicit === 'boolean') return explicit;
+  return isConsultation(row);
 }
 
 /** Flip a subagent's nested cards and repaint. */
@@ -766,6 +800,7 @@ const STATUS_GLYPH = {
   ok: '',
   error: '',
   denied: '',
+  interrupted: '',
 };
 
 const STATUS_TITLE = {
@@ -774,6 +809,7 @@ const STATUS_TITLE = {
   ok: 'Finished',
   error: 'Failed',
   denied: 'You denied this call',
+  interrupted: 'Never finished — the turn ended before this call returned',
 };
 
 /**
@@ -783,6 +819,10 @@ const STATUS_TITLE = {
  * `denied` is not one of them. A denied call never ran, so time since it was
  * proposed measures how long the user took to say no — a fact about the
  * reader, rendered as though it were a fact about the tool.
+ *
+ * Nor is `interrupted`, and that is the whole point of the status. The clock
+ * on a card restored from a killed turn counted up from an invocation two days
+ * ago and claimed to be measuring something.
  */
 const RUNNING_STATUSES = new Set(['pending', 'awaiting']);
 
@@ -899,7 +939,9 @@ export function renderToolCard(panel, block) {
         </span>
         <span class="tool-summary">${toolInputSummary(card.input)}</span>
       </button>
-      ${expanded ? renderToolBody(block, card, result, segments) : nothing}
+      ${expanded
+        ? renderToolBody(panel, block, status, card, result, segments)
+        : nothing}
       ${files.length || duration
         ? html`
             <div class="tool-footer">
@@ -926,6 +968,64 @@ const MACHINE_DENIAL_LABELS = {
 };
 
 /**
+ * What an interrupted call's body says, and what the user can do about it.
+ *
+ * The note goes *above* the input rather than instead of it. Unlike a denial,
+ * the input here is not a proposal that was refused — it is the whole record of
+ * what the agent was doing when the turn died, and for a lost question it *is*
+ * the question. So the words explain, and the JSON below them is the evidence.
+ *
+ * The `AskUserQuestion` case gets a button because it is the one interrupted
+ * call the user can still do something about. Nothing can answer the original
+ * request — it lived in the engine process that is gone, along with the
+ * `permission_id` that addressed it — but the agent can be asked to raise the
+ * question again, and the button is that sentence, typed into the composer and
+ * left there. It is not sent for them, and it is not a re-run of the call: it
+ * is a prompt, so the agent's own tool loop decides whether to ask again, which
+ * is what keeps this on the right side of specs5/5-webapp/chat.md § What Tool
+ * Cards Deliberately Do Not Do.
+ *
+ * Every other interrupted tool gets the note alone. A `Bash` or an `Edit` that
+ * never returned may or may not have run before the process died, and a button
+ * offering to re-issue it would be the panel guessing at that.
+ */
+const RE_ASK_PROMPT =
+  'The question you asked me was never answered — the dialog was lost when '
+  + 'the session restarted. Please ask it again.';
+
+function renderInterruptedNote(panel, card) {
+  const isQuestion = card?.name === 'AskUserQuestion';
+  return html`
+    <div class="tool-interrupted">
+      <div class="tool-interrupted-label">
+        ${isQuestion
+          ? 'This question was never answered.'
+          : 'This call never returned.'}
+      </div>
+      <div class="tool-interrupted-reason">
+        ${isQuestion
+          ? html`The dialog was open when the session ended. A permission
+              request lives only in the engine process that raised it, so a
+              restart takes it with it — there is nothing left here to answer.`
+          : html`The turn ended while the call was still open — a stopped
+              session, or a restarted server — so no result was ever
+              recorded.`}
+      </div>
+      ${isQuestion
+        ? html`<button
+            class="tool-reask"
+            title="Puts a request for the question into the prompt box. Nothing is sent until you send it."
+            @click=${(event) => {
+              event.stopPropagation();
+              fillComposer(panel, RE_ASK_PROMPT);
+            }}
+          >Ask me again</button>`
+        : nothing}
+    </div>
+  `;
+}
+
+/**
  * The card body: the denial reason if there was one, otherwise the input and
  * then the result.
  *
@@ -933,7 +1033,7 @@ const MACHINE_DENIAL_LABELS = {
  * ran, so its input is a proposal rather than a record, and the reason the
  * user gave is the thing worth reading — the agent saw it too and acted on it.
  */
-function renderToolBody(block, card, result, segments) {
+function renderToolBody(panel, block, status, card, result, segments) {
   if (block.denial) {
     const machine = MACHINE_DENIAL_LABELS[block.denial.action];
     return html`
@@ -952,6 +1052,7 @@ function renderToolBody(block, card, result, segments) {
   }
   return html`
     <div class="tool-body">
+      ${status === 'interrupted' ? renderInterruptedNote(panel, card) : nothing}
       ${segments.length
         ? segments.map((segment) => html`${unsafeHTML(renderEditBody(segment))}`)
         : renderToolInput(card)}
@@ -1129,12 +1230,78 @@ function openSubagentTranscript(panel, row) {
   panel?.dispatchEvent(
     new CustomEvent('view-subagents-requested', {
       detail: {
-        agents: [{ agent_id: row.agent_id, label: subagentLabel(row) }],
+        agents: [{
+          agent_id: row.agent_id,
+          label: subagentLabel(row),
+          // What decides whether the handler reads disk or projects. Sent as
+          // the row has it — the row is where the server put it — so the
+          // handler never has to infer a storage property from a task type.
+          has_transcript: row.has_transcript,
+          // The join key for a projection: blocks produced inside this
+          // subagent carry the spawning call's id as their `agent_id`.
+          tool_use_id: row.tool_use_id,
+          // The whole row, because a consultation has no tab until someone
+          // asks for one and this click is the asking — and building a tab
+          // needs what a tab shows (status, ordinal, label) where a
+          // projection needs only the join key. Whether it gets a tab or a
+          // projection is the handler's to decide: it turns on whether the
+          // turn is still holding the consultation, which the row does not
+          // say and the renderer has no business working out.
+          row,
+        }],
       },
       bubbles: true,
       composed: true,
     }),
   );
+}
+
+/**
+ * The consultation's standing condition, as framing on its container.
+ *
+ * Above the answer and outside it, matching `_grounding`'s reasoning on the
+ * model's copy of the same claim: whatever appears below is subordinate to
+ * the framing above it, so "this is the app speaking, not the consultant" is
+ * a structural statement rather than an assurance the consultant could have
+ * written itself.
+ *
+ * Only for consultations. A delegated subagent has tools and a repository and
+ * nothing to declare, and a banner over every `Task` row would be exactly the
+ * dismissible furniture that the posture notice already declines to be when
+ * it withholds its toast.
+ *
+ * Falls back to the sentence rather than rendering nothing when no notice has
+ * arrived, because the missing case is a live consultation in its first
+ * moments — the container exists before the event does, and a banner that
+ * appears a beat late reads as something having gone wrong. The fallback is
+ * the unretracted posture, which is the only state a consultation can be in
+ * before anything has been observed about it.
+ */
+function renderConsultationPosture(panel, row) {
+  if (!isConsultation(row)) return nothing;
+  const id = row.agent_id || row.key;
+  const held = consultationPosture(panel, id);
+  const severity = held?.severity || 'info';
+  const text = held?.text
+    || 'A second opinion runs with no tools and no repository access.';
+  // The warnings below the framing, in arrival order. They used to be rows in
+  // whichever surface the notice router could find — the consultation's tab
+  // when one was mounted, the main transcript when none was. With the tab now
+  // created only on demand, the second case became the normal one, and a
+  // refusal filed as a top-level row in Main reads as though the *parent*
+  // turn had been refused rather than the consultant. They belong to the
+  // container they are about, next to the framing they qualify.
+  const notices = consultationNotices(panel, id);
+  return html`
+    <div class="consultation-posture ${severity}" role="note">${text}</div>
+    ${notices.map(
+      (entry) => html`
+        <div class="consultation-posture ${entry.severity}" role="note">
+          ${entry.text}
+        </div>
+      `,
+    )}
+  `;
 }
 
 /**
@@ -1237,6 +1404,7 @@ export function renderSubagentRow(panel, row, blocks, candidates, settled) {
             `
           : nothing}
       </div>
+      ${renderConsultationPosture(panel, row)}
       ${row.summary
         ? html`<div class="subagent-summary md-content">
             ${unsafeHTML(renderMarkdown(row.summary))}

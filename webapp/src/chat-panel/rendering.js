@@ -651,6 +651,7 @@ export function renderMessage(panel, msg, index) {
       <div class="message-toolbar top">${toolbar}</div>
       <div class="role-label">${roleLabel}${topFinishBadge}${runTimerBadge}</div>
       ${bodyHtml}
+      ${renderSystemAction(panel, msg)}
       ${images.length > 0 || imageRefs.length > 0
         ? renderMessageImages(panel, images, imageRefs)
         : ''}
@@ -663,6 +664,62 @@ export function renderMessage(panel, msg, index) {
       <div class="message-toolbar bottom">${toolbar}</div>
     </div>
   `;
+}
+
+/**
+ * The escalation a system-event card offers, when it offers one.
+ *
+ * Only `stop_ignored` carries one today (`streaming.js`): the user pressed
+ * ⏹, the turn did not end, and the remaining lever is restarting the
+ * engine. It is a button rather than something the app does on its own
+ * because a restart ends the session they are holding — AG-19 demoted the
+ * process kill to an explicit, user-initiated escalation for exactly that
+ * reason, and a threshold that fired automatically would eventually fire
+ * on a legitimate turn waiting in a permission dialog.
+ *
+ * Disabled once pressed, and it says so: `restart_session` takes a few
+ * seconds to rebuild the harness, and a button that looks live throughout
+ * invites a second press that would tear down the session it is rebuilding.
+ */
+export function renderSystemAction(panel, msg) {
+  const action = msg?.system_action;
+  if (!action || typeof action.method !== 'string' || !action.method) return '';
+  const running = panel._systemActionPending === action.method;
+  return html`
+    <div class="system-action">
+      <button
+        class="system-action-button"
+        ?disabled=${running}
+        @click=${() => runSystemAction(panel, action)}
+      >
+        ${running ? 'Restarting…' : action.label}
+      </button>
+    </div>
+  `;
+}
+
+/**
+ * Perform a card's escalation, and say so either way.
+ *
+ * The failure path is not decoration: this is offered to someone whose
+ * stop has already been ignored once, and a button that silently does
+ * nothing would be the second thing that failed them without saying so.
+ */
+export async function runSystemAction(panel, action) {
+  panel._systemActionPending = action.method;
+  panel.requestUpdate();
+  try {
+    await panel.rpcExtract(action.method);
+    panel._emitToast?.('The engine was restarted', 'info');
+  } catch (err) {
+    panel._emitToast?.(
+      `Could not restart the engine: ${err?.message || err}`,
+      'error',
+    );
+  } finally {
+    panel._systemActionPending = null;
+    panel.requestUpdate();
+  }
 }
 
 /**
@@ -1822,7 +1879,18 @@ export function renderViewSubagentsAffordance(panel, msg) {
   for (const row of rows) {
     const agentId = typeof row?.agent_id === 'string' ? row.agent_id : '';
     if (!agentId) continue;
-    agents.push({ agent_id: agentId, label: subagentLabel(row) });
+    agents.push({
+      agent_id: agentId,
+      label: subagentLabel(row),
+      has_transcript: row.has_transcript,
+      tool_use_id: row.tool_use_id,
+      // The whole row, for the same reason the inline card's own button
+      // sends it: a consultation gets a tab built from this rather than a
+      // transcript read, and building one needs what a tab shows. Sent from
+      // both entry points because the two must not disagree about what a
+      // click on the same consultation produces.
+      row,
+    });
   }
   if (agents.length === 0) return '';
   if (agents.every(({ agent_id: id }) => panel._tabs.has(id))) return '';

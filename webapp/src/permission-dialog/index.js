@@ -25,7 +25,7 @@
 //   4. **Only localhost gets decision controls**, but every client gets
 //      the full body. The restriction is on authority, not information.
 
-import { LitElement, html } from 'lit';
+import { LitElement, html, nothing } from 'lit';
 
 import { RpcMixin } from '../rpc-mixin.js';
 import { PERMISSION_DIALOG_STYLES } from './styles.js';
@@ -34,8 +34,15 @@ import {
   ANNOUNCE_AT_SECONDS,
   CHIME_SETTING_KEY,
   CLASS_GLYPHS,
+  COLLAPSE_GLYPH,
+  COLLAPSE_QUESTION_LABEL,
   COUNTDOWN_TICK_MS,
   ESCAPE_DENY_REASON,
+  EXPAND_GLYPH,
+  EXPAND_QUESTION_LABEL,
+  QUESTION_DOCK_GUTTER,
+  QUESTION_DOCK_MIN_PLAIN,
+  QUESTION_DOCK_MIN_WIDTH,
   SETTLING_MS,
   TITLE_MARKER,
 } from './constants.js';
@@ -45,6 +52,7 @@ import {
   defaultDenyReason,
   defaultFocusTarget,
   formatCountdown,
+  hasPreviews,
   headerTarget,
   interactQuestions,
   orderQueue,
@@ -130,6 +138,24 @@ export class PermissionDialog extends RpcMixin(LitElement) {
     _previewFocus: { type: Object, state: true },
     /** Live-region text: arrival announcement or countdown milestone. */
     _announcement: { type: String, state: true },
+    /**
+     * Where the shell's docked panel ends, in viewport px, or null for
+     * "there is nowhere to dock — use the centred modal".
+     *
+     * Set as a property by the shell, which owns the panel's geometry and
+     * is the only thing that knows whether the chat is on screen at all
+     * (app-shell/dialog.js § questionDockLeft). A property rather than an
+     * attribute because null is one of its values and an absent attribute
+     * and an attribute reading "null" are the same string.
+     */
+    dockLeft: { attribute: false },
+    /**
+     * Whether the user has collapsed a question that could not be docked.
+     *
+     * Never read directly — `_collapsed` gates it on the request still being
+     * one that offers the control. Reset per request in `_syncCurrent`.
+     */
+    _collapsedByUser: { type: Boolean, state: true },
   };
 
   static styles = PERMISSION_DIALOG_STYLES;
@@ -155,6 +181,11 @@ export class PermissionDialog extends RpcMixin(LitElement) {
     this._answerNotes = new Map();
     this._previewFocus = new Map();
     this._announcement = '';
+    this.dockLeft = null;
+    this._collapsedByUser = false;
+    /** Last `dockMinWidth` announced to the shell. Not reactive — it exists
+        to keep the announcement from firing on every render. */
+    this._publishedDockMinWidth = null;
 
     /** Monotonic arrival counter — two requests can share a millisecond. */
     this._arrivalCounter = 0;
@@ -291,6 +322,129 @@ export class PermissionDialog extends RpcMixin(LitElement) {
     return this._now < this._settleUntil;
   }
 
+  /**
+   * Whether the current request is docked beside the chat rather than
+   * modal over it.
+   *
+   * `interact` only, and only where the shell says there is room. The
+   * modality of every other class is a security argument — a destructive
+   * call must not be answered while the user is reading something else —
+   * and a question is not a security decision: allow *is* the answer, deny
+   * means "ask me in prose", and § interact already refuses to offer a rule
+   * that could pre-answer one. What a question needs instead is the
+   * transcript it was written about, which is what the modal was covering
+   * (permission-dialog.md § Placement).
+   *
+   * Live rather than frozen at arrival: every input to it is something the
+   * user just did with their own hands — resized the panel, minimized it,
+   * switched tabs — so a placement that follows them is not the app moving
+   * controls under the pointer that § Anti-Click-Through is about.
+   */
+  get _docked() {
+    return this.current?.tool_class === 'interact' && this.dockLeft != null;
+  }
+
+  /**
+   * The narrowest region this request could be docked into, in px.
+   *
+   * Public, because the shell decides whether there is room and this is the
+   * half of that decision the shell cannot know: which floor applies is a
+   * fact about the pending request's own layout. Asked rather than
+   * re-derived, on the same argument as `modal` — a copy of the rule in the
+   * shell is a copy that can disagree with what actually rendered.
+   *
+   * The wide floor buys the `.question-compare` grid, so the test has to be
+   * the one that grid is rendered on: `!multi_select && hasPreviews`, exactly
+   * as in bodies.js § renderInteractBody. `hasPreviews` alone would be
+   * subtly wrong in the direction that matters — the compare pane is
+   * single-select only, so a *multi*-select question carrying previews
+   * renders as a plain list and would be handed a 720px floor to protect a
+   * layout it never draws, which is how the whole dock came to be
+   * unreachable in the first place.
+   *
+   * Any question in the set forces the wide floor: they render stacked in one
+   * panel, so the widest layout among them sets the width.
+   *
+   * With nothing pending — or a class that never docks — the answer is the
+   * wide floor rather than the narrow one. The shell measures the dock on its
+   * own schedule, including before any request exists, and the two ways of
+   * being wrong are not symmetrical: too wide costs a centred modal the user
+   * can collapse, too narrow docks a comparison into a region that stacks it.
+   * The narrow floor is a claim about a request, so it takes one to make.
+   */
+  get dockMinWidth() {
+    const questions = interactQuestions(this.current);
+    if (!questions.length) return QUESTION_DOCK_MIN_WIDTH;
+    const compare = questions.some(
+      (question) => !question.multi_select && hasPreviews(question),
+    );
+    return compare ? QUESTION_DOCK_MIN_WIDTH : QUESTION_DOCK_MIN_PLAIN;
+  }
+
+  /**
+   * Whether this request offers the collapse control.
+   *
+   * The question that could not be docked, and only that. `_docked` is the
+   * good outcome and has nothing to collapse away from — it is already beside
+   * the transcript rather than over it. Every other class keeps the modal it
+   * has: their modality is the security argument § Placement makes, and while
+   * collapsing cannot *answer* anything (the decision row is not rendered, so
+   * there is nothing to click through to), dropping the scrim off a pending
+   * destructive call is a wider change than the one this control is for.
+   */
+  get _collapsible() {
+    return this.current?.tool_class === 'interact' && !this._docked;
+  }
+
+  /**
+   * Whether the question is parked as its header.
+   *
+   * Gated on `_collapsible` rather than trusted on its own, because
+   * `dockLeft` is live: collapse the modal, widen the panel, and the question
+   * docks — at which point the collapse the user asked for has been granted
+   * by better means, and honouring the flag as well would hide the docked
+   * panel they can now see. The flag survives (narrow it again and it is
+   * still collapsed); what it does not do is outlive the condition it was
+   * a workaround for.
+   */
+  get _collapsed() {
+    return this._collapsible && this._collapsedByUser;
+  }
+
+  /**
+   * Whether the request is on screen without a scrim, with the UI behind it
+   * genuinely live.
+   *
+   * Two ways to get there and they need identical treatment — no scrim, no
+   * `aria-modal`, no Tab trap, and an Escape that belongs to whatever the
+   * user is actually typing in rather than to this dialog. Named once because
+   * the first cut spelled `_docked` out at each of those four sites, and a
+   * fifth state that also drops the scrim would have had to find all four.
+   */
+  get _nonModal() {
+    return this._docked || this._collapsed;
+  }
+
+  /**
+   * Whether a request is on screen *as a modal* — a scrim over an inert UI
+   * with focus trapped inside it. Public, because the shell asks: it is what
+   * makes its global shortcuts inert (shell.md § Keyboard Shortcuts).
+   *
+   * Asked rather than re-derived. "Is this modal" has two inputs — the tool
+   * class and whether the shell reported room beside the chat — and a second
+   * copy of that rule in the shell would be a copy that can disagree with
+   * the scrim actually on screen. There is one owner, and it is the element
+   * that draws it.
+   *
+   * A collapsed question answers false for the same reason a docked one does,
+   * and it matters more here: collapsing exists so the user can read the chat,
+   * and suppressed shortcuts would be the app agreeing to that in appearance
+   * only.
+   */
+  get modal() {
+    return !!this.current && !this._nonModal;
+  }
+
   _onPermissionRequest(event) {
     const payload = event?.detail;
     if (payload) this._enqueue(payload);
@@ -401,6 +555,12 @@ export class PermissionDialog extends RpcMixin(LitElement) {
     this._answerTexts = new Map();
     this._answerNotes = new Map();
     this._previewFocus = new Map();
+    // The load-bearing half of the collapse control. A request that arrived
+    // while the last one was parked must arrive *open*: a queue that inherits
+    // the collapse would show the next question — or the next `write` — as a
+    // one-line bar the user has no reason to look at, which is invariant 1
+    // ("never silently") reached by a different route.
+    this._collapsedByUser = false;
     if (!payload) {
       this._settleUntil = 0;
       return;
@@ -641,9 +801,26 @@ export class PermissionDialog extends RpcMixin(LitElement) {
     }
   }
 
-  /** After settling, focus the class-appropriate control. */
+  /**
+   * Collapse or expand a question that could not be docked.
+   *
+   * Presentation only. Nothing is sent, the countdown is untouched, and the
+   * half-typed answers live on `this` rather than in the DOM, so they are
+   * still there on expand.
+   */
+  _toggleCollapsed() {
+    this._collapsedByUser = !this._collapsedByUser;
+  }
+
+  /**
+   * After settling, focus the class-appropriate control.
+   *
+   * Nothing to focus while collapsed — the decision row is not rendered — and
+   * stealing focus back from the chat the user collapsed the question to read
+   * would undo the gesture 700ms after they made it.
+   */
   _focusDefault() {
-    if (!this._canDecide || this._settling) return;
+    if (!this._canDecide || this._settling || this._collapsed) return;
     const payload = this.current;
     if (!payload) return;
     const target = defaultFocusTarget(payload);
@@ -662,6 +839,17 @@ export class PermissionDialog extends RpcMixin(LitElement) {
   _onKeydownCapture(event) {
     if (!this.current) return;
     if (event.key === 'Escape') {
+      // A docked question is not modal, so the chat input behind it is
+      // live — and Escape there clears the input. Denying the agent's
+      // question because the user cleared a half-typed message would
+      // resolve a request they never touched, so while docked Escape only
+      // denies from inside the panel. The modal case keeps the priority
+      // the spec gives it, and can: nothing else on screen is reachable.
+      //
+      // A collapsed question is in the same position, and reaches it more
+      // often: collapsing is *for* going back to the chat input, so the very
+      // next Escape is overwhelmingly likely to be that input's.
+      if (this._nonModal && !event.composedPath?.().includes(this)) return;
       // Escape is a deny, and it takes priority over every other Escape
       // binding in the application — hence stopImmediatePropagation on
       // the capture phase.
@@ -676,6 +864,35 @@ export class PermissionDialog extends RpcMixin(LitElement) {
       this._decide('deny', { reason: ESCAPE_DENY_REASON });
       return;
     }
+    // Alt+M — collapse or expand the parked question, taking the shortcut
+    // over from the shell's own dialog minimize while one is on screen.
+    //
+    // Handled here rather than added to the shell's global table, and that is
+    // forced rather than stylistic: the shell makes every Alt shortcut inert
+    // while a modal permission dialog is open (shell.md § Global Keyboard
+    // Shortcuts), which is exactly the state this needs to act in — an
+    // expanded modal question is modal, so a shortcut living there could
+    // never be the one that collapses it. This handler is on `window` in the
+    // capture phase and the shell's is on `document` bubbling, so consuming
+    // the event here is also what keeps Alt+M from collapsing the shell's
+    // panel *as well* once the question has gone non-modal.
+    //
+    // Both cases, so Caps Lock does not break it — matching the shell's own
+    // Alt+M. Modifier combinations are left alone for the same reason the
+    // shell leaves them alone: Alt+Shift+M is not this shortcut.
+    if (
+      event.altKey
+      && !event.ctrlKey
+      && !event.metaKey
+      && !event.shiftKey
+      && (event.key === 'm' || event.key === 'M')
+    ) {
+      if (!this._collapsible) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      this._toggleCollapsed();
+      return;
+    }
     if (this._settling && (event.key === 'Enter' || event.key === ' ')) {
       // A keystroke already in flight when the dialog opened must not be
       // able to approve anything.
@@ -683,7 +900,13 @@ export class PermissionDialog extends RpcMixin(LitElement) {
       event.stopImmediatePropagation();
       return;
     }
-    if (event.key === 'Tab') this._trapFocus(event);
+    // A docked or collapsed question does not trap Tab. The trap exists so a
+    // keyboard user cannot reach a UI the scrim calls unavailable; with no
+    // scrim there is nothing to be inconsistent with, and reaching the
+    // transcript is how a keyboard user reads what the question is about.
+    // Trapping Tab inside a collapsed bar would be worse than pointless — the
+    // only thing in it is the button that expands it again.
+    if (event.key === 'Tab' && !this._nonModal) this._trapFocus(event);
   }
 
   /**
@@ -1018,12 +1241,46 @@ export class PermissionDialog extends RpcMixin(LitElement) {
 
   updated(changed) {
     super.updated?.(changed);
+    this._publishDockRequirement();
     const payload = this.current;
     if (payload?.tool_class === 'write') {
       syncDiffEditor(this, payload);
     } else if (this._diffEditor) {
       disposeDiffEditor(this);
     }
+  }
+
+  /**
+   * Tell the shell when the width this request needs to dock has changed.
+   *
+   * Necessary because the floor stopped being a constant. The shell measures
+   * the dock on panel resize, minimize, undock, tab switch and window resize —
+   * every way its *own* geometry moves — and none of those fire when a request
+   * arrives. That was fine while every question wanted 720px: the cached
+   * answer could not be stale. Now a plain question following a compare one
+   * would inherit the compare one's verdict and stay modal in a region it
+   * fits.
+   *
+   * Announced from `updated` rather than by the shell listening for
+   * `permission-request` directly, because the shell's answer depends on this
+   * element's queue having already absorbed the payload. Two window listeners
+   * racing to be second is not an ordering to rely on; a notification that
+   * fires *after* the state settled is.
+   */
+  _publishDockRequirement() {
+    // The tracked value is the published quantity itself, not a proxy for it.
+    // An earlier cut tracked null while nothing was pending, which fired on
+    // the arrival of a compare question — from null to 720, when 720 is what
+    // the shell had already measured with. The event has to mean "the number
+    // you read has changed" or the shell relayouts under a question for no
+    // reason.
+    const width = this.dockMinWidth;
+    if (width === this._publishedDockMinWidth) return;
+    this._publishedDockMinWidth = width;
+    this.dispatchEvent(new CustomEvent('dock-requirement-changed', {
+      bubbles: true,
+      composed: true,
+    }));
   }
 
   render() {
@@ -1036,13 +1293,29 @@ export class PermissionDialog extends RpcMixin(LitElement) {
     const glyph = CLASS_GLYPHS[payload.tool_class] || '•';
     const diff = payload.diff;
     const risky = defaultFocusTarget(payload) === 'deny';
+    const docked = this._docked;
+    const collapsed = this._collapsed;
 
     return html`
-      <div class="scrim" @click=${(event) => event.stopPropagation()}></div>
+      ${this._nonModal
+        // No scrim at all, rather than a transparent one: the picker, the
+        // chat and the viewer are genuinely live behind a docked question,
+        // and a user who wants to open the file it is about should be able
+        // to. Nothing the agent tries meanwhile can slip past — its next
+        // gated call queues behind this one. A collapsed question is the
+        // same bargain reached by hand: it was collapsed *to* uncover them.
+        ? null
+        : html`<div class="scrim" @click=${(event) => event.stopPropagation()}></div>`}
       <div
-        class="dialog ${risky ? 'risky' : ''}"
+        class="dialog ${risky ? 'risky' : ''} ${docked ? 'docked' : ''} ${collapsed ? 'collapsed' : ''}"
+        style=${docked
+          ? `--question-dock-gutter: ${QUESTION_DOCK_GUTTER}px;`
+            + ` left: ${this.dockLeft + QUESTION_DOCK_GUTTER}px;`
+          : collapsed
+            ? `--question-dock-gutter: ${QUESTION_DOCK_GUTTER}px;`
+            : nothing}
         role="dialog"
-        aria-modal="true"
+        aria-modal=${this._nonModal ? nothing : 'true'}
         aria-labelledby="permission-header"
       >
         <header id="permission-header">
@@ -1059,8 +1332,24 @@ export class PermissionDialog extends RpcMixin(LitElement) {
                   ${formatCountdown(remaining)} ⏱
                 </span>
               `}
+          ${this._collapsible
+            ? html`
+                <button
+                  class="collapse-toggle"
+                  aria-expanded=${collapsed ? 'false' : 'true'}
+                  aria-label=${collapsed
+                    ? EXPAND_QUESTION_LABEL
+                    : COLLAPSE_QUESTION_LABEL}
+                  title=${collapsed
+                    ? EXPAND_QUESTION_LABEL
+                    : COLLAPSE_QUESTION_LABEL}
+                  @click=${() => this._toggleCollapsed()}
+                >${collapsed ? EXPAND_GLYPH : COLLAPSE_GLYPH}</button>
+              `
+            : null}
         </header>
 
+        ${collapsed ? null : html`
         ${payload.agent_id
           ? html`
               <div class="attribution">
@@ -1114,7 +1403,14 @@ export class PermissionDialog extends RpcMixin(LitElement) {
         </div>
 
         ${renderDecisions(this, payload)}
+        `}
 
+        <!--
+          Outside the collapse, deliberately. The countdown milestones are the
+          one thing a collapsed question still has to say — a parked request
+          that expires silently is the failure § Accessibility's live region
+          exists to prevent, and collapsing must not be a way to opt out of it.
+        -->
         <div class="sr-only" role="status" aria-live="polite">
           ${this._announcement}
         </div>

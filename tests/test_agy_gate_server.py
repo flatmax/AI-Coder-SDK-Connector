@@ -20,13 +20,14 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import subprocess
 import sys
 
 import pytest
 
-from aic_dc.agy import hook, registry
-from aic_dc.agy.gate_server import AgyGateServer
+from aic_dc.agy import hook, registry, roots
+from aic_dc.agy.gate_server import AgyGateServer, Refusals, StaticPolicy
 from aic_dc.antigravity.permissions import AntigravityPermissionGate
 
 OURS = "cd4edb7f-6de3-468f-9815-e76b310a920a"
@@ -507,3 +508,958 @@ class TestStoppingOneSubagentRatherThanTheTurn:
         _recorder, _gate, server, _config_dir = wired
         server.refuse_conversation("", "stopped")
         assert server.is_refusing("") is False
+
+
+def invocation(conversation=OURS, num=2):
+    """A ``PostInvocation`` payload. No tool, so nothing to put in a dialog."""
+    return {
+        "conversationId": conversation,
+        "modelName": "gemini-3.8-flash-low",
+        "workspacePaths": [],
+        "invocationNum": num,
+        "initialNumSteps": 4,
+    }
+
+
+def stopped(conversation=OURS, reason="NO_TOOL_CALL"):
+    """A ``Stop`` payload, carrying the one field the stream never has."""
+    return {
+        "conversationId": conversation,
+        "executionNum": 1,
+        "terminationReason": reason,
+        "error": "",
+        "fullyIdle": True,
+    }
+
+
+GUIDANCE = "Call write_to_file without ArtifactMetadata."
+
+
+@pytest.fixture
+def guided(tmp_path):
+    """The same wiring as :func:`wired`, with standing guidance to hand."""
+    recorder = Recorder()
+    gate = AntigravityPermissionGate(
+        tmp_path, broadcast=recorder, localhost_available=lambda: True,
+        config_dir=tmp_path / "cfg",
+    )
+    config_dir = tmp_path / "cfg"
+    server = AgyGateServer(
+        tmp_path / "gate.sock",
+        gate=gate,
+        config_dir=config_dir,
+        guidance=GUIDANCE,
+    )
+    return recorder, gate, server, config_dir
+
+
+class TestTheStandingGuidance:
+    """``standing_guidance`` — AG-32.
+
+    The host end of the channel that replaced prepending
+    ``agy_tools.WRITE_GUIDANCE`` to the user's own prompt. One fixed string,
+    no queue and no dialog, and the assertions below are mostly about what
+    it *does not* do — because everything this method could grow would be
+    state that has to stay in step with the latch beside it.
+    """
+
+    def test_the_guidance_is_offered_at_every_invocation(self, guided):
+        """No latch, and the live probe of 2026-09-14 is why.
+
+        ``agy`` 1.2.2 fires ``PreInvocation`` once per invocation — four
+        times on a four-step turn — and an ``ephemeralMessage`` evaporates
+        with the invocation that received it. A once-per-turn answer would
+        guide the first invocation and leave the rest, including the ones
+        that write, with nothing.
+        """
+        _recorder, _gate, server, _cfg = guided
+        for num in range(4):
+            assert server.standing_guidance(invocation(num=num)) == {
+                "ephemeralMessage": GUIDANCE
+            }
+
+    def test_a_server_with_nothing_to_say_says_nothing(self, wired):
+        """``guidance`` is optional, so the empty answer is a real path.
+
+        Every ``AgyGateServer`` in this file that predates AG-32 takes it,
+        and so does any caller that has not been given words to say.
+        """
+        _recorder, _gate, server, _cfg = wired
+        assert server.standing_guidance(invocation()) == {}
+
+    @pytest.mark.parametrize("blank", [None, "", "   ", "\n\t "])
+    def test_blank_guidance_is_no_guidance(self, tmp_path, blank):
+        gate = AntigravityPermissionGate(
+            tmp_path, broadcast=Recorder(), localhost_available=lambda: True
+        )
+        server = AgyGateServer(
+            tmp_path / "gate.sock", gate=gate, guidance=blank
+        )
+        assert server.standing_guidance(invocation()) == {}
+
+    def test_a_stopped_turn_is_not_guided(self, guided):
+        """Nothing is injected into a turn the user has ended.
+
+        The stop is a *mechanism* since AG-19 — ``decide_invocation``
+        terminates rather than asks — and an ``injectSteps`` answer at the
+        same point would be this app adding to a turn it is simultaneously
+        ending.
+        """
+        _recorder, _gate, server, _cfg = guided
+        server.refuse_all("the user stopped this turn")
+        assert server.standing_guidance(invocation()) == {}
+
+    def test_a_stopped_subagent_is_not_guided_and_its_siblings_still_are(
+        self, guided
+    ):
+        """Per conversation, matching ``decide_invocation``'s own reading.
+
+        ⏹ on one subagent tab refuses that conversation and leaves the
+        parent running (AG-31's family), so guidance follows the same
+        boundary — otherwise stopping one subagent would silently unguide
+        the whole turn.
+        """
+        _recorder, _gate, server, _cfg = guided
+        other = "99999999-8888-7777-6666-555555555555"
+        server.refuse_conversation(other, "stop this subagent")
+        assert server.standing_guidance(invocation(conversation=other)) == {}
+        assert server.standing_guidance(invocation()) == {
+            "ephemeralMessage": GUIDANCE
+        }
+
+    def test_the_frame_is_not_built_here(self, guided):
+        """A string, not an ``injectSteps`` list, and deliberately.
+
+        ``injectSteps`` accepts a ``toolCall``, which would run without the
+        gate seeing it. The hook builds the frame from this string, so no
+        answer this server can give is a step list — a bug here cannot
+        become a tool call. See ``test_agy_gate.py`` for the other half.
+        """
+        _recorder, _gate, server, _cfg = guided
+        answer = server.standing_guidance(invocation())
+        assert set(answer) == {"ephemeralMessage"}
+        assert isinstance(answer["ephemeralMessage"], str)
+
+    def test_no_dialog_is_raised_and_no_request_is_queued(self, guided):
+        recorder, gate, server, _cfg = guided
+        server.standing_guidance(invocation())
+        assert recorder.requests() == []
+        assert gate.broker.pending() == []
+
+    @pytest.mark.parametrize("junk", [{}, {"conversationId": None}, {"x": 1}])
+    def test_a_payload_it_cannot_read_is_still_guided(self, guided, junk):
+        """The fail-open direction. An unreadable ``PreInvocation`` costs a
+        guided invocation at worst; the gate is a separate process and is
+        still reviewing every call on this tree."""
+        _recorder, _gate, server, _cfg = guided
+        assert server.standing_guidance(junk) == {"ephemeralMessage": GUIDANCE}
+
+
+class TestTheStopEndsTheLoop:
+    """``decide_invocation`` — AG-19.
+
+    ⏹ used to be a refusal the agent could read and then keep talking
+    through. This is the same latch, asked at the one point ``agy`` will
+    act on it mechanically. **No new state**: the assertions below are all
+    about ``refuse_all`` and ``refuse_conversation`` driving both answers.
+    """
+
+    CHILD = "c21acd4d-0000-4000-8000-000000000001"
+
+    def test_a_running_turn_is_left_alone(self, wired):
+        _recorder, _gate, server, _cfg = wired
+        assert server.decide_invocation(invocation()) == {}
+        assert server.was_terminated(OURS) is False
+
+    def test_a_stopped_turn_is_terminated(self, wired):
+        _recorder, _gate, server, _cfg = wired
+        server.refuse_all("the user stopped this turn")
+        assert server.decide_invocation(invocation()) == {
+            "terminationBehavior": "terminate"
+        }
+        assert server.was_terminated(OURS) is True
+
+    def test_an_aimed_stop_ends_only_that_conversations_loop(self, wired):
+        """The subagent case, and it closes ``refuse_conversation``'s first
+        stated limit one level up.
+
+        A subagent producing only prose asks permission for nothing and
+        cannot be starved — that is written into ``refuse_conversation``
+        as a known hole. Its *loop* still ends here, at the end of the
+        invocation it is in, while the parent's keeps running.
+        """
+        _recorder, _gate, server, _cfg = wired
+        server.refuse_conversation(self.CHILD, "the user stopped this subagent")
+        assert server.decide_invocation(invocation(self.CHILD)) == {
+            "terminationBehavior": "terminate"
+        }
+        assert server.decide_invocation(invocation(OURS)) == {}
+        assert server.was_terminated(self.CHILD) is True
+        assert server.was_terminated(OURS) is False
+
+    def test_it_raises_no_dialog(self, wired):
+        """There is no user in this question — they already answered it."""
+        recorder, _gate, server, _cfg = wired
+        server.refuse_all("stopped")
+        server.decide_invocation(invocation())
+        assert recorder.requests() == []
+
+    def test_a_consultation_has_no_stop_to_read(self, wired):
+        """A static-policy gate is never given one, so it never terminates."""
+        _recorder, _gate, _server, config_dir = wired
+        consultation = AgyGateServer(
+            config_dir / "c.sock",
+            policy=StaticPolicy.of(["FINISH"], "not allowed"),
+            config_dir=config_dir,
+        )
+        assert consultation.decide_invocation(invocation()) == {}
+
+    def test_resume_forgets_the_termination(self, wired):
+        """A stop applies to the turn it was pressed during, and so does
+        the record of having acted on it — otherwise the *next* turn's
+        footer would report itself cancelled."""
+        _recorder, _gate, server, _cfg = wired
+        server.refuse_all("stopped")
+        server.decide_invocation(invocation())
+        server.resume()
+        assert server.was_terminated(OURS) is False
+        assert server.decide_invocation(invocation()) == {}
+
+    def test_an_unnamed_conversation_is_still_terminated(self, wired):
+        """Recorded against nothing, but the loop still ends.
+
+        The record is for the footer; the termination is the mechanism,
+        and it must not depend on a field being present.
+        """
+        _recorder, _gate, server, _cfg = wired
+        server.refuse_all("stopped")
+        assert server.decide_invocation({"invocationNum": 1}) == {
+            "terminationBehavior": "terminate"
+        }
+        assert server.was_terminated("") is False
+
+
+class TestTheDirectoryAgyAnnounces:
+    """``note_paths`` — AG-32, AG-R-32.
+
+    Every payload carries ``transcriptPath`` and
+    ``artifactDirectoryPath``, so the running vendor process states its own
+    directory layout on the first hook of any kind. This reads it, prefers
+    it for subagent transcripts, and **says so when it disagrees** with
+    what :data:`~aic_dc.agy.roots.PRODUCT_DIR` derives — because every
+    symptom of that disagreement is an empty directory rather than an
+    error.
+    """
+
+    def _payload(self, brain, conversation=OURS, *, event=None):
+        directory = brain / conversation
+        sent = {
+            **invocation(conversation=conversation),
+            "artifactDirectoryPath": str(directory),
+            "transcriptPath": str(
+                directory / ".system_generated" / "logs" / "transcript_full.jsonl"
+            ),
+        }
+        if event:
+            sent[hook.EVENT_KEY] = event
+        return sent
+
+    def test_nothing_is_known_before_a_hook_fires(self, wired):
+        """Which is every read of a session that has not called a tool.
+
+        ``None`` is why the derivation stays: it is the answer for a
+        browsed session this process never ran, and for a live one whose
+        first invocation has not happened yet.
+        """
+        _recorder, _gate, server, _cfg = wired
+        assert server.brain_dir is None
+
+    def test_one_payload_is_enough(self, wired, tmp_path):
+        _recorder, _gate, server, cfg = wired
+        brain = roots.brain_dir(roots.master_root(cfg))
+        server.note_paths(self._payload(brain))
+        assert server.brain_dir == brain
+
+    @pytest.mark.parametrize("field", ["artifactDirectoryPath", "transcriptPath"])
+    def test_either_field_alone_answers(self, wired, field):
+        """They differ in depth by three levels and one rule reads both, so
+        a release that stopped sending one would not take the answer with
+        it."""
+        _recorder, _gate, server, cfg = wired
+        brain = roots.brain_dir(roots.master_root(cfg))
+        payload = {
+            k: v for k, v in self._payload(brain).items()
+            if k != ("transcriptPath" if field == "artifactDirectoryPath" else
+                     "artifactDirectoryPath")
+        }
+        server.note_paths(payload)
+        assert server.brain_dir == brain
+
+    @pytest.mark.parametrize("junk", [{}, {"conversationId": OURS}, {"x": 1}])
+    def test_a_payload_that_names_no_path_changes_nothing(self, wired, junk):
+        _recorder, _gate, server, cfg = wired
+        brain = roots.brain_dir(roots.master_root(cfg))
+        server.note_paths(self._payload(brain))
+        server.note_paths(junk)
+        assert server.brain_dir == brain
+
+    def test_agreement_is_silent(self, wired, caplog):
+        """The ordinary case on every machine measured so far. A warning
+        here would be noise on every session rather than a tripwire."""
+        _recorder, _gate, server, cfg = wired
+        brain = roots.brain_dir(roots.master_root(cfg))
+        with caplog.at_level("WARNING"):
+            server.note_paths(self._payload(brain))
+        assert caplog.text == ""
+
+    def test_a_disagreement_names_the_constant_and_what_it_breaks(
+        self, tmp_path, caplog
+    ):
+        """AG-R-32's tripwire, and the wording is the point.
+
+        The announced directory fixes the reads that are threaded for it.
+        The log is what tells a maintainer that the ones which are *not* —
+        generated-image collection and the scratch-diversion check, both
+        still derived — are looking in the wrong place too.
+        """
+        gate = AntigravityPermissionGate(
+            tmp_path, broadcast=Recorder(), localhost_available=lambda: True
+        )
+        root = roots.master_root(tmp_path / "cfg")
+        server = AgyGateServer(
+            tmp_path / "gate.sock", gate=gate, config_root=root
+        )
+        theirs = tmp_path / ".gemini" / "antigravity-ide" / "brain"
+        with caplog.at_level("WARNING"):
+            server.note_paths(self._payload(theirs))
+        assert server.brain_dir == theirs
+        assert roots.PRODUCT_DIR in caplog.text
+        assert str(theirs) in caplog.text
+        assert str(roots.brain_dir(root)) in caplog.text
+
+    def test_the_disagreement_is_reported_once(self, tmp_path, caplog):
+        """Per server, not per payload. ``PreInvocation`` fires once an
+        invocation and the gate once a tool call, so a warning per payload
+        would be the same sentence hundreds of times in one turn — which is
+        how a real finding becomes unreadable."""
+        gate = AntigravityPermissionGate(
+            tmp_path, broadcast=Recorder(), localhost_available=lambda: True
+        )
+        server = AgyGateServer(
+            tmp_path / "gate.sock",
+            gate=gate,
+            config_root=roots.master_root(tmp_path / "cfg"),
+        )
+        theirs = tmp_path / "elsewhere" / "brain"
+        with caplog.at_level("WARNING"):
+            for num in range(5):
+                server.note_paths(self._payload(theirs, conversation=OURS))
+                server.note_paths(invocation(num=num))
+        assert caplog.text.count("keeps this session's conversations in") == 1
+
+    def test_a_server_with_no_root_learns_the_path_and_warns_about_nothing(
+        self, tmp_path, caplog
+    ):
+        """``config_root`` is optional, so there is nothing to compare
+        against — and the announced value is still worth having, because it
+        is the one the reads prefer."""
+        gate = AntigravityPermissionGate(
+            tmp_path, broadcast=Recorder(), localhost_available=lambda: True
+        )
+        server = AgyGateServer(tmp_path / "gate.sock", gate=gate)
+        theirs = tmp_path / "elsewhere" / "brain"
+        with caplog.at_level("WARNING"):
+            server.note_paths(self._payload(theirs))
+        assert server.brain_dir == theirs
+        assert caplog.text == ""
+
+    def test_a_subagents_own_payload_names_the_same_brain_directory(
+        self, wired
+    ):
+        """Why one directory per *process* rather than a map per id.
+
+        One ``agy`` has one ``HOME``, so every conversation it runs —
+        parent and subagents alike — lives under the same brain directory.
+        A per-conversation map would be a second mechanism for a case this
+        already covers, and ``subagents.rows`` computes each row's
+        ``subpath`` with ``relative_to(brain_dir)``, which a per-id path
+        outside it would raise on.
+        """
+        _recorder, _gate, server, cfg = wired
+        brain = roots.brain_dir(roots.master_root(cfg))
+        child = "99999999-8888-7777-6666-555555555555"
+        server.note_paths(self._payload(brain))
+        server.note_paths(self._payload(brain, conversation=child))
+        assert server.brain_dir == brain
+
+
+class TestTheStopEventIsRecordedAndNeverBlocked:
+    """``note_stop`` — AG-R-16."""
+
+    @pytest.mark.parametrize(
+        "reason", ["NO_TOOL_CALL", "TERMINAL_CUSTOM_HOOK", "max_steps_exceeded", ""]
+    )
+    def test_the_answer_is_always_empty(self, wired, reason):
+        _recorder, _gate, server, _cfg = wired
+        assert server.note_stop(stopped(reason=reason)) == {}
+
+    def test_our_own_termination_is_not_reported_as_a_stranger(self, wired, caplog):
+        _recorder, _gate, server, _cfg = wired
+        server.refuse_all("stopped")
+        server.decide_invocation(invocation())
+        with caplog.at_level("WARNING"):
+            server.note_stop(stopped(reason="TERMINAL_CUSTOM_HOOK"))
+        assert "does not own" not in caplog.text
+
+    def test_a_hook_we_do_not_own_ending_our_loop_is_named(self, wired, caplog):
+        """AG-R-16 arriving from the other direction.
+
+        ``hooks.json`` merges named hooks per event, so a user's own
+        ``Stop`` or a plugin's ``PostInvocation`` fires on this app's
+        conversations exactly as this app's fires on theirs. Logged rather
+        than acted on: it is a fact about their configuration.
+        """
+        _recorder, _gate, server, _cfg = wired
+        with caplog.at_level("WARNING"):
+            server.note_stop(stopped(reason="TERMINAL_CUSTOM_HOOK"))
+        assert "does not own" in caplog.text
+        assert OURS in caplog.text
+
+    def test_an_ordinary_end_says_nothing(self, wired, caplog):
+        _recorder, _gate, server, _cfg = wired
+        with caplog.at_level("WARNING"):
+            server.note_stop(stopped(reason="NO_TOOL_CALL"))
+        assert caplog.text == ""
+
+
+class TestTheEventRoutesTheAnswer:
+    """The dispatch in ``_handle``, over a real socket.
+
+    Everything above calls the four methods directly, which would keep
+    passing if the router sent every payload to ``decide``. It would not
+    fail quietly: a ``Stop`` answered by the gate would come back
+    ``{"decision": "deny"}``, which ``agy`` reads as *permit the stop* —
+    right by accident, on a turn nobody stopped.
+    """
+
+    def _over_the_socket(self, server, config_dir, call):
+        async def go():
+            await server.start()
+            server.claim(OURS)
+            loop = asyncio.get_running_loop()
+            result = await loop.run_in_executor(None, call)
+            await server.stop()
+            return result
+
+        return asyncio.run(go())
+
+    def test_a_stopped_turn_terminates_hook_to_host_and_back(self, wired):
+        _recorder, _gate, server, config_dir = wired
+        server.refuse_all("the user stopped this turn")
+        result = self._over_the_socket(
+            server,
+            config_dir,
+            lambda: hook.decide_invocation(invocation(), config_dir=config_dir),
+        )
+        assert result == {"terminationBehavior": "terminate"}
+
+    def test_a_running_turn_proceeds_hook_to_host_and_back(self, wired):
+        _recorder, _gate, server, config_dir = wired
+        result = self._over_the_socket(
+            server,
+            config_dir,
+            lambda: hook.decide_invocation(invocation(), config_dir=config_dir),
+        )
+        assert result == {}
+
+    def test_a_stop_is_recorded_without_a_decision_coming_back(self, wired, caplog):
+        _recorder, _gate, server, config_dir = wired
+        with caplog.at_level("WARNING"):
+            result = self._over_the_socket(
+                server,
+                config_dir,
+                lambda: hook.report_stop(
+                    stopped(reason="TERMINAL_CUSTOM_HOOK"), config_dir=config_dir
+                ),
+            )
+        assert result == {}
+        # The side effect the round trip exists for: the host saw the
+        # reason, and said so, having never been asked for a decision.
+        assert "does not own" in caplog.text
+
+    def test_the_guidance_travels_hook_to_host_and_back(self, tmp_path):
+        """AG-32 over the wire, which is the only test of the whole channel.
+
+        ``standing_guidance`` answers a string and ``inject_guidance``
+        builds the frame, so a mismatch between the two would leave both
+        halves' own tests passing and the model unguided.
+        """
+        gate = AntigravityPermissionGate(
+            tmp_path, broadcast=Recorder(), localhost_available=lambda: True,
+            config_dir=tmp_path / "cfg",
+        )
+        config_dir = tmp_path / "cfg"
+        server = AgyGateServer(
+            tmp_path / "gate.sock",
+            gate=gate,
+            config_dir=config_dir,
+            guidance=GUIDANCE,
+        )
+        result = self._over_the_socket(
+            server,
+            config_dir,
+            lambda: hook.inject_guidance(invocation(), config_dir=config_dir),
+        )
+        assert result == {"injectSteps": [{"ephemeralMessage": GUIDANCE}]}
+
+    def test_an_unguided_invocation_comes_back_empty(self, wired):
+        """``{}`` is what ``agy`` reads as "inject nothing"."""
+        _recorder, _gate, server, config_dir = wired
+        result = self._over_the_socket(
+            server,
+            config_dir,
+            lambda: hook.inject_guidance(invocation(), config_dir=config_dir),
+        )
+        assert result == {}
+
+    def test_every_event_teaches_the_host_where_the_conversations_are(
+        self, wired
+    ):
+        """``note_paths`` runs before the routing, so any event answers.
+
+        A reader that waited for a tool call would learn nothing from a turn
+        that only wrote prose — and ``PreInvocation`` fires before the first
+        tool call of every turn, which is the earliest the question can be
+        answered at all.
+        """
+        _recorder, _gate, server, config_dir = wired
+        brain = roots.brain_dir(roots.master_root(config_dir))
+        directory = brain / OURS
+        sent = {
+            **invocation(),
+            "artifactDirectoryPath": str(directory),
+            "transcriptPath": str(
+                directory / ".system_generated" / "logs" / "transcript_full.jsonl"
+            ),
+        }
+        self._over_the_socket(
+            server,
+            config_dir,
+            lambda: hook.inject_guidance(sent, config_dir=config_dir),
+        )
+        assert server.brain_dir == brain
+
+    def test_a_tool_call_is_still_answered_by_the_gate(self, wired):
+        """The router's other half: an unstamped payload is the gate.
+
+        Which is also what an older hook process sends, so this is the
+        version-skew case as well as the default.
+        """
+        recorder, gate, server, config_dir = wired
+
+        async def go():
+            await server.start()
+            server.claim(OURS)
+            loop = asyncio.get_running_loop()
+            decision = loop.run_in_executor(
+                None, lambda: hook.decide(payload(), config_dir=config_dir)
+            )
+            await answer_next(gate, recorder, {"action": "allow"})
+            result = await decision
+            await server.stop()
+            return result
+
+        assert asyncio.run(go())["decision"] == "allow"
+
+
+class TestTheRefusalOutlivesTheTurnItStopped:
+    """AG-R-16's surviving mitigation, pinned now that it is load-bearing.
+
+    The risk named two defences against a third-party `Stop` hook reviving
+    a stopped turn. The first — this app registering a `Stop` handler that
+    always permits the stop — shipped on 2026-09-11 and was **refuted by
+    measurement on 2026-09-12**: `scripts/probe_agy_stop_merge.py` shows a
+    rival `continue` holding the turn open in either key order, and
+    short-circuiting this app's handler entirely when it runs first.
+
+    That leaves the second, which was already the behaviour and had no
+    test: `resume` is called when a **new turn starts**, never when one
+    ends, so the gate goes on refusing between turns. A revived loop
+    therefore reaches the working tree through a gate that is still saying
+    no — the damage is bounded to spend and prose, which is why AG-R-16 is
+    moderate rather than critical.
+
+    Written as an assertion about the *gate*, not about the session,
+    because the property is that nothing clears the latch except the next
+    turn beginning.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_call_arriving_after_the_turn_ended_is_still_refused(self, wired):
+        _recorder, _gate, server, _cfg = wired
+        server.refuse_all("the user stopped this turn")
+        # The turn ends. Nothing calls `resume`, because nothing does until
+        # a new turn is sent.
+        answer = await server.decide(payload(conversation=OURS))
+        assert answer["decision"] == "deny"
+        assert answer["reason"] == "the user stopped this turn"
+
+    @pytest.mark.asyncio
+    async def test_a_revived_loop_is_terminated_again(self, wired):
+        """The same latch answers the revived loop's next `PostInvocation`.
+
+        Whether `terminate` beats a concurrent `continue` is **not** known —
+        it is the question the merge probe opened and did not close — so
+        this asserts only what this app does, which is to keep saying stop.
+        """
+        _recorder, _gate, server, _cfg = wired
+        server.refuse_all("the user stopped this turn")
+        server.decide_invocation(invocation())
+        assert server.decide_invocation(invocation(num=9)) == {
+            "terminationBehavior": "terminate"
+        }
+
+    def test_only_a_new_turn_clears_it(self, wired):
+        """Stated as the whole rule, because the mitigation *is* the timing."""
+        _recorder, _gate, server, _cfg = wired
+        server.refuse_all("stopped")
+        server.note_stop(stopped(reason="TERMINAL_CUSTOM_HOOK"))
+        assert server._refusal is not None
+        server.resume()
+        assert server._refusal is None
+
+
+class TestARevivedLoopIsNamedInTheLog:
+    """AG-R-16's harm, made legible rather than silent.
+
+    Measured 2026-09-12 by `scripts/probe_agy_terminate_vs_continue.py`:
+    with a third-party `Stop` hook answering `continue`, AG-19's
+    `PostInvocation` terminate and that `continue` **ping-pong** — eight
+    invocations in sixteen seconds, every one ended by this app and revived
+    by the rival, bounded only by `--print-timeout`, which `AgySession`
+    sets to 12h.
+
+    So what this app shipped for the stop makes that scenario *cost more*
+    than it did before: without the terminate the turn merely hangs, and
+    with it the loop cycles. That is not an argument against the terminate —
+    an unopposed one ends a loop in a single invocation, which is the whole
+    of AG-19 — but it is a condition the log has to name, because from the
+    outside it is a turn the user stopped that will not stop.
+
+    Nothing is *acted* on here. Ending the process is an explicit user
+    escalation (AG-19) and bounding the turn is a decision above this
+    class; what this owes is to stop the condition being invisible.
+    """
+
+    def test_one_termination_is_the_ordinary_stop_and_says_nothing(self, wired, caplog):
+        _recorder, _gate, server, _cfg = wired
+        server.refuse_all("stopped")
+        with caplog.at_level("WARNING"):
+            assert server.decide_invocation(invocation()) == {
+                "terminationBehavior": "terminate"
+            }
+        assert caplog.text == ""
+
+    def test_the_second_one_says_the_stop_is_being_overridden(self, wired, caplog):
+        _recorder, _gate, server, _cfg = wired
+        server.refuse_all("stopped")
+        server.decide_invocation(invocation(num=0))
+        with caplog.at_level("WARNING"):
+            server.decide_invocation(invocation(num=1))
+        assert "revived" in caplog.text
+        assert "AG-R-16" in caplog.text
+        assert OURS in caplog.text
+
+    def test_it_does_not_repeat_itself_for_every_cycle(self, wired, caplog):
+        """Eight cycles is one fact, not eight — and the log is the one
+        place a runaway turn stays legible."""
+        _recorder, _gate, server, _cfg = wired
+        server.refuse_all("stopped")
+        with caplog.at_level("WARNING"):
+            for number in range(8):
+                server.decide_invocation(invocation(num=number))
+        assert caplog.text.count("revived") == 1
+
+    def test_the_loop_is_still_ended_every_time(self, wired):
+        """The warning is a report; the mechanism does not give up.
+
+        Answering anything but `terminate` after the first cycle would hand
+        the revived loop exactly what it wants.
+        """
+        _recorder, _gate, server, _cfg = wired
+        server.refuse_all("stopped")
+        for number in range(5):
+            assert server.decide_invocation(invocation(num=number)) == {
+                "terminationBehavior": "terminate"
+            }
+
+    def test_a_new_turn_starts_the_count_again(self, wired, caplog):
+        _recorder, _gate, server, _cfg = wired
+        server.refuse_all("stopped")
+        server.decide_invocation(invocation(num=0))
+        server.resume()
+        server.refuse_all("stopped again")
+        with caplog.at_level("WARNING"):
+            server.decide_invocation(invocation(num=0))
+        assert caplog.text == ""
+
+
+class TestARefusalCarriesATokenForItself:
+    """Why a consultation's refusals are recognisable coming back.
+
+    The pump reads a barred call's error out of the frames and has to
+    tell *this app refused it* from *this ran*. It used to test for
+    ``StaticPolicy.MARK``, a fixed sentence written in this repository's
+    own source — so a gate that failed open on a consultation that then
+    read that source would have had the escape filed as a denial. These
+    are the properties of the replacement.
+    """
+
+    def test_an_unstamped_policy_carries_no_token(self):
+        """And is therefore unrecognisable, deliberately.
+
+        The pump answers *unverified* to a refusal it cannot
+        authenticate. Nothing about an unstamped policy should look
+        provable.
+        """
+        policy = StaticPolicy.of(["finish"], "no tools here")
+        assert policy.refusals is None
+        assert policy.refusal("view_file") == policy.reason
+        assert "[ref " not in policy.refusal("view_file")
+
+    def test_every_denial_gets_its_own(self):
+        """Not one per consultation, which an eighth review round showed
+        unsound: the consultant *reads* the refusal, so one denial hands
+        it a consultation-wide secret that a later escape can echo back.
+        """
+        policy = StaticPolicy.of(["finish"], "no tools here").stamped()
+        first = policy.refusal("view_file")
+        second = policy.refusal("view_file")
+        tags = [re.findall(r"\[ref [0-9a-f]{16}\]", r) for r in (first, second)]
+        assert all(len(t) == 1 for t in tags), (first, second)
+        assert tags[0] != tags[1]
+        assert first.startswith(StaticPolicy.MARK), (
+            "the token goes after the mark, which a person reads off the card"
+        )
+        assert policy.refusals.outstanding == 2
+
+    def test_a_token_is_spent_the_first_time_it_comes_home(self):
+        policy = StaticPolicy.of(["finish"], "no tools here").stamped()
+        sent = policy.refusal("view_file")
+        wire = f"tool call denied by pre-tool hook: {sent}"
+        assert policy.refusals.spend("view_file", wire) is True
+        assert policy.refusals.spend("view_file", wire) is False, (
+            "the second use is the reflection this design exists to refuse"
+        )
+        assert policy.refusals.outstanding == 0
+
+    def test_a_token_is_bound_to_the_tool_it_refused(self):
+        policy = StaticPolicy.of(["finish"], "no tools here").stamped()
+        sent = policy.refusal("view_file")
+        assert policy.refusals.spend("run_command", sent) is False
+        assert policy.refusals.spend("view_file", sent) is True
+
+    def test_the_outstanding_set_is_bounded(self):
+        """A looping model is not a hypothesis.
+
+        An evicted token fails to authenticate, which reports the call as
+        one whose outcome could not be established — the safe direction,
+        and the reason a bound is affordable at all.
+        """
+        policy = StaticPolicy.of(["finish"], "no tools here").stamped()
+        first = policy.refusal("view_file")
+        for _ in range(Refusals.LIMIT + 8):
+            policy.refusal("view_file")
+        assert policy.refusals.outstanding == Refusals.LIMIT
+        assert policy.refusals.spend("view_file", first) is False
+
+    @pytest.mark.asyncio
+    async def test_the_gate_mints_one_when_it_denies(self, tmp_path):
+        """The property the whole design rests on, at the one place that
+        can establish it: what the gate *sends* is what the pump will
+        later have to recognise."""
+        policy = StaticPolicy.of(["finish"], "no tools here").stamped()
+        server = AgyGateServer(
+            tmp_path / "c.sock", policy=policy, config_dir=tmp_path
+        )
+        answer = await server.decide(
+            {"toolCall": {"name": "view_file", "args": {"AbsolutePath": "/x"}}}
+        )
+        assert answer["decision"] == "deny"
+        assert policy.refusals.spend("view_file", answer["reason"]) is True
+
+    @pytest.mark.asyncio
+    async def test_an_allowed_call_mints_nothing(self, tmp_path):
+        policy = StaticPolicy.of(["finish"], "no tools here").stamped()
+        server = AgyGateServer(
+            tmp_path / "c.sock", policy=policy, config_dir=tmp_path
+        )
+        assert await server.decide({"toolCall": {"name": "finish"}}) == {
+            "decision": "allow"
+        }
+        assert policy.refusals.outstanding == 0
+
+
+class TestTheVendorReadsItsOwnMcpSchema:
+    """AG-24's other silence: the read that works because nothing stops it.
+
+    Every MCP call `agy` makes is preceded by a ``view_file`` of
+    ``<root>/.gemini/antigravity-cli/mcp/<server>/<tool>.json`` — it reads
+    the schema off disk rather than from the protocol. That read is allowed
+    today because ``tools.py`` classes ``view_file`` as a read and
+    ``pre_verdict`` auto-allows reads with no path scoping, which is to say
+    it is allowed **by accident**.
+
+    The day a policy scopes reads, the consultant stops being reachable and
+    the symptom is *the model did not call the tool*: no denial in the
+    transcript, nothing in the log, and a feature that is simply not there.
+    So the read is admitted by name and by directory, which is what makes
+    it survive a narrowing — and the tests below are written against a
+    denied-reads list that covers the config root, because that is the
+    future this exists for rather than the present it changes nothing in.
+    """
+
+    @staticmethod
+    def _wire(tmp_path, *, denied=(), policy=None, root=True):
+        from aic_dc.agy import roots
+
+        config_root = tmp_path / "master"
+        recorder = Recorder()
+        gate = None
+        if policy is None:
+            gate = AntigravityPermissionGate(
+                tmp_path,
+                broadcast=recorder,
+                localhost_available=lambda: True,
+                config_dir=tmp_path / "cfg",
+                denied_reads=lambda: [str(p) for p in denied],
+            )
+        server = AgyGateServer(
+            tmp_path / "gate.sock",
+            gate=gate,
+            policy=policy,
+            config_dir=tmp_path / "cfg",
+            config_root=config_root if root else None,
+        )
+        schema = roots.mcp_schema_dir(config_root) / "aic-dc" / "second_opinion.json"
+        schema.parent.mkdir(parents=True, exist_ok=True)
+        schema.write_text('{"name": "second_opinion"}', encoding="utf-8")
+        return server, recorder, config_root, schema
+
+    def test_a_scoped_read_policy_does_not_take_the_consultant_away(self, tmp_path):
+        """The whole point: the admission outlives a narrowing of reads."""
+        server, recorder, config_root, schema = self._wire(
+            tmp_path, denied=[tmp_path / "master"]
+        )
+        answer = asyncio.run(
+            server.decide(payload("view_file", {"AbsolutePath": str(schema)}))
+        )
+        assert answer == {"decision": "allow"}
+        assert recorder.requests() == [], "and it does not become a dialog either"
+
+    def test_the_bearer_token_beside_it_is_not_admitted(self, tmp_path):
+        """``mcp_config.json`` holds the consultation listener's token.
+
+        The reason the admission names ``antigravity-cli/mcp`` rather than
+        the config root: buying the schema reads with a root-wide allowance
+        would put a credential inside the same admission.
+        """
+        from aic_dc.agy import roots
+
+        server, _recorder, config_root, _schema = self._wire(
+            tmp_path, denied=[tmp_path / "master"]
+        )
+        answer = asyncio.run(
+            server.decide(
+                payload(
+                    "view_file",
+                    {"AbsolutePath": str(roots.mcp_config_file(config_root))},
+                )
+            )
+        )
+        assert answer["decision"] == "deny"
+
+    def test_a_traversal_out_of_the_directory_is_not_admitted(self, tmp_path):
+        """Resolved before the containment test, which is why this is a test.
+
+        A string test on the prefix would pass ``…/mcp/../config/
+        mcp_config.json``, and the file it reaches is the one above.
+        """
+        from aic_dc.agy import roots
+
+        server, _recorder, config_root, _schema = self._wire(
+            tmp_path, denied=[tmp_path / "master"]
+        )
+        escape = (
+            roots.mcp_schema_dir(config_root)
+            / ".."
+            / "config"
+            / "mcp_config.json"
+        )
+        answer = asyncio.run(
+            server.decide(payload("view_file", {"AbsolutePath": str(escape)}))
+        )
+        assert answer["decision"] == "deny"
+
+    def test_a_consultation_is_given_no_such_door(self, tmp_path):
+        """A static policy answers for itself, admission or not.
+
+        A read granted around it would falsify the header the asking model
+        is handed — "no tools and no repository access" — with every test
+        still green, because a permitted call raises no refusal to notice.
+        """
+        server, _recorder, _root, schema = self._wire(
+            tmp_path, policy=StaticPolicy.of(["finish"], "no tools here")
+        )
+        answer = asyncio.run(
+            server.decide(payload("view_file", {"AbsolutePath": str(schema)}))
+        )
+        assert answer["decision"] == "deny"
+        assert "no tools here" in answer["reason"]
+
+    def test_a_gate_with_no_config_root_admits_nothing(self, tmp_path):
+        """``None`` is the behaviour this class had before the admission."""
+        server, _recorder, _root, schema = self._wire(
+            tmp_path, denied=[tmp_path / "master"], root=False
+        )
+        answer = asyncio.run(
+            server.decide(payload("view_file", {"AbsolutePath": str(schema)}))
+        )
+        assert answer["decision"] == "deny"
+
+    def test_it_is_one_tool_and_one_directory(self, tmp_path):
+        """The narrowness, at the level where each axis is separable."""
+        server, _recorder, config_root, schema = self._wire(tmp_path)
+        assert server._is_mcp_schema_read("view_file", {"AbsolutePath": str(schema)})
+        assert not server._is_mcp_schema_read(
+            "run_command", {"CommandLine": f"cat {schema}"}
+        ), "a shell command that names the path is not this"
+        assert not server._is_mcp_schema_read("view_file", {}), "no path, no admission"
+        assert not server._is_mcp_schema_read(
+            "view_file", {"AbsolutePath": str(config_root)}
+        ), "the root itself is not inside the schema directory"
+
+    def test_the_directory_itself_is_not_a_file_to_read(self, tmp_path):
+        from aic_dc.agy import roots
+
+        server, _recorder, config_root, _schema = self._wire(tmp_path)
+        assert not server._is_mcp_schema_read(
+            "view_file", {"AbsolutePath": str(roots.mcp_schema_dir(config_root))}
+        )
+
+    def test_a_schema_that_does_not_exist_yet_is_still_admitted(self, tmp_path):
+        """``agy`` writes these during startup, so the read can race them.
+
+        An admission that required the file to exist would be a flake
+        rather than a policy.
+        """
+        from aic_dc.agy import roots
+
+        server, _recorder, config_root, _schema = self._wire(
+            tmp_path, denied=[tmp_path / "master"]
+        )
+        later = roots.mcp_schema_dir(config_root) / "aic-dc" / "generate_image.json"
+        answer = asyncio.run(
+            server.decide(payload("view_file", {"AbsolutePath": str(later)}))
+        )
+        assert answer == {"decision": "allow"}

@@ -3362,3 +3362,76 @@ Both suites green: **4,472 webapp tests across 107 files**, **4,612 pytest**.
 - **Persisting the latch.** A server restarted mid-command has nothing to recognise the notification by, and the phantom returns once. Writing task ids to the session directory to suppress a row costs more than the row does.
 - **Guessing an `agent_id`.** `list_subagent_transcripts` would let a tab find a transcript by description. That is inventing a tab's contents, and the invariant against inventing tabs was written for the same reason.
 - **Changing the row's placement rule.** Rows with no matching card still land at the end. The rule is right — a running subagent the user cannot see is worse than one in the wrong place — and it was only ever reached by a task that should not have had a row.
+
+
+## Interlude — the lock that had to be built rather than declared (2026-09-11)
+
+[R-14](risks.md#r-14--two-refreshes-race-for-one-single-use-refresh-token) had a one-line mitigation —
+*"serialise `ensure_fresh()`. An `asyncio.Lock` covers every caller this process has"* — and it is a
+prerequisite of [AG-22](../plan-ag/decisions.md#ag-22) rather than a tidy-up after it, because a Claude
+consultant adds a credential consumer per consultation. Written out, the one line was three decisions and
+a measurement.
+
+### Where the lock lives is the whole design
+
+The callers are **per session**: a connect-time pre-flight and a `_token_watchdog`, and sessions are per
+repo. So *n* open repos put 2*n* callers on one `~/.claude/.credentials.json`, and their watchdogs
+converge, because every one of them wakes the same margin before the *same* expiry. A lock owned by a
+session would be 2*n* locks and no serialisation at all. It is module state, because the thing it guards
+is one file on one machine.
+
+### The deciding read has to happen inside it
+
+`ensure_fresh()` opened with `read_expiry()` then `needs_refresh()`, and the temptation is to leave that
+short-circuit outside the lock — it is a file read, it is cheap, and the common case skips the lock
+entirely. That is exactly backwards: the expiry a waiter read before queueing is the one answer that
+waiting invalidates. The whole body moved behind the lock and into `_refresh_under_mutex()`, so the
+indentation itself says which decisions are made under it, and the second caller through re-reads a file
+the first one just refreshed and returns having spawned nothing.
+
+The test says so more precisely than the rung count can. `test_two_concurrent_refreshes_spawn_one_rung`
+asserts `len(calls) == 1` **and** that the second outcome is `attempted=False` — a deciding read taken
+before the lock would still produce one rung on a lucky schedule, and only `attempted` separates the two.
+
+### A module-level `asyncio.Lock` would have been a latent crash
+
+Measured rather than assumed, because the fast path hides it: a `Lock` binds itself to an event loop the
+first time it is **contended**, and raises `bound to a different event loop` for every loop after that.
+Two `asyncio.run()` calls over one module-level lock is four lines and reproduces it. The server runs a
+single loop for its whole life, so this would never have shown in production — and the test suite gets a
+fresh loop per test, so it would have shown on the second contended test, as a failure about event loops
+in a module about OAuth. So `_refresh_mutex()` builds the lock on demand and replaces it when the running
+loop is not the one it bound to, which also sheds a lock left held by a loop torn down mid-refresh.
+`test_the_refresh_mutex_rebinds_to_each_event_loop` contends deliberately, because an uncontended lock
+never binds and so would prove nothing.
+
+### What the mitigation costs, said out loud
+
+When the ladder works, the lock turns 2*n* refreshes into one. When it **cannot** — a lapsed token no
+rung will move — each waiter wakes, re-reads, still sees a refresh due, and runs its own ladder, so the
+last caller waits for the sum rather than the longest. The subprocess count is no worse than it was
+without a lock; only the ordering is. Caching the failure would fix the latency and break what the
+re-read is *for*, which is that the user's own terminal `claude` may have repaired the credential while
+the ladder ran. Pinned rather than glossed:
+`test_a_ladder_that_cannot_fix_it_is_re_run_by_each_caller`.
+
+### Tests
+
+Four in `test_claude_code_token_refresh.py`: the tripwire, the 2*n* shape at eight callers, the
+cannot-fix cost, and the loop rebinding. The two tripwires were run against the unlocked source and fail
+there — the eight-caller one at `8 != 1`, which is the risk entry's own arithmetic appearing as an
+assertion message. The existing fakes complete without ever suspending, so the spy grew a `yield_inside`
+flag: without it a serialisation test passes whether or not anything is serialised, which is the failure
+mode a concurrency test is most likely to ship with.
+
+**5,082 pytest, green.**
+
+### Deliberately not built
+
+- **A cross-process lock.** `fcntl.flock` would reach the user's own terminal `claude`, and it would also
+  mean deciding what happens when the other holder dies mid-refresh. That consumer is designed to be
+  *survived* rather than prevented — `LOGIN_REQUIRED_DETAIL` is the honest terminal state — and
+  [AG-22](../plan-ag/decisions.md#ag-22) deleted the one case that would have forced the question by
+  serving MCP from the process that already holds the credential.
+- **Establishing the severity's inferred half.** Whether a superseded redemption merely fails or trips
+  replay detection and revokes the grant costs a login to find out, and the mutex is the same either way.

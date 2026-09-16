@@ -5,6 +5,14 @@ knows nothing about permissions; it decides *whose* call this is and then
 asks. This is what it asks. One unix socket per session, one connection
 per tool call, newline-delimited JSON each way.
 
+**Four events arrive on it, not one.** ``PreToolUse`` is the dialog and
+everything below is about it; ``PreInvocation`` answers with this session's
+standing guidance (AG-32), ``PostInvocation`` asks whether the loop should
+end now, and ``Stop`` reports that it did (AG-19, AG-R-16). Those three
+carry no tool and raise no dialog — they read the same latched stop the
+gate reads, which is the whole reason they are here rather than in a second
+socket with a second copy of that state.
+
 It owns almost nothing
 ======================
 The queue, the countdown, the localhost rule, the dialog payload and the
@@ -56,14 +64,16 @@ import asyncio
 import dataclasses
 import json
 import logging
+import secrets
 from collections.abc import Iterable
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
-from aic_dc.agy import registry, scope
+from aic_dc.agy import hook, registry, roots, scope
 from aic_dc.antigravity.permissions import (
     AntigravityPermissionGate,
     denormalise_args,
+    normalise_args,
 )
 
 logger = logging.getLogger(__name__)
@@ -79,6 +89,87 @@ UNREADABLE = {
         "by the user."
     ),
 }
+
+#: What ``agy`` puts in a ``Stop`` payload's ``terminationReason`` when a
+#: hook ended the loop, rather than the model or a limit. Measured
+#: 2026-09-10 beside ``NO_TOOL_CALL`` for an ordinary end; it is the word
+#: that lets this host tell a loop **it** ended from one a stranger's hook
+#: ended in the same merged hooks file (AG-R-16).
+HOOK_TERMINATION = "TERMINAL_CUSTOM_HOOK"
+
+
+class Refusals:
+    """Single-use tokens, minted per denial and spent when one comes home.
+
+    **The consultant reads every refusal this app sends it.** That is the
+    point of the reason — it is prose written to steer a refused model
+    into answering rather than into looking for another route — and it is
+    also what makes a per-consultation secret unsound as an
+    authenticator. An eighth review round put the attack plainly: deny one
+    call, and the model now holds the token; if the gate later fails open,
+    any tool whose output quotes the conversation, echoes its arguments,
+    or reports an error naming them carries that token back, and the pump
+    reads the escape as a refusal. The model does not have to be
+    adversarial for this — it only has to be a model, in a loop that
+    quotes itself.
+
+    Nothing here can keep a secret from the consultant, so nothing tries.
+    A token authenticates **one** denial, and spending it is what makes
+    the second use of the same string worthless: by the time the model
+    could reflect a token it has seen, the frame that showed it to the
+    model has already been through the pump, which consumed it.
+
+    Bound to a tool name as well, so a token minted denying ``view_file``
+    cannot authenticate a ``run_command`` that escaped — the case where a
+    frame carrying the first denial never arrived, leaving its token
+    unspent. That is the residue this design does not close: a *dropped*
+    denial frame leaves one live token, and an escape of the same tool
+    could still reflect it. It costs a lost frame, an open gate and a
+    reflection at once, and the alternative — asking the gate what it
+    denied — is the authority trap the seventh round named, which
+    certifies an engine that ignored the deny.
+
+    A capped set, oldest evicted. A consultation is one turn and denials
+    are few, but a looping model is not a hypothesis, and an evicted token
+    fails to authenticate — which reports *unverified*, the safe
+    direction, rather than growing without bound.
+    """
+
+    #: Enough for any consultation that is behaving, and a bound on one
+    #: that is not.
+    LIMIT: ClassVar[int] = 64
+
+    def __init__(self) -> None:
+        self._live: dict[str, str] = {}
+
+    def mint(self, tool: str) -> str:
+        """A token for one denial of ``tool``, recorded as outstanding."""
+        token = secrets.token_hex(8)
+        self._live[token] = str(tool or "")
+        while len(self._live) > self.LIMIT:
+            self._live.pop(next(iter(self._live)))
+        return token
+
+    def spend(self, tool: str, *parts: Any) -> bool:
+        """Whether ``parts`` carry an unspent token issued for ``tool``.
+
+        Substring rather than prefix: what comes back has `agy`'s own
+        framing in front of it, measured as ``"tool call denied by
+        pre-tool hook: AIC-DC refused this tool call. [ref …] …"``.
+        """
+        wanted = str(tool or "")
+        for token, issued in tuple(self._live.items()):
+            if issued and wanted and issued != wanted:
+                continue
+            if any(token in str(part) for part in parts if part):
+                self._live.pop(token, None)
+                return True
+        return False
+
+    @property
+    def outstanding(self) -> int:
+        """How many denials have not come back. For tests and probes."""
+        return len(self._live)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -110,15 +201,125 @@ class StaticPolicy:
     into looking for another route (AG-R-11's mechanism, used positively).
     """
 
+    #: The first words of every refusal this posture sends, and the token
+    #: by which a refusal is recognised when it comes back.
+    #:
+    #: **A fixed string rather than a sentence extracted from the reason.**
+    #: The reason travels out through this app's hook, through `agy`, and
+    #: returns in a tool step's error field, and the pump that renders that
+    #: step has to tell *we refused this* from *this failed* — the
+    #: difference between a gate that held and a gate that failed open and
+    #: then broke. An earlier version matched the reason's first sentence,
+    #: which made a wire protocol a property of copy-editing: an "e.g." or
+    #: a version number in the prose would have silently shortened the
+    #: match, and a long-enough error truncated anywhere on that path would
+    #: have gone unrecognised. This is short, stands at the head of the
+    #: message, and survives every rewording of what follows it.
+    #:
+    #: It is also addressed to the reader. The card shows this text, so a
+    #: person looking at a denied call is told which program refused it
+    #: rather than being left with the vendor's "denied by pre-tool hook".
+    MARK: ClassVar[str] = "AIC-DC refused this tool call."
+
     #: Tool names, in ``agy``'s own spelling, that may run without asking.
     allowed: frozenset[str]
     #: What the model is told when it reaches for anything else.
     reason: str
+    #: The issuer of this consultation's refusal tokens, or ``None`` on
+    #: an unstamped policy — whose refusals can therefore never be
+    #: recognised coming back, which is the safe direction. See
+    #: :meth:`stamped` and :meth:`refusal`.
+    refusals: Refusals | None = None
 
     @classmethod
     def of(cls, allowed: Iterable[str], reason: str) -> StaticPolicy:
-        """Build one from any iterable of names."""
+        """Build one from any iterable of names, marked as ours.
+
+        The mark is prepended here rather than at each call site so that a
+        posture cannot be defined without it — a policy whose refusals are
+        unrecognisable would deny correctly and report nothing, which is
+        the failure AG-R-22 is about.
+        """
+        reason = reason.strip()
+        if not reason.startswith(cls.MARK):
+            reason = f"{cls.MARK} {reason}"
         return cls(allowed=frozenset(allowed), reason=reason)
+
+    def stamped(self) -> StaticPolicy:
+        """This policy with an issuer of its own for refusal tokens.
+
+        **Because :attr:`MARK` is a fixed string, and a fixed string is a
+        content test.** The pump reads a refusal back out of the frames to
+        tell *we refused this* from *this ran*, and the mark is written in
+        this repository's own source, tests and specs. So a gate that
+        failed open, on a consultation that then read one of those files,
+        would hand the pump output containing the mark — and a genuine
+        containment escape would be classified as a refusal, with the app
+        going on to state that nothing had been read. The falsehood the
+        whole mechanism exists to prevent, reintroduced by the code that
+        recognises refusals. Raised in this app's own review and confirmed
+        by a seventh consultation round.
+
+        **A token rather than a ledger of what the gate denied.** The
+        obvious repair is to stop reading the wire and ask the gate, which
+        knows what it refused. That is worse, and the reviewer's name for
+        it is the right one: the gate records what it *ordered*, and the
+        premise of the whole mechanism is that the vendor process is not
+        taken on faith. An engine that mishandled the deny and ran the
+        tool anyway would be certified clean by a ledger, because the
+        ledger says the gate said no. The token keeps the test on the wire
+        — where an escape is visible — and only makes it unforgeable.
+
+        **Per denial, not per consultation, and this was argued twice.**
+        The first cut minted one token for the whole consultation, on the
+        reasoning that the pump asks *is this refusal ours* rather than
+        *which of our refusals is this* — authentication, not
+        correlation, so nothing has to line up and there is no counter to
+        desynchronise. An eighth round showed the reasoning true and the
+        conclusion wrong, because it omits who reads the refusal. **The
+        consultant does.** The reason is prose written for it. So one
+        denial hands the model the consultation's whole secret, and if
+        the gate later fails open, a tool that quotes the conversation or
+        errors naming its own arguments carries that secret back — and
+        `_outcome` tests for the refusal *before* it tests for output, so
+        the escape is classified as a denial and the alarm never fires.
+
+        A token that can only be spent once is not worth reflecting: the
+        frame that showed it to the model went through the pump first,
+        which consumed it. See :class:`Refusals`, which also binds each
+        token to the tool it was issued for, and :meth:`refusal`, which
+        mints them.
+
+        The round also corrected this method's other argument. Minting
+        per denial does *not* require an ordered sequence — a set of
+        outstanding tokens has no order to lose — and the desynchronised
+        counter this feared would in any case have produced *unverified*
+        rather than a false breach, since a denial carries no output.
+        """
+        return dataclasses.replace(self, refusals=Refusals())
+
+    def refusal(self, tool: str) -> str:
+        """What one denial of ``tool`` says, carrying a token for itself.
+
+        Called by the gate at the moment it refuses, rather than read off
+        :attr:`reason`, because the token is per denial. An unstamped
+        policy has no issuer and answers with the bare reason — its
+        refusals are unrecognisable coming back, and every barred call
+        under it is reported as one whose outcome this app could not
+        establish.
+
+        The token goes at the head, immediately after the mark, because
+        everything on this return path is somebody else's to truncate —
+        `agy` already prefixes 35 characters of its own — and a
+        tail-truncating buffer keeps the head.
+        """
+        if self.refusals is None:
+            return self.reason
+        token = self.refusals.mint(tool)
+        rest = self.reason
+        if rest.startswith(self.MARK):
+            rest = rest[len(self.MARK):].lstrip()
+        return f"{self.MARK} [ref {token}] {rest}"
 
 
 class _AgyContext:
@@ -162,7 +363,9 @@ class AgyGateServer:
         *,
         gate: AntigravityPermissionGate | None = None,
         config_dir: Path | str | None = None,
+        config_root: Path | str | None = None,
         policy: StaticPolicy | None = None,
+        guidance: str | None = None,
     ) -> None:
         if (gate is None) == (policy is None):
             # Refused at construction rather than at the first tool call.
@@ -180,6 +383,38 @@ class AgyGateServer:
         self._gate = gate
         self._policy = policy
         self._config_dir = config_dir
+        #: The private ``HOME`` this session's ``agy`` runs against, or
+        #: ``None``. Held for two purposes — :meth:`_is_mcp_schema_read`,
+        #: and the derived path :meth:`note_paths` compares what ``agy``
+        #: announces against — and ``None`` admits nothing and warns about
+        #: nothing, so a caller that does not pass it gets the behaviour
+        #: this class had before AG-24's schema admission, rather than a
+        #: wider one.
+        self._config_root = Path(config_root) if config_root else None
+        #: The standing guidance to put in front of the model at every
+        #: invocation, or ``None`` for a session that wants none. **The
+        #: words are the caller's** (:data:`aic_dc.agy.tools.WRITE_GUIDANCE`)
+        #: rather than this class's: what a model should be told about
+        #: ``write_to_file`` is a fact about the vendor's tool schema, and
+        #: this module's subject is permission. Holding the text here and
+        #: authoring it there is what keeps the socket ignorant of the
+        #: sentence it is delivering. See :meth:`standing_guidance`.
+        #:
+        #: Whitespace-only text is ``None`` and not ``""``: a blank
+        #: ``ephemeralMessage`` would be a step injected into the model's
+        #: context saying nothing, and the caller that passed it meant "no
+        #: guidance". :func:`aic_dc.agy.hook.inject_guidance` drops it too,
+        #: but that is a second reader's defence, not this one's excuse.
+        self._guidance = (guidance or "").strip() or None
+        #: Where the running ``agy`` says it keeps this session's
+        #: conversations, learned from the paths on its own hook payloads
+        #: (:meth:`note_paths`). ``None`` until a hook has fired, which is
+        #: every read before the session's first tool call.
+        self._announced_brain: Path | None = None
+        #: Whether that answer disagreeing with :func:`roots.brain_dir` has
+        #: been reported. Once per server, because it is one fact about the
+        #: install rather than one per tool call.
+        self._brain_warned = False
         self._server: Any = None
         # A set, not one id: this host owns its session's conversation and
         # its subagents' while they run. See `claim`.
@@ -190,6 +425,15 @@ class AgyGateServer:
         #: id, valued by the reason the agent reads. Cleared by `resume`
         #: with its turn-wide sibling.
         self._refused_conversations: dict[str, str] = {}
+        #: Conversations whose loop *this* server ended, by answering
+        #: `terminate` to a `PostInvocation` (AG-19), and **how many times**.
+        #: Recorded rather than inferred, and it answers three questions:
+        #: the session reads it to badge a stopped turn honestly, `note_stop`
+        #: reads it to tell our own termination from a stranger's hook ending
+        #: our loop in the same merged file, and a count above one is a loop
+        #: that came back after we ended it — see `decide_invocation`.
+        #: Cleared by `resume`.
+        self._terminations: dict[str, int] = {}
         #: The systemd scope `agy` will be launched into, or None where the
         #: platform has none. Named at construction rather than at `start`
         #: so `AgySession` can read it while assembling argv, and held here
@@ -302,6 +546,7 @@ class AgyGateServer:
         """
         self._refusal = None
         self._refused_conversations.clear()
+        self._terminations.clear()
 
     async def start(self) -> None:
         """Listen. Safe to call once; a second call is a no-op."""
@@ -467,6 +712,26 @@ class AgyGateServer:
             )
             return {"decision": "deny", "reason": aimed}
 
+        # **The vendor reading its own MCP tool schema** (AG-24). Admitted
+        # by name, before the two verdict paths below, because it is the
+        # mechanical prelude to every MCP call `agy` makes rather than
+        # anything the model chose to look at: one `view_file` of
+        # `<root>/.gemini/antigravity-cli/mcp/<server>/<tool>.json`, then
+        # the call. It has always been allowed — `tools.py` classes
+        # `view_file` as a read and `pre_verdict` auto-allows reads — so
+        # this changes no behaviour today. It is here so that the first
+        # policy to *scope* reads does not take the consultant away with
+        # it, and take it away invisibly: the symptom of losing this read
+        # is `second_opinion` never being called, with no denial to find.
+        #
+        # Only on the master path. Under a static policy the answer stays
+        # the policy's, which is what keeps `_no_tools_or_fail`'s promise
+        # honest — a consultation is told nothing was read, and a side door
+        # for reads granted here would make that sentence false with every
+        # test still green.
+        if self._policy is None and self._is_mcp_schema_read(tool_name, args):
+            return {"decision": "allow"}
+
         if self._policy is not None:
             # A consultation (AG-16). Terminal on purpose: this does not
             # fall through to `pre_verdict`, because that path exists to
@@ -478,7 +743,10 @@ class AgyGateServer:
             if tool_name in self._policy.allowed:
                 return {"decision": "allow"}
             logger.debug("Consultation gate refused %s", tool_name)
-            return {"decision": "deny", "reason": self._policy.reason}
+            # `refusal()` rather than `reason`: each denial carries a
+            # single-use token minted for it, which is what the pump
+            # authenticates the refusal by when it comes home.
+            return {"decision": "deny", "reason": self._policy.refusal(tool_name)}
 
         # The narrowing that keeps reads out of the dialog, shared with the
         # SDK transport rather than reimplemented. Calling the broker
@@ -516,6 +784,270 @@ class AgyGateServer:
             }
         return {"decision": "allow"}
 
+    def _is_mcp_schema_read(self, tool_name: str, args: dict[str, Any]) -> bool:
+        """Whether this call is ``agy`` reading one of its own MCP schemas.
+
+        Narrow on every axis it can be, because an admission that skips the
+        dialog is a hole with a good reason rather than a safe operation:
+
+        - **One tool.** ``view_file`` and nothing else. A ``run_command``
+          that happens to name a path in the directory is not this.
+        - **One directory**, :func:`~aic_dc.agy.roots.mcp_schema_dir`, and
+          resolved before the containment test so that ``mcp/../config/
+          mcp_config.json`` is not inside it. That traversal is the one
+          that matters: the file it reaches holds the consultation
+          listener's bearer token.
+        - **One root**, the private ``HOME`` this session was given. With
+          no root there is nothing to compare against and the answer is
+          ``False`` — so a caller that passes no ``config_root`` gets the
+          gate it had before this existed.
+
+        Symlinks are followed by ``resolve()``, which is deliberate in both
+        directions: a symlink *into* the directory from elsewhere does not
+        pass, and the seeded directories under the same vendor root are
+        symlinks this app made and can be read through. ``strict=False``,
+        because ``agy`` writes these files during startup and a schema read
+        can race the file's creation — an admission that depended on the
+        file already existing would be a flake rather than a policy.
+        """
+        if tool_name != "view_file" or self._config_root is None:
+            return False
+        target = normalise_args(tool_name, args).get("file_path")
+        if not isinstance(target, str) or not target:
+            return False
+        try:
+            path = Path(target).resolve(strict=False)
+            directory = roots.mcp_schema_dir(self._config_root).resolve(strict=False)
+        except OSError:  # noqa: BLE001 - an unresolvable path is not admitted
+            return False
+        return path != directory and directory in path.parents
+
+    @property
+    def brain_dir(self) -> Path | None:
+        """Where ``agy`` itself says its conversations are, or ``None``.
+
+        Read by :class:`~aic_dc.agy.service.AgyService` as the *first*
+        candidate for a subagent transcript scan, with
+        :func:`~aic_dc.agy.roots.brain_dir` behind it. ``None`` before any
+        hook has fired — which is every read of a session that has not made
+        a tool call yet, and every read of a session this process did not
+        run — so the derivation is not replaced, it is preferred.
+        """
+        return self._announced_brain
+
+    def note_paths(self, payload: dict[str, Any]) -> None:
+        """Learn the vendor's own directory layout from one payload.
+
+        Called for **every** event, before it is routed, because the two
+        fields it reads are common ones and the cheapest correct answer is
+        the earliest one: a ``PreInvocation`` fires before the session's
+        first tool call, so a turn that only reads gets its brain directory
+        from the invocation hooks alone.
+
+        The value it learns is not used to make any decision here. It exists
+        because :data:`~aic_dc.agy.roots.PRODUCT_DIR` is a constant and
+        ``hooks.md`` names two other values it takes on the vendor's other
+        surfaces — see
+        :func:`~aic_dc.agy.roots.announced_brain_dir` for what that costs,
+        and § *What a disagreement means* on the warning below.
+
+        **A disagreement is logged and nothing else**, deliberately. The
+        derived path is what this app has always used; the announced one is
+        what the process actually has open. Preferring the announced one
+        where it is available (:attr:`brain_dir`) fixes the reads that are
+        threaded for it, and the log is what tells a maintainer that the
+        ones which are not — image collection and the scratch-diversion
+        check in :mod:`aic_dc.agy.steps`, both derived from
+        ``config_root`` — are looking in the wrong place too. That is a
+        smaller fix than it looks and it is not this one; what would be
+        unacceptable is the condition being silent, because every symptom of
+        it is an empty directory rather than an error.
+        """
+        conversation_id = str(payload.get("conversationId") or "")
+        announced = roots.announced_brain_dir(
+            conversation_id,
+            payload.get("artifactDirectoryPath"),
+            payload.get("transcriptPath"),
+        )
+        if announced is None or announced == self._announced_brain:
+            return
+        self._announced_brain = announced
+        if self._config_root is None or self._brain_warned:
+            return
+        derived = roots.brain_dir(self._config_root)
+        if announced == derived:
+            return
+        self._brain_warned = True
+        logger.warning(
+            "agy keeps this session's conversations in %s, not the %s this "
+            "build derives. Every path AIC-DC computes from `roots.PRODUCT_DIR` "
+            "(%r) is therefore wrong for this vendor build: subagent "
+            "transcripts prefer the announced directory, but generated-image "
+            "collection and the scratch-diversion check do not, and both fail "
+            "by finding an empty directory rather than by erroring.",
+            announced,
+            derived,
+            roots.PRODUCT_DIR,
+        )
+
+    def was_terminated(self, conversation_id: str) -> bool:
+        """Whether this server ended that conversation's loop. AG-19.
+
+        Read by :class:`~aic_dc.agy.session.AgySession` when it closes a
+        turn out, because a loop ended this way reports ``status:
+        "SUCCESS"`` with empty prose — which, rendered as it arrives, is a
+        completed answer that happens to say nothing. It is the *stop*
+        having worked, and the footer has to say so.
+        """
+        return str(conversation_id) in self._terminations
+
+    def was_revived(self, conversation_id: str) -> bool:
+        """Whether a loop this server ended came back. AG-R-16.
+
+        More than one termination for one conversation in one turn: the
+        stop was answered, the loop ended, and something put it back. Read
+        by :class:`~aic_dc.agy.session.AgySession` so that a turn which has
+        outlasted the user's stop can say *why* rather than only *that*.
+        """
+        return self._terminations.get(str(conversation_id), 0) > 1
+
+    def standing_guidance(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """The sentence to put in front of the model this invocation. AG-32.
+
+        ``PreInvocation``, and the answer is one fixed string — ``{"
+        ephemeralMessage": …}`` for a session that was given guidance, and
+        ``{}`` for one that was not. **No dialog, no queue and no state
+        that survives the answer**, which is why it is safe to run per
+        invocation on the same socket the gate is using: it costs a hook
+        process and a dictionary lookup.
+
+        **The frame is not built here.** This returns the prose;
+        :func:`aic_dc.agy.hook.inject_guidance` wraps it into
+        ``injectSteps``. The split is deliberate and it is the same one
+        :meth:`decide_invocation` has — ``injectSteps`` also accepts
+        ``{"toolCall": …}``, so a socket answer forwarded verbatim would be
+        a path from this process straight into ``agy``'s step list,
+        bypassing the gate that exists to review exactly that.
+
+        **Every conversation this server owns, subagents included.** A
+        subagent writes files with the same ``write_to_file`` and hits the
+        same ``ArtifactMetadata`` failure, and it never sees the parent's
+        prompt — so guidance that lived on the prompt reached the master
+        alone. That is not a limitation this replaces so much as one it
+        stops having, and it is the second reason the prompt was the wrong
+        channel.
+
+        Nothing is injected into a **stopped** turn or a stopped subagent's
+        conversation. An ephemeral message is documented as a *step* to
+        inject, and putting a new step in front of a model whose loop this
+        app is trying to end is the opposite of stopping it; the guidance is
+        also worth nothing to a loop that will not be making tool calls,
+        because the gate is refusing them all.
+
+        A consultation is given no guidance at all — its gate is built with
+        ``policy`` and no ``guidance``, and it may write nothing, so there
+        is nothing to advise it about.
+        """
+        if self._guidance is None:
+            return {}
+        conversation_id = str(payload.get("conversationId") or "")
+        if self._refusal is not None or (
+            conversation_id in self._refused_conversations
+        ):
+            return {}
+        return {"ephemeralMessage": self._guidance}
+
+    def decide_invocation(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Whether this conversation's loop ends here. AG-19.
+
+        ``PostInvocation``, and the answer is the latch:
+        :meth:`refuse_all` for ⏹ on the turn, :meth:`refuse_conversation`
+        for ⏹ on one subagent's row. **No new state and no dialog** — this
+        is the same stop the gate has been refusing tool calls with since
+        it was pressed, asked at the one moment ``agy`` will act on it
+        mechanically rather than leave it to the agent's judgement.
+
+        It is what makes the aimed stop reach a subagent that asks for
+        nothing: :meth:`refuse_conversation` records three limits, the
+        first of which is that a subagent producing only prose cannot be
+        starved. Its loop still ends here, at the end of the invocation it
+        is in.
+
+        Returns ``{}`` for every conversation that was not stopped, which
+        is nearly all of them — including a consultation's, whose gate has
+        a static policy and no ⏹ at all.
+        """
+        conversation_id = str(payload.get("conversationId") or "")
+        stopped = self._refusal is not None or (
+            conversation_id in self._refused_conversations
+        )
+        if not stopped:
+            return {}
+        named = conversation_id or "an unnamed conversation"
+        if conversation_id:
+            count = self._terminations.get(conversation_id, 0) + 1
+            self._terminations[conversation_id] = count
+            # **A loop we already ended, asking again.** Measured
+            # 2026-09-12: with a third-party `Stop` hook answering
+            # `continue`, this terminates and that revives, eight times in
+            # sixteen seconds, bounded only by `--print-timeout` — which
+            # `AgySession` sets to 12h. Warned on the second termination
+            # only, because after that it is the same fact repeating and the
+            # log is the one place a runaway turn is legible.
+            #
+            # Not acted on here, deliberately. The remedies are ending the
+            # process (AG-19 demotes that to an explicit user escalation,
+            # since it ends a session the user is holding) and bounding the
+            # turn — both decisions above this class. What this owes is to
+            # stop the condition being silent.
+            if count == 2:
+                logger.warning(
+                    "The loop for %s was revived after AIC-DC ended it, so "
+                    "the user's stop is being overridden — most likely by a "
+                    "`Stop` hook this app does not own answering `continue` "
+                    "(see AG-R-16). The turn will keep re-entering until "
+                    "`--print-timeout` expires.",
+                    named,
+                )
+        logger.info("Ending the loop for %s: the user stopped it", named)
+        return {"terminationBehavior": "terminate"}
+
+    def note_stop(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Record that a loop ended, and never object to it. AG-R-16.
+
+        The ``Stop`` event, whose payload carries the ``terminationReason``
+        this host has no other way to see. Answering ``{}`` is the whole
+        decision and it is not conditional: ``{"decision": "continue"}``
+        would re-enter a loop the user stopped, and the one thing worth
+        guaranteeing about this path is that the string never appears on
+        it. :func:`aic_dc.agy.hook.report_stop` does not forward this
+        return value either, so both ends hold that property alone.
+
+        **It does not follow that our ``{}`` protects the stop.** Measured
+        2026-09-12: a hook this app does not own, answering ``continue``,
+        holds the turn open whichever order the two run in — and runs ours
+        not at all when it goes first. This handler's value is the reading
+        below, not a veto. See [AG-R-16](../../../specs5/plan-ag/risks.md#ag-r-16).
+
+        What it does with the payload is tell one hook-ended loop from
+        another. ``TERMINAL_CUSTOM_HOOK`` on a conversation
+        :meth:`decide_invocation` never terminated means **somebody
+        else's** ``Stop``, ``PostInvocation`` or plugin ended our turn —
+        the merge AG-R-16 describes, arriving from the other direction.
+        That is logged rather than acted on: it is a fact about the user's
+        own configuration, and the useful thing is to name it.
+        """
+        conversation_id = str(payload.get("conversationId") or "")
+        reason = str(payload.get("terminationReason") or "")
+        if reason == HOOK_TERMINATION and not self.was_terminated(conversation_id):
+            logger.warning(
+                "A hook AIC-DC does not own ended the loop for %s. Another "
+                "entry in the shared hooks file is acting on this app's "
+                "conversations (see AG-R-16).",
+                conversation_id or "an unnamed conversation",
+            )
+        return {}
+
     async def _handle(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ) -> None:
@@ -531,7 +1063,25 @@ class AgyGateServer:
             payload = json.loads(line.decode("utf-8"))
             if not isinstance(payload, dict):
                 raise ValueError("payload is not an object")
-            answer = await self.decide(payload)
+            # Routed on the key the hook stamps from *its* argv, never on
+            # the shape of the payload: a tool call sniffed as an
+            # invocation event would be answered `{}`, and `{}` on a tool
+            # call is allow. An absent key is the gate, which is both the
+            # conservative reading and what an older hook process sends.
+            event = payload.get(hook.EVENT_KEY) or hook.PRE_TOOL_USE
+            # Before the routing and outside the per-event branches: the
+            # paths are common fields, so the first payload of any kind
+            # answers the question, and a reader that waited for a tool call
+            # would learn nothing from a turn that only wrote prose.
+            self.note_paths(payload)
+            if event == hook.PRE_INVOCATION:
+                answer = self.standing_guidance(payload)
+            elif event == hook.POST_INVOCATION:
+                answer = self.decide_invocation(payload)
+            elif event == hook.STOP:
+                answer = self.note_stop(payload)
+            else:
+                answer = await self.decide(payload)
         except Exception:  # noqa: BLE001 - the hook is waiting on us
             logger.exception("The agy gate server could not answer a hook call")
             answer = dict(UNREADABLE)

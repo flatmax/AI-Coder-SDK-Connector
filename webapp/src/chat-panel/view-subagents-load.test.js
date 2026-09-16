@@ -15,6 +15,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { resetCapabilities, setCapabilities } from '../engine-capabilities.js';
+import { clearHistoricalTabs } from './tabs.js';
 import {
   mountPanel,
   publishFakeRpc,
@@ -347,6 +348,154 @@ describe('view-subagents handler — an engine that cannot read one back', () =>
   });
 });
 
+describe('a consultation, whose record is the blocks its turn kept', () => {
+  // Its `agent_id` is minted and names nothing on disk — there is no session
+  // behind a consultation — so the handler builds its tab from the turn's
+  // own blocks rather than reading a transcript that was never written.
+  const consulted = (id, toolUseId) => ({
+    agent_id: id,
+    label: 'Antigravity: review the patch',
+    has_transcript: false,
+    tool_use_id: toolUseId,
+    row: {
+      key: id,
+      agent_id: id,
+      tool_use_id: toolUseId,
+      task_type: 'consultation',
+      // The same server fact the descriptor above carries. It is what stops
+      // the settled tab's feed fallback (`loadSubagentFeedIfEmpty`) from
+      // reaching for a transcript that was never written — which is the one
+      // disk read the consultation path could still have made.
+      has_transcript: false,
+      terminal: true,
+    },
+  });
+
+  // The settled turn in Main that holds the consultation's blocks. They are
+  // stamped with the spawning call's id, which is what nests them under it.
+  function seedTurn(panel, toolUseId) {
+    panel._tabs.get('main').messages = [
+      {
+        role: 'assistant',
+        blocks: [
+          { block_id: 'b0', kind: 'text', content: 'before', agent_id: null },
+          { block_id: 't1', kind: 'tool', agent_id: null },
+          { block_id: 'c0', kind: 'text', content: 'why', agent_id: toolUseId },
+          { block_id: 'c1', kind: 'tool', agent_id: toolUseId },
+        ],
+      },
+    ];
+  }
+
+  it('projects the turn\'s blocks instead of reading disk', async () => {
+    const read = vi.fn().mockResolvedValue(TRANSCRIPT);
+    publishFakeRpc({ 'ClaudeCodeService.get_subagent_transcript': read });
+    const p = mountPanel();
+    await settle(p);
+    seedTurn(p, 'toolu_9');
+    ask(p, [consulted('agy_1', 'toolu_9')]);
+    await settle(p);
+    // The whole point: no read for a record that was never written.
+    expect(read).not.toHaveBeenCalled();
+    const tab = p._tabs.get('consultation:agy_1');
+    expect(tab.messages).toHaveLength(1);
+    expect(tab.messages[0].blocks.map((b) => b.block_id)).toEqual(
+      ['c0', 'c1'],
+    );
+  });
+
+  it('takes only its own blocks, not the turn it ran inside', async () => {
+    publishFakeRpc({});
+    const p = mountPanel();
+    await settle(p);
+    seedTurn(p, 'toolu_9');
+    ask(p, [consulted('agy_1', 'toolu_9')]);
+    await settle(p);
+    const ids = p._tabs.get('consultation:agy_1').messages[0].blocks
+      .map((b) => b.block_id);
+    expect(ids).not.toContain('b0');
+    expect(ids).not.toContain('t1');
+  });
+
+  it('lands read-only, like every other tab in this strip', async () => {
+    publishFakeRpc({});
+    const p = mountPanel();
+    await settle(p);
+    seedTurn(p, 'toolu_9');
+    ask(p, [consulted('agy_1', 'toolu_9')]);
+    await settle(p);
+    expect(p._tabs.get('consultation:agy_1').readOnly).toBe(true);
+    expect(p._activeTabId).toBe('consultation:agy_1');
+  });
+
+  it('is not a browsed transcript and is not swept as one', async () => {
+    publishFakeRpc({});
+    const p = mountPanel();
+    await settle(p);
+    seedTurn(p, 'toolu_9');
+    ask(p, [consulted('agy_1', 'toolu_9')]);
+    await settle(p);
+    expect(p._tabs.has('consultation:agy_1')).toBe(true);
+    // `clearHistoricalTabs` matches on the `historical:` prefix, and a
+    // consultation's tab does not carry it: it is a live subagent tab that
+    // happens to have been opened by hand, and it retires with the turn
+    // like every other one rather than with the transcript browser.
+    clearHistoricalTabs(p);
+    expect(p._tabs.has('consultation:agy_1')).toBe(true);
+  });
+
+  it('says so when the turn no longer holds the record', async () => {
+    const read = vi.fn().mockResolvedValue(TRANSCRIPT);
+    publishFakeRpc({ 'ClaudeCodeService.get_subagent_transcript': read });
+    const p = mountPanel();
+    await settle(p);
+    // No turn seeded — a session restored from disk keeps a consultation's
+    // tool card and nothing else, so there are no blocks to project.
+    ask(p, [consulted('agy_1', 'toolu_9')]);
+    await settle(p);
+    expect(read).not.toHaveBeenCalled();
+    // The tab still opens, carrying its seed line and no answer: there is
+    // nothing to show and no read that could find any. What it must not do
+    // is fetch a transcript, which would report a missing session for a
+    // consultation that behaved correctly.
+    const tab = p._tabs.get('consultation:agy_1');
+    expect(tab.messages.every((m) => m.subagent_seed)).toBe(true);
+    expect(tab.turnBlocks.blocks).toEqual([]);
+  });
+
+  it('still reads disk for a subagent that has one', async () => {
+    const read = vi.fn().mockResolvedValue(TRANSCRIPT);
+    publishFakeRpc({ 'ClaudeCodeService.get_subagent_transcript': read });
+    const p = mountPanel();
+    await settle(p);
+    seedTurn(p, 'toolu_9');
+    // No `has_transcript` at all: absence means it has one, so every
+    // producer that never heard of the field keeps the path it always had.
+    ask(p, [agent('agent_abc', 'explore: x')]);
+    await settle(p);
+    expect(read).toHaveBeenCalledOnce();
+    expect(p._tabs.get('historical:agent_abc').messages).toHaveLength(2);
+  });
+
+  it('projects and reads in one request without either disturbing the other',
+    async () => {
+      const read = vi.fn().mockResolvedValue(TRANSCRIPT);
+      publishFakeRpc({ 'ClaudeCodeService.get_subagent_transcript': read });
+      const p = mountPanel();
+      await settle(p);
+      seedTurn(p, 'toolu_9');
+      ask(p, [
+        consulted('agy_1', 'toolu_9'),
+        agent('agent_abc', 'explore: x'),
+      ]);
+      await settle(p);
+      expect(read.mock.calls.map((c) => c[0])).toEqual(['agent_abc']);
+      expect(p._tabs.get('consultation:agy_1').messages[0].blocks)
+        .toHaveLength(2);
+      expect(p._tabs.get('historical:agent_abc').messages).toHaveLength(2);
+    });
+});
+
 describe('view-subagents handler — what it refuses to do', () => {
   it('skips a subagent whose live tab is in the strip', async () => {
     const read = vi.fn().mockResolvedValue(TRANSCRIPT);
@@ -363,7 +512,7 @@ describe('view-subagents handler — what it refuses to do', () => {
     expect(p._tabs.has('historical:agent_abc')).toBe(false);
   });
 
-  it('toasts and reads nothing when every subagent is still live', async () => {
+  it('goes to the tab when every subagent is still live', async () => {
     const read = vi.fn().mockResolvedValue(TRANSCRIPT);
     publishFakeRpc({ 'ClaudeCodeService.get_subagent_transcript': read });
     const p = mountPanel();
@@ -373,10 +522,51 @@ describe('view-subagents handler — what it refuses to do', () => {
     p._emitToast = (message, type) => toasts.push([message, type]);
     ask(p, [agent('agent_abc', 'explore: x')]);
     await settle(p);
+    // Still no read — the live tab remains the better view of the same work,
+    // which was always the right half of the old behaviour.
     expect(read).not.toHaveBeenCalled();
-    expect(toasts).toEqual([
-      ['That subagent is still active in the tab strip', 'info'],
-    ]);
+    // But the user asked to read it, so take them there rather than tell them
+    // where it is. The toast said "still active in the tab strip" and left
+    // them to find it.
+    expect(p._activeTabId).toBe('agent_abc');
+    expect(toasts).toEqual([]);
+  });
+
+  it('goes to the first when several are live, not the last', async () => {
+    const read = vi.fn().mockResolvedValue(TRANSCRIPT);
+    publishFakeRpc({ 'ClaudeCodeService.get_subagent_transcript': read });
+    const p = mountPanel();
+    await settle(p);
+    seedTab(p, 'agent_abc');
+    seedTab(p, 'agent_def');
+    ask(p, [agent('agent_abc', 'explore: x'), agent('agent_def', 'g: y')]);
+    await settle(p);
+    // The same rule the read path follows: a request naming several must not
+    // walk the user through them one at a time.
+    expect(p._activeTabId).toBe('agent_abc');
+  });
+
+  it('cancels a read in flight when it goes to a live tab instead', async () => {
+    let release;
+    const read = vi.fn(() => new Promise((r) => { release = r; }));
+    publishFakeRpc({ 'ClaudeCodeService.get_subagent_transcript': read });
+    const p = mountPanel();
+    await settle(p);
+    // A read starts and does not land yet.
+    ask(p, [agent('agent_slow', 'explore: slow')]);
+    await settle(p);
+    // The user then asks for a subagent that already has a tab.
+    seedTab(p, 'agent_abc');
+    ask(p, [agent('agent_abc', 'explore: x')]);
+    await settle(p);
+    expect(p._activeTabId).toBe('agent_abc');
+    // Now the first read lands. It must not activate itself over the tab the
+    // user just chose — the activate path bumps the generation for exactly
+    // this, without evicting anything.
+    release(TRANSCRIPT);
+    await settle(p);
+    expect(p._tabs.has('historical:agent_slow')).toBe(false);
+    expect(p._activeTabId).toBe('agent_abc');
   });
 
   it('reads a repeated agent id once', async () => {

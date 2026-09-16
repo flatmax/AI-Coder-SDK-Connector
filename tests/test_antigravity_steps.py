@@ -24,7 +24,9 @@ and spawns nothing, which is most of why it is a separate module.
 
 from __future__ import annotations
 
+import ast
 import types as pytypes
+from pathlib import Path
 
 import pytest
 
@@ -621,11 +623,18 @@ class TestUsage:
 
 
 class TestCompletion:
-    def test_stream_complete_carries_the_stop_reason(self):
+    def test_stream_complete_carries_the_terminal_reason(self):
+        """Under the browser's key, and in the browser's case.
+
+        The budget family is passed through rather than mapped — which
+        cap fired is the information AG-6 wanted from ``BudgetConfig`` —
+        so the only change to the word itself is the case, which keeps a
+        SHOUTY engine signature off a shared badge (AG-R-4).
+        """
         t = StepTranslator("r1")
         t.note_stop_reason(pytypes.SimpleNamespace(name="MAX_TOTAL_TOKENS_EXCEEDED"))
         events = t.stream_complete()
-        assert events[-1].payload["stop_reason"] == "MAX_TOTAL_TOKENS_EXCEEDED"
+        assert events[-1].payload["terminal_reason"] == "max_total_tokens_exceeded"
 
     def test_turn_usage_has_no_cost_key(self):
         t = StepTranslator("r1")
@@ -643,3 +652,351 @@ class TestCompletion:
         t.translate(text_step("hello", delta="hello"))
         t.translate(tool_step("list_directory", {"directory_path": "."}))
         assert t.response_text() == "hello"
+
+
+class TestTheTerminalReasonLandsInAVocabularyTheBrowserHas:
+    """AG-R-17's last entry, and the one that cost a verdict.
+
+    The three fields before it cost stats — a missing tool count, an
+    empty settled message. This one decided whether a failed turn looked
+    failed: neither Antigravity payload carries ``is_error``, so
+    ``terminal_reason`` is the *only* route to a red LED on these
+    transports, and both pumps were sending it under a name nothing read.
+    A turn ``agy`` reported as ``ERROR``, or one the SDK stopped at a
+    budget cap, drew the same clean green LED as a turn that worked.
+
+    A mapping is only as good as the vocabulary it maps into, so the
+    words are checked against the browser's own table rather than against
+    a copy of it here. Quoted-literal matching, the same weaker-and-honest
+    technique the two field tripwires use: it cannot prove the browser
+    *routes* the word, only that the word is one the browser has heard of,
+    which is the half that silently rots.
+    """
+
+    BADGE_TABLE = (
+        Path(__file__).resolve().parents[1]
+        / "webapp"
+        / "src"
+        / "chat-panel"
+        / "block-render.js"
+    )
+
+    def test_every_mapped_word_is_one_the_badge_table_knows(self):
+        """Otherwise the mapping quietly degrades to the fallback.
+
+        A word that is *not* in the table still renders — header, red,
+        underscores turned to spaces — which is exactly why this needs a
+        test. Mapping ``ERROR`` onto a Claude word that had been renamed
+        would look like it worked.
+        """
+        source = self.BADGE_TABLE.read_text(encoding="utf-8")
+        # Three spellings, because the table uses two: the reason *sets*
+        # quote their members and `REASON_LABELS` writes them as bare
+        # object keys. Matching only quoted literals is what the first run
+        # of this test did, and it reported `engine_error` missing from a
+        # table that has a label for it.
+        missing = [
+            word
+            for word in ag_steps.TERMINAL_REASONS.values()
+            if f"'{word}'" not in source
+            and f'"{word}"' not in source
+            and f"{word}:" not in source
+        ]
+        assert not missing, (
+            f"{missing} are mapped to by `terminal_reason_for` and the "
+            f"browser's badge table has no label for them, so they would "
+            f"badge as unmapped — see AG-R-17."
+        )
+
+    def test_a_cancel_keeps_the_led_green_on_both_sides(self):
+        """The word and the flag have to agree, or ⏹ draws red.
+
+        `computeTurnOutcome` reddens the LED for any reason that is
+        neither empty nor `completed`, and clears it only for `cancelled`.
+        The Claude pump keeps the two in step by deriving one from the
+        other against this set; mapping a cancel onto a word outside it
+        would put a fault badge on every stop.
+        """
+        from aic_dc.claude_code.messages import CANCELLED_TERMINAL_REASONS
+
+        assert ag_steps.TERMINAL_REASONS["CANCELED"] in CANCELLED_TERMINAL_REASONS
+        assert ag_steps.TERMINAL_REASONS["CANCELLED"] in CANCELLED_TERMINAL_REASONS
+
+    def test_neither_transports_word_for_nothing_reaches_the_browser(self):
+        """`UNSPECIFIED` and `SUCCESS` are absences, not reasons."""
+        for word in ("", "SUCCESS", "UNSPECIFIED"):
+            assert ag_steps.terminal_reason_for(word) == ""
+
+    def test_success_is_not_promoted_to_a_clean_finish(self):
+        """`completed` draws a green ✓, and `SUCCESS` does not earn one.
+
+        `agy` reports `SUCCESS` for a turn held open until
+        `--print-timeout` expired (AG-R-16), so the tick would land on
+        precisely the turn that did not finish. No badge is the honest
+        picture, and it is the browser's own stated preference.
+        """
+        assert ag_steps.terminal_reason_for("SUCCESS") != "completed"
+
+    def test_the_budget_family_still_names_which_cap_fired(self):
+        """AG-6 chose token caps over a dollar cap because they say so.
+
+        `MAX_MODEL_CALLS_EXCEEDED` is close enough to `max_turns` to be
+        tempting, and folding it in would throw away the only thing the
+        budget reasons are for.
+        """
+        for cap in (
+            "MAX_MODEL_CALLS_EXCEEDED",
+            "MAX_TOOL_CALLS_EXCEEDED",
+            "MAX_INPUT_TOKENS_EXCEEDED",
+            "MAX_OUTPUT_TOKENS_EXCEEDED",
+            "MAX_TOTAL_TOKENS_EXCEEDED",
+        ):
+            assert cap not in ag_steps.TERMINAL_REASONS
+            assert ag_steps.terminal_reason_for(cap) == cap.lower()
+
+    def test_an_unknown_word_is_normalised_and_kept(self):
+        """Neither dropped nor shouted.
+
+        Dropping it would hide a reason this build has never seen, which
+        is the one most likely to matter. Keeping the case would let the
+        browser learn an engine by its shouting — AG-R-4.
+        """
+        assert ag_steps.terminal_reason_for("SOME_NEW_WORD") == "some_new_word"
+
+
+class TestTheFooterSpellsFieldsTheClaudePumpsWay:
+    """One vocabulary, and it goes one level deeper than the event names.
+
+    ``TestVocabulary`` above asserts no *event name* is invented, which is
+    the check AG-3 asked for. It passed throughout, while both Antigravity
+    pumps quietly named three **fields** on ``streamComplete`` differently
+    from the Claude pump — ``num_tool_calls`` for ``tool_calls``,
+    ``response_text`` for ``response``, and ``permission_prompts`` missing
+    altogether. The browser reads the Claude spelling, so it read nothing:
+    the chat panel's turn footer rendered no "N tool calls, M asked" line
+    on either transport, and every settled assistant message took empty
+    content.
+
+    **Nothing failed.** Each consumer has a default — `Number.isFinite`
+    guards, `typeof … === 'string'` guards — so a missing key renders as
+    an absent stat rather than as an error, on a payload nobody
+    cross-checks. That is why this is a test and not a comment: an event
+    name that drifts breaks a call site loudly, and a field name that
+    drifts goes missing in silence.
+
+    Checked against the Claude pump's source by quoted literal, the same
+    weaker-and-honest match ``TestVocabulary`` uses and for the same
+    reason.
+    """
+
+    #: Keys these pumps carry that the Claude pump does not, each with the
+    #: reason it is allowed to differ. An entry here is a claim that the
+    #: browser does not need the key, and it is the list a future
+    #: divergence has to argue its way onto.
+    THEIRS_ALONE = {
+        # Ours, not the browser's: it reads the request id from the RPC
+        # callback argument rather than from the payload.
+        "request_id",
+    }
+
+    def _claude_source(self):
+        from pathlib import Path
+
+        import aic_dc.claude_code.messages as claude_messages
+
+        return Path(claude_messages.__file__).read_text(encoding="utf-8")
+
+    def _footer(self, translator):
+        events = translator.stream_complete()
+        payload = [e for e in events if e.name == "streamComplete"][-1].payload
+        return set(payload)
+
+    def _check(self, keys):
+        source = self._claude_source()
+        invented = sorted(
+            key
+            for key in keys
+            if key not in self.THEIRS_ALONE and f'"{key}"' not in source
+        )
+        assert not invented, (
+            f"These `streamComplete` fields are spelled differently from the "
+            f"Claude pump's, so the browser reads nothing for them: "
+            f"{invented}. Either use the Claude pump's name or add it to "
+            f"THEIRS_ALONE with the reason it may differ."
+        )
+
+    def test_the_sdk_pump(self):
+        self._check(self._footer(StepTranslator("r1")))
+
+    def test_the_agy_pump(self):
+        from aic_dc.agy.steps import AgyTranslator
+
+        self._check(self._footer(AgyTranslator("r1")))
+
+    def test_both_carry_the_two_the_turn_footer_renders(self):
+        """`renderTurnFooter` reads exactly these two for its stat line."""
+        from aic_dc.agy.steps import AgyTranslator
+
+        for translator in (StepTranslator("r1"), AgyTranslator("r1")):
+            footer = self._footer(translator)
+            assert {"tool_calls", "permission_prompts"} <= footer
+
+    def test_the_counts_are_the_shared_stats_object(self):
+        """Not a second counter that could disagree with the first."""
+        from aic_dc.agy.steps import AgyTranslator
+
+        for translator in (StepTranslator("r1"), AgyTranslator("r1")):
+            translator.stats.tool_calls = 3
+            translator.stats.permission_prompts = 2
+            payload = [
+                e for e in translator.stream_complete() if e.name == "streamComplete"
+            ][-1].payload
+            assert payload["tool_calls"] == 3
+            assert payload["permission_prompts"] == 2
+
+
+class TestEveryPayloadFieldIsSpelledTheClaudePumpsWay:
+    """The same check as the footer's, widened to every shared event.
+
+    ``TestTheFooterSpellsFieldsTheClaudePumpsWay`` was written for
+    ``streamComplete`` because that is where three divergences were found.
+    Widening it the next day found a fourth, in ``toolResult`` — the `agy`
+    pump sent a tool's output as ``content`` where the browser renders
+    ``preview``, so **every tool card on that transport drew the literal
+    string "No output."** while the output sat unread in the payload.
+
+    That is the argument for checking the family rather than the instance:
+    the first three were found by reading one consumer, and reading one
+    consumer is how the fourth was missed.
+
+    **Read from source, not from a payload.** These pumps build most
+    payloads inside branches that a runtime test would have to reach one
+    at a time; the keys are literals, so the literals are what is
+    compared. Two limits, stated rather than discovered later:
+
+    - An event whose payload is assembled somewhere this cannot follow is
+      **skipped silently**, so this is a floor and not a ceiling.
+    - ``streamChunk`` is not compared at all. The Claude pump builds its
+      two chunk names in a conditional and passes the result as a
+      variable, so there is no ``Event("streamChunk", …)`` literal there to
+      compare against — the same gap ``TestVocabulary`` records for the
+      event *names*.
+    """
+
+    #: Per event, the keys an Antigravity pump may carry that the Claude
+    #: pump does not — each with the reason. An entry is a claim that the
+    #: browser does not need the key under the Claude spelling, and it is
+    #: the list a new divergence has to argue its way onto.
+    THEIRS_ALONE = {
+        "streamComplete": {
+            # Ours, not the browser's: it reads the request id from the RPC
+            # callback argument rather than from the payload.
+            "request_id",
+        },
+        "toolResult": {
+            # Read by `blocks.js` for card routing, and additive rather
+            # than a rename: nothing of the Claude pump's is displaced.
+            "agent_id",
+            # The tool's own name, which the card already has from
+            # `toolUse` via `tool_use_id`. Unread, and harmless — kept
+            # because removing a field nobody reads is not worth a
+            # migration.
+            "name",
+        },
+    }
+
+    def _payloads(self, module):
+        """``{event: {keys}}`` from ``Event("name", …)`` calls in a module.
+
+        Resolves a payload assigned to a local name just above the call,
+        which is how both the Claude pump and the SDK pump build their
+        larger ones.
+        """
+        import ast
+        from pathlib import Path
+
+        tree = ast.parse(Path(module.__file__).read_text(encoding="utf-8"))
+        found: dict[str, set[str]] = {}
+        functions = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        ]
+        for function in functions:
+            local: dict[str, set[str]] = {}
+            for node in ast.walk(function):
+                if isinstance(node, ast.Assign) and isinstance(node.value, ast.Dict):
+                    for target in node.targets:
+                        if isinstance(target, ast.Name):
+                            local[target.id] = self._literal_keys(node.value)
+            for node in ast.walk(function):
+                if not (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Name)
+                    and node.func.id == "Event"
+                    and len(node.args) >= 2
+                ):
+                    continue
+                name = node.args[0]
+                if not (isinstance(name, ast.Constant) and isinstance(name.value, str)):
+                    continue
+                payload = node.args[1]
+                if isinstance(payload, ast.Dict):
+                    keys = self._literal_keys(payload)
+                elif isinstance(payload, ast.Name) and payload.id in local:
+                    keys = local[payload.id]
+                else:
+                    continue
+                found.setdefault(name.value, set()).update(keys)
+        return found
+
+    @staticmethod
+    def _literal_keys(node):
+        return {
+            key.value
+            for key in node.keys
+            if isinstance(key, ast.Constant) and isinstance(key.value, str)
+        }
+
+    def _check(self, module, label):
+        import aic_dc.claude_code.messages as claude_messages
+
+        claude = self._payloads(claude_messages)
+        theirs = self._payloads(module)
+        divergent = {}
+        for event, keys in sorted(theirs.items()):
+            if event not in claude:
+                continue
+            extra = sorted(
+                keys - claude[event] - self.THEIRS_ALONE.get(event, set())
+            )
+            if extra:
+                divergent[event] = extra
+        assert not divergent, (
+            f"The {label} pump names fields the Claude pump does not, so the "
+            f"browser reads nothing for them: {divergent}. Either use the "
+            f"Claude pump's name or add each to THEIRS_ALONE with the reason "
+            f"it may differ. See AG-R-17."
+        )
+
+    def test_the_sdk_pump(self):
+        self._check(ag_steps, "SDK")
+
+    def test_the_agy_pump(self):
+        from aic_dc.agy import steps as agy_steps
+
+        self._check(agy_steps, "agy")
+
+    def test_the_comparison_is_reaching_the_events_it_claims_to(self):
+        """A guard on the instrument.
+
+        Every check above passes vacuously if the parse stops finding
+        payloads — a refactor moving one into a helper would silently
+        shrink the set this compares. So the events it *did* resolve are
+        asserted by name.
+        """
+        from aic_dc.agy import steps as agy_steps
+
+        for module in (ag_steps, agy_steps):
+            resolved = set(self._payloads(module))
+            assert {"toolUse", "toolResult", "streamComplete"} <= resolved

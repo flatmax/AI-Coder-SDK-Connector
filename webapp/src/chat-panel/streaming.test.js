@@ -4,6 +4,7 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import { terminalBadge } from './block-render.js';
 import { resumeActiveStreams } from './events.js';
 import {
   computeTurnOutcome,
@@ -1265,6 +1266,74 @@ describe('computeTurnOutcome — pure helper', () => {
   });
 });
 
+// An Antigravity turn footer carries no `is_error` at all — neither the `agy`
+// transport's nor the SDK's — so `terminal_reason` is the only route it has to
+// a red LED. Both pumps spelled the key `stop_reason` until 2026-09-12, which
+// meant the reads below all fell through to the `clean` default: a turn `agy`
+// reported as `ERROR` drew the same green LED as one that worked. These cases
+// are written from the footer shape those pumps actually emit, so the
+// vocabulary the Python side maps into is pinned from the consumer's end too.
+describe('computeTurnOutcome — an Antigravity turn footer has no is_error', () => {
+  const footer = (extra) => ({
+    request_id: 'r1',
+    cancelled: false,
+    tool_calls: 2,
+    permission_prompts: 0,
+    files_modified: ['a.py'],
+    usage: {},
+    response: '',
+    ...extra,
+  });
+
+  it('an engine error reddens the LED with no is_error to help it', () => {
+    const outcome = computeTurnOutcome(
+      footer({ terminal_reason: 'engine_error' }),
+      ['a.py'],
+    );
+    expect(outcome.status).toBe('error');
+    expect(outcome.failureReason).toBe('engine error');
+  });
+
+  it('a budget cap names which cap fired', () => {
+    // Not folded into `max_turns`: which limit stopped the turn is the
+    // whole reason AG-6 prefers token caps to a dollar cap.
+    const outcome = computeTurnOutcome(
+      footer({ terminal_reason: 'max_total_tokens_exceeded' }),
+      [],
+    );
+    expect(outcome.status).toBe('error');
+    expect(outcome.failureReason).toBe('max total tokens exceeded');
+  });
+
+  it('a cancel stays green, because the pump sends the flag with the word', () => {
+    const outcome = computeTurnOutcome(
+      footer({ terminal_reason: 'aborted_streaming', cancelled: true }),
+      ['a.py'],
+    );
+    expect(outcome.status).toBe('clean');
+    expect(outcome.appliedCount).toBe(1);
+  });
+
+  it('a clean turn names no reason and draws no badge', () => {
+    // `SUCCESS` maps to '' rather than to `completed`: the tick is a claim,
+    // and `agy` says SUCCESS about a turn held open until its print timeout
+    // expired. `terminalBadge('')` is null, which is the honest picture.
+    const outcome = computeTurnOutcome(footer({ terminal_reason: '' }), []);
+    expect(outcome.status).toBe('clean');
+    expect(terminalBadge('')).toBeNull();
+  });
+
+  it('an unmapped reason still badges, in the house style', () => {
+    // Lower-cased on the Python side so the fallback label reads like the
+    // rest of the table rather than shouting the engine's enum.
+    expect(terminalBadge('quota_exhausted')).toEqual({
+      label: 'quota exhausted',
+      severity: 'error',
+      placement: 'header',
+    });
+  });
+});
+
 describe('ChatPanel onStreamComplete writes lastEditOutcome', () => {
   async function sendAndGetRequestId(panel, message = 'hi') {
     const started = vi
@@ -1765,6 +1834,106 @@ describe('ChatPanel compaction toast', () => {
     ]);
   });
 
+  it('says the screen is final as soon as the stop lands', async () => {
+    // AG-19's residual gap: a prose turn asks permission for nothing, so
+    // it cannot be starved and runs to its own end. The backend stops
+    // turning its frames into view; this card is what tells the reader
+    // that the stillness is the stop and not a hang.
+    const p = mountPanel();
+    await settle(p);
+    pushEvent('system-event', {
+      requestId: 'r1',
+      data: { subtype: 'stop_acknowledged', data: {} },
+    });
+    await settle(p);
+    const last = p.messages[p.messages.length - 1];
+    expect(last.system_event).toBe(true);
+    expect(last.content).toContain('Stopped.');
+    expect(last.content).toContain('nothing further will be shown');
+    // No escalation here. Restarting the engine costs the session, and
+    // AG-19 offers that only once the wind-down drags — `stop_ignored`.
+    expect(last.system_action).toBeNull();
+  });
+
+  it('does not stack a card per frame while the stream drains', async () => {
+    // The pump announces once per turn, but the card collapses anyway so
+    // that a stop on a later turn replaces this rather than leaving the
+    // reader two identical sentences to reconcile.
+    const p = mountPanel();
+    await settle(p);
+    for (const requestId of ['r1', 'r2']) {
+      pushEvent('system-event', {
+        requestId,
+        data: { subtype: 'stop_acknowledged', data: {} },
+      });
+    }
+    await settle(p);
+    const cards = p.messages.filter(
+      (m) => m.system_subtype === 'stop_acknowledged',
+    );
+    expect(cards).toHaveLength(1);
+  });
+
+  it('says a stop that did not land has not landed, and why', async () => {
+    // AG-R-16 raised to high: ⏹ can be outlasted, either by a `Stop` hook
+    // this app does not own reviving the loop, or by prose that asks
+    // permission for nothing. From here they are one condition.
+    const p = mountPanel();
+    await settle(p);
+    pushEvent('system-event', {
+      requestId: 'r1',
+      data: { subtype: 'stop_ignored', data: { seconds: 31.4, revived: true } },
+    });
+    await settle(p);
+    const last = p.messages[p.messages.length - 1];
+    expect(last.system_event).toBe(true);
+    expect(last.content).toContain('stopped this turn 31s ago');
+    // The half a reader acts on: something is spending their money now.
+    expect(last.content).toContain('calling the model repeatedly');
+  });
+
+  it('offers the force restart only when something is overriding the stop', async () => {
+    // A prose turn finishing on its own needs no escalation — restarting
+    // the engine to save a few seconds of text would end a session the
+    // user is holding, which is the trade AG-19 refuses to make for them.
+    const p = mountPanel();
+    await settle(p);
+    pushEvent('system-event', {
+      requestId: 'r1',
+      data: { subtype: 'stop_ignored', data: { seconds: 12, revived: false } },
+    });
+    await settle(p);
+    const quiet = p.messages[p.messages.length - 1];
+    expect(quiet.system_action).toBeNull();
+    expect(quiet.content).toContain('finish on its own');
+
+    pushEvent('system-event', {
+      requestId: 'r2',
+      data: { subtype: 'stop_ignored', data: { seconds: 12, revived: true } },
+    });
+    await settle(p);
+    const loud = p.messages[p.messages.length - 1];
+    expect(loud.system_action.method).toBe('ClaudeCodeService.restart_session');
+    expect(loud.system_action.label).toBe('Force restart the engine');
+  });
+
+  it('replaces its own card rather than stacking one per frame', async () => {
+    // The backend reports once per turn, but a retry on a second turn is a
+    // second fact. Within one turn the last telling wins.
+    const p = mountPanel();
+    await settle(p);
+    for (const seconds of [11, 25]) {
+      pushEvent('system-event', {
+        requestId: 'r1',
+        data: { subtype: 'stop_ignored', data: { seconds, revived: true } },
+      });
+    }
+    await settle(p);
+    const cards = p.messages.filter((m) => m.system_subtype === 'stop_ignored');
+    expect(cards).toHaveLength(1);
+    expect(cards[0].content).toContain('25s ago');
+  });
+
   it('says a timed-out turn may still have written files', async () => {
     const p = mountPanel();
     await settle(p);
@@ -1777,6 +1946,225 @@ describe('ChatPanel compaction toast', () => {
     expect(last.content).toContain('after 600s');
     // The half a reader acts on: the tree may have moved under them.
     expect(last.content).toContain('already written');
+  });
+
+  it('says what a consultation cannot do before it says anything', async () => {
+    // The standing condition, raised once per consultation whether or not a
+    // tool is ever reached for — because the consultation that answers from
+    // its weights without trying is the one a reader cannot tell from a
+    // grounded answer. No toast: it is true every time, and a notification
+    // on every consultation is one the reader learns to dismiss.
+    const p = mountPanel();
+    await settle(p);
+    const toasts = toastsOf(p);
+    pushEvent('system-event', {
+      requestId: 'r1',
+      data: {
+        subtype: 'consultation_posture',
+        data: {
+          message:
+            'A second opinion runs with no tools and no repository access: '
+            + 'it answers from the question and the context it was given.',
+        },
+      },
+    });
+    await settle(p);
+
+    const last = p.messages[p.messages.length - 1];
+    expect(last.system_event).toBe(true);
+    expect(last.content).toContain('no repository access');
+    expect(toasts).toEqual([]);
+  });
+
+  it('says a consultation came back from a tool with nothing', async () => {
+    // AG-R-22. The gate denied `read_url_content` and the model answered as
+    // though it had read the page — measured, and stochastic, which is why
+    // the app says this rather than trusting the answer to. The message is
+    // composed backend-side by the pump that ran the gate; this end renders
+    // it and warns rather than erroring, because a refusal is the design
+    // working.
+    const p = mountPanel();
+    await settle(p);
+    const toasts = toastsOf(p);
+    pushEvent('system-event', {
+      requestId: 'r1',
+      data: {
+        subtype: 'consultation_ungrounded',
+        data: {
+          tool: 'read_url_content',
+          message:
+            'This consultation reached for a tool and got nothing back: a '
+            + 'second opinion runs with no tools and no repository access.',
+        },
+      },
+    });
+    await settle(p);
+
+    const last = p.messages[p.messages.length - 1];
+    expect(last.system_event).toBe(true);
+    expect(last.content).toContain('got nothing back');
+    expect(toasts).toEqual([['🚫 The consultation had no tools', 'warning']]);
+  });
+
+  it('shouts when a tool ran inside a consultation that permits none', async () => {
+    // The inverse of the notice above, and the one that should never fire:
+    // a barred tool that returned output rather than an error *ran*. The
+    // tool card beside it renders `agy`'s own success truthfully, which is
+    // why this has to be louder than the card — and why it is not folded
+    // into `engine_error`, which would prefix it with "the engine reported"
+    // and let the next error of that subtype collapse it away.
+    const p = mountPanel();
+    await settle(p);
+    const toasts = toastsOf(p);
+    pushEvent('system-event', {
+      requestId: 'r1',
+      data: {
+        subtype: 'consultation_breach',
+        data: {
+          message:
+            'read_url_content is not permitted in a second opinion, and it '
+            + 'returned output rather than an error — so it ran.',
+        },
+      },
+    });
+    await settle(p);
+
+    const last = p.messages[p.messages.length - 1];
+    expect(last.system_event).toBe(true);
+    expect(last.content).toContain('so it ran');
+    expect(last.content).not.toContain('The engine reported an error');
+    expect(toasts).toEqual([['⚠️ A consultation escaped its gate', 'error']]);
+  });
+
+  it('keeps every breach rather than collapsing them into the last', async () => {
+    // `collapse` would let a second alarm — or any later error card of the
+    // same subtype — replace the row saying containment failed.
+    const p = mountPanel();
+    await settle(p);
+    for (const tool of ['view_file', 'read_url_content']) {
+      pushEvent('system-event', {
+        requestId: 'r1',
+        data: {
+          subtype: 'consultation_breach',
+          data: { message: `${tool} ran and returned output.` },
+        },
+      });
+    }
+    await settle(p);
+    const rows = p.messages.filter(
+      (m) => m.system_subtype === 'consultation_breach',
+    );
+    expect(rows).toHaveLength(2);
+  });
+
+  it('warns without claiming when a call went unaccounted for', async () => {
+    // The third thing a barred call can end as. `consultation_ungrounded`
+    // says nothing was read, which is a fact about a refusal and a
+    // fabrication about a call killed between the request and the result —
+    // so the two cannot share a row, and this one's severity is a warning
+    // because nothing is known to have gone wrong. What is missing is the
+    // certainty, not the containment.
+    const p = mountPanel();
+    await settle(p);
+    const toasts = toastsOf(p);
+    pushEvent('system-event', {
+      requestId: 'r1',
+      data: {
+        subtype: 'consultation_unverified',
+        data: {
+          tool: 'view_file',
+          message:
+            'This consultation reached for a tool and then ended without '
+            + 'saying what came back from it.',
+        },
+      },
+    });
+    await settle(p);
+
+    const last = p.messages[p.messages.length - 1];
+    expect(last.system_event).toBe(true);
+    expect(last.content).toContain('without saying what came back');
+    expect(toasts).toEqual([
+      ['❔ A consultation call went unaccounted for', 'warning'],
+    ]);
+  });
+
+  it('keeps one unaccounted row per consultation', async () => {
+    // No `collapse`, for the reason the refusal row has none: these are one
+    // per consultation, so there is never a second to supersede, and setting
+    // it would let a later consultation erase the first's row while its
+    // answer is still in the transcript above.
+    const p = mountPanel();
+    await settle(p);
+    for (const tool of ['view_file', 'read_url_content']) {
+      pushEvent('system-event', {
+        requestId: 'r1',
+        data: {
+          subtype: 'consultation_unverified',
+          data: { tool, message: `${tool} ended without reporting.` },
+        },
+      });
+    }
+    await settle(p);
+    const rows = p.messages.filter(
+      (m) => m.system_subtype === 'consultation_unverified',
+    );
+    expect(rows).toHaveLength(2);
+  });
+
+  it('still says something when an unaccounted notice carries no message', async () => {
+    const p = mountPanel();
+    await settle(p);
+    pushEvent('system-event', {
+      requestId: 'r1',
+      data: { subtype: 'consultation_unverified', data: { tool: '' } },
+    });
+    await settle(p);
+    expect(p.messages[p.messages.length - 1].content).toContain(
+      'without saying what came back from it',
+    );
+  });
+
+  it('still says something when the notice carries no message', async () => {
+    // Forward compatibility with our own backend: a pump that stops sending
+    // prose must not silently stop telling the reader anything, which is the
+    // AG-R-22 failure mode one level up.
+    const p = mountPanel();
+    await settle(p);
+    pushEvent('system-event', {
+      requestId: 'r1',
+      data: { subtype: 'consultation_ungrounded', data: { tool: '' } },
+    });
+    await settle(p);
+    expect(p.messages[p.messages.length - 1].content).toContain(
+      'no tools and no repository access',
+    );
+  });
+
+  it('keeps one card per consultation rather than superseding the last', async () => {
+    // Deliberately not `collapse`. Two consultations in one turn are two
+    // facts about two answers, and the second refusal replacing the first
+    // would erase the record of an answer still sitting in the transcript
+    // above it. Each is raised once, at the end of its own consultation, so
+    // there is no per-frame stacking to guard against.
+    const p = mountPanel();
+    await settle(p);
+    for (const tool of ['read_url_content', 'search_web']) {
+      pushEvent('system-event', {
+        requestId: 'r1',
+        data: {
+          subtype: 'consultation_ungrounded',
+          data: { tool, message: `Nothing came back from ${tool}.` },
+        },
+      });
+    }
+    await settle(p);
+    const cards = p.messages.filter(
+      (m) => m.system_subtype === 'consultation_ungrounded',
+    );
+    expect(cards).toHaveLength(2);
+    expect(cards[0].content).toContain('read_url_content');
+    expect(cards[1].content).toContain('search_web');
   });
 
   it('renders a harness notice as the harness, not as the assistant', async () => {

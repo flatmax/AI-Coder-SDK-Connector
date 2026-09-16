@@ -17,6 +17,7 @@ import {
   subagentLedState,
   subagentLedTooltip,
 } from './subagent-tabs.js';
+import { consultationNotices, consultationPosture } from './blocks.js';
 import {
   mountPanel,
   publishFakeRpc,
@@ -785,5 +786,179 @@ describe('the label a tab keeps', () => {
     }));
     await settle(p);
     expect(p._tabLabels.get('task-1')).toBe('1 task-1');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// System events about one subagent
+// ---------------------------------------------------------------------------
+
+describe('a system event that names a subagent lands in its tab', () => {
+  function ungrounded(reqId, over = {}) {
+    return {
+      requestId: reqId,
+      data: {
+        subtype: 'consultation_ungrounded',
+        data: {
+          agent_id: 'agent-1',
+          tool: 'read_url_content',
+          message: 'This consultation reached for a tool and got nothing …',
+          ...over,
+        },
+      },
+    };
+  }
+
+  // The tab's own opening line — `seedDescription`'s "🤖 Explore — …" — is a
+  // system row too, so it is skipped rather than asserted around: what is
+  // under test is where the *engine's* notices land.
+  function contentsOf(messages) {
+    return messages
+      .filter((m) => m.system_event && !m.subagent_seed)
+      .map((m) => m.content);
+  }
+
+  it('puts the notice in the subagent tab rather than in Main', async () => {
+    // AG-R-22's routing half. Unscoped, this landed in Main — where the
+    // answer's own first paragraph already says the same thing — and the
+    // consultation's tab, which held the refused cards, said nothing about
+    // what they meant for the answer.
+    const p = mountPanel();
+    const { reqId, tab } = await withSubagent(p);
+    const mainBefore = p.messages.length;
+    pushEvent('system-event', ungrounded(reqId));
+    await settle(p);
+    expect(contentsOf(tab.messages)).toEqual([
+      'This consultation reached for a tool and got nothing …',
+    ]);
+    expect(p.messages.length).toBe(mainBefore);
+  });
+
+  it('records a consultation notice as the container’s standing condition', async () => {
+    // As well as placing the row, not instead of it. The tab is still the
+    // full view; the store is what lets the inline card carry the same claim
+    // to a reader who never opens one (AG-29).
+    const p = mountPanel();
+    const { reqId, tab } = await withSubagent(p);
+    pushEvent('system-event', ungrounded(reqId));
+    await settle(p);
+    expect(contentsOf(tab.messages)).toEqual([
+      'This consultation reached for a tool and got nothing …',
+    ]);
+    expect(consultationPosture(p, 'agent-1')).toMatchObject({
+      text: 'This consultation reached for a tool and got nothing …',
+      severity: 'warning',
+    });
+  });
+
+  it('does not record a session-wide event against any consultation', async () => {
+    // No `agent_id`, so nothing to key it by — and a conversation reset is
+    // not a statement about what some consultation was permitted to do.
+    const p = mountPanel();
+    await withSubagent(p);
+    pushEvent('system-event', {
+      requestId: null,
+      data: { subtype: 'conversation_reset', data: {} },
+    });
+    await settle(p);
+    expect(consultationPosture(p, 'agent-1')).toBeNull();
+  });
+
+  it('still toasts, because the tab is opt-in', async () => {
+    // The row is only read by someone who opens the tab. The toast is the
+    // one channel that reaches a reader who never does.
+    const p = mountPanel();
+    const { reqId } = await withSubagent(p);
+    const seen = [];
+    p._emitToast = (message, type) => seen.push([message, type]);
+    pushEvent('system-event', ungrounded(reqId));
+    await settle(p);
+    expect(seen).toEqual([['🚫 The consultation had no tools', 'warning']]);
+  });
+
+  it('routes a notice that names the spawning call, not the agent', async () => {
+    // AG-28's half of the same join. A consultation's row keeps a *minted*
+    // `agent_id` — there is no SDK session behind it to fetch — and carries
+    // the real `toolu_` only as `tool_use_id`, which is what nests it under
+    // its card. Its blocks and notices are stamped with that same pointer,
+    // so a notice about a consultation names the call and not the agent.
+    // Matching on `agent_id` alone sent it to Main.
+    const p = mountPanel();
+    const { reqId, tab } = await withSubagent(p);
+    const mainBefore = p.messages.length;
+    pushEvent('system-event', ungrounded(reqId, { agent_id: PARENT }));
+    await settle(p);
+    expect(contentsOf(tab.messages)).toEqual([
+      'This consultation reached for a tool and got nothing …',
+    ]);
+    expect(p.messages.length).toBe(mainBefore);
+  });
+
+  it('holds it for the card when the named tab is not open', async () => {
+    // The old behaviour put it in Main, on the reasoning that an unsaid
+    // warning is worse than one in the wrong place. That was a false
+    // dichotomy: a consultation's tab is opt-in now, so most of them never
+    // have one, and Main would have collected a warning for every
+    // consultation that ran. The card the warning is *about* is the third
+    // place, and it is on screen whether the tab exists or not.
+    const p = mountPanel();
+    const { reqId } = await withSubagent(p);
+    pushEvent('system-event', ungrounded(reqId, { agent_id: 'agent-missing' }));
+    await settle(p);
+    expect(contentsOf(p.messages)).toEqual([]);
+    expect(consultationNotices(p, 'agent-missing')).toEqual([
+      {
+        subtype: 'consultation_ungrounded',
+        text: 'This consultation reached for a tool and got nothing \u2026',
+        severity: 'warning',
+      },
+    ]);
+  });
+
+  it('holds the same warning once, however often it arrives', async () => {
+    // The card renders the list, so a repeat would stack a second identical
+    // banner under the first rather than being swallowed by the adjacency
+    // check that deduplicates a message feed.
+    const p = mountPanel();
+    const { reqId } = await withSubagent(p);
+    pushEvent('system-event', ungrounded(reqId, { agent_id: 'agent-missing' }));
+    await settle(p);
+    pushEvent('system-event', ungrounded(reqId, { agent_id: 'agent-missing' }));
+    await settle(p);
+    expect(consultationNotices(p, 'agent-missing')).toHaveLength(1);
+    expect(contentsOf(p.messages)).toEqual([]);
+  });
+
+  it('does not hold the standing posture, which is framing and not a warning',
+    async () => {
+      // The card draws the posture from `consultationPosture` and the
+      // warnings under it from `consultationNotices`. A posture in both
+      // would print the sentence twice.
+      const p = mountPanel();
+      const { reqId } = await withSubagent(p);
+      pushEvent('system-event', {
+        requestId: reqId,
+        data: {
+          subtype: 'consultation_posture',
+          data: { agent_id: 'agent-missing' },
+        },
+      });
+      await settle(p);
+      expect(consultationNotices(p, 'agent-missing')).toEqual([]);
+      expect(consultationPosture(p, 'agent-missing')).toBeTruthy();
+    });
+
+  it('leaves an unscoped event in Main', async () => {
+    // Most system events are the session speaking — a rate limit, a reset,
+    // a compaction — and belong where the turn is.
+    const p = mountPanel();
+    const { reqId, tab } = await withSubagent(p);
+    pushEvent('system-event', {
+      requestId: reqId,
+      data: { subtype: 'engine_notice', data: { message: 'Switching model.' } },
+    });
+    await settle(p);
+    expect(contentsOf(p.messages)).toEqual(['Switching model.']);
+    expect(contentsOf(tab.messages)).toEqual([]);
   });
 });

@@ -1482,6 +1482,108 @@ class TestReplay:
         # Serialisable, because it goes over the wire on reconnect.
         json.dumps(blocks)
 
+    def test_a_streamed_tool_call_replays_as_one_block_not_two(self, translator):
+        """The phantom card a mid-turn refresh drew in front of every real one.
+
+        With partial streaming on, the CLI announces each content block before
+        it sends any of it. A tool call announced that way used to open a
+        `{request_id}:b{n}` block that the card — keyed by `tool_use_id` —
+        could never land in, so the map carried a cardless tool block per call.
+        Live that block is inert: no card means no chunk to push. On reconnect
+        it is replayed with everything else, and the browser has no way to draw
+        a tool block with no name, no input and no result except as a headless
+        card stuck on pending.
+        """
+        translator.translate(
+            stream({"type": "message_start", "message": {"id": "msg_1"}})
+        )
+        translator.translate(
+            stream(
+                {
+                    "type": "content_block_start",
+                    "index": 0,
+                    "content_block": {
+                        "type": "tool_use",
+                        "id": "toolu_1",
+                        "name": "Bash",
+                    },
+                }
+            )
+        )
+        # A tool's arguments stream as `input_json_delta`, which renders
+        # nothing — the card is emitted whole with the assistant message.
+        translator.translate(
+            stream(
+                {
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {"type": "input_json_delta", "partial_json": '{"com'},
+                }
+            )
+        )
+        translator.translate(stream({"type": "content_block_stop", "index": 0}))
+        translator.translate(
+            AssistantMessage(
+                content=[
+                    ToolUseBlock(id="toolu_1", name="Bash", input={"command": "ls"})
+                ],
+                model="m",
+                message_id="msg_1",
+            )
+        )
+        blocks = translator.rendered_blocks()
+        assert [b["block_id"] for b in blocks] == ["toolu_1"]
+        assert blocks[0]["tool"]["name"] == "Bash"
+
+    def test_text_around_a_streamed_tool_call_keeps_its_arrival_slot(
+        self, translator
+    ):
+        """Skipping the tool's placeholder must not renumber what follows it."""
+        translator.translate(
+            stream({"type": "message_start", "message": {"id": "msg_1"}})
+        )
+        open_index = {"type": "content_block_start", "index": 0}
+        translator.translate(
+            stream({**open_index, "content_block": {"type": "text"}})
+        )
+        translator.translate(
+            stream(
+                {
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {"type": "text_delta", "text": "Looking."},
+                }
+            )
+        )
+        translator.translate(stream({"type": "content_block_stop", "index": 0}))
+        translator.translate(
+            stream(
+                {
+                    "type": "content_block_start",
+                    "index": 1,
+                    "content_block": {
+                        "type": "tool_use",
+                        "id": "toolu_1",
+                        "name": "Bash",
+                    },
+                }
+            )
+        )
+        translator.translate(stream({"type": "content_block_stop", "index": 1}))
+        translator.translate(
+            AssistantMessage(
+                content=[
+                    TextBlock(text="Looking."),
+                    ToolUseBlock(id="toolu_1", name="Bash", input={"command": "ls"}),
+                ],
+                model="m",
+                message_id="msg_1",
+            )
+        )
+        blocks = translator.rendered_blocks()
+        assert [b["kind"] for b in blocks] == ["text", "tool"]
+        assert blocks[0]["content"] == "Looking."
+
     def test_replayed_blocks_say_which_scope_produced_them(self, translator):
         """Without it a reconnected subagent tab cannot claim its own feed."""
         translator.translate(

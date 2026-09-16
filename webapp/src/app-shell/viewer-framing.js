@@ -1,11 +1,25 @@
 // Telling the server which file the user is looking at.
 //
 // `ClaudeCodeService.set_viewer_state` is the only writer of the server's
-// `_viewer_state`, and that field feeds two readers: the `ui_state` MCP tool,
-// and the fallback for a turn's `ViewerFraming` when `chat_streaming` is given
-// no `viewer` argument — which is always. Until this module existed nothing
-// called it from anywhere, so both readers spent the entire life of the app
-// answering "nothing is open in the user's viewer pane". specs5/next.md § C7.
+// stored viewer state, and that state feeds two readers: the `ui_state` MCP
+// tool, and the fallback for a turn's framing when `chat_streaming` is given no
+// `viewer` argument — which is always. Until this module existed nothing called
+// it from anywhere, so both readers spent the entire life of the app answering
+// "nothing is open in the user's viewer pane". specs5/next.md § C7.
+//
+// **The name is the legacy namespace, not the engine.** `engine_router` mounts
+// whichever adapter is master under `ClaudeCodeService`, so this one call site
+// serves all three engines and there is nothing here to switch on. Worth saying
+// because it stopped being cosmetic on 2026-09-14: the two Antigravity adapters
+// stored this push and never read it, so the file the user was looking at
+// reached the model on one engine out of three, and the browser had no way to
+// tell. Fixed in the adapters (specs5/plan-ag/decisions.md AG-33), not here.
+//
+// What the state feeds does still differ by engine, and only one way: the
+// `ui_state` tool is Claude's, because the only MCP server `agy` is given is the
+// consultation listener (AG-R-33). On those engines the turn's framing is the
+// whole report, which is sound for a turn-scoped fact and is why nothing here
+// needs to push more often than it does.
 //
 // One writer on purpose. The other arrival path — a `viewer` argument on
 // `chat_streaming` — deliberately stays null. Two sources for one field is the

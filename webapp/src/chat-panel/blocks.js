@@ -323,6 +323,11 @@ export function applyPermissionOutcome(turn, payload) {
  * Precedence is deliberate: a denial outranks whatever the card's own status
  * field says, because a denied call also produces an error-shaped tool result
  * and "error" would hide the fact that the user caused it.
+ *
+ * `interrupted` arrives only from a transcript read, on a call the engine can
+ * prove never returned (`history.py` § _mark_interrupted), and it is the one
+ * status this function cannot infer for itself: live, a call with no result
+ * yet is running, and that is exactly what `pending` says.
  */
 export function toolStatus(block) {
   if (!block || block.kind !== 'tool') return 'pending';
@@ -331,6 +336,7 @@ export function toolStatus(block) {
   const status = block.result?.status || block.tool?.status;
   if (status === 'error') return 'error';
   if (status === 'ok') return 'ok';
+  if (status === 'interrupted') return 'interrupted';
   return 'pending';
 }
 
@@ -382,6 +388,12 @@ export function applySubagentEvent(turn, payload) {
     // ("Explore") respectively. Only the second is worth showing; see
     // `subagent_type` in `_task_event` (src/aic_dc/claude_code/messages.py).
     task_type: null,
+    // Whether this subagent has a transcript on disk. Absent means it does,
+    // so every producer that never says anything keeps today's behaviour and
+    // only the one that knows otherwise speaks — see `has_transcript` in
+    // `_announce` (src/aic_dc/antigravity/bridge.py). Read by the three
+    // places that would otherwise fetch a transcript by `agent_id`.
+    has_transcript: true,
     subagent_type: null,
     status: null,
     last_tool_name: null,
@@ -397,6 +409,11 @@ export function applySubagentEvent(turn, payload) {
     patched.description = payload.description;
   }
   if (payload.task_type) patched.task_type = payload.task_type;
+  // Not the `if (payload.x)` idiom the rest of this function uses: the only
+  // value this field is ever sent with is `false`, which that idiom drops.
+  if (typeof payload.has_transcript === 'boolean') {
+    patched.has_transcript = payload.has_transcript;
+  }
   if (payload.subagent_type) patched.subagent_type = payload.subagent_type;
   if (payload.status) patched.status = payload.status;
   if (payload.last_tool_name) patched.last_tool_name = payload.last_tool_name;
@@ -430,6 +447,145 @@ export function subagentRowFor(turn, payload) {
   const key = rowKey(payload);
   if (!key) return null;
   return turn.subagents.get(key) || null;
+}
+
+// ---------------------------------------------------------------
+// Consultation posture
+// ---------------------------------------------------------------
+
+/**
+ * What a consultation is permitted to do, as a standing condition rather
+ * than as an event.
+ *
+ * The posture — "no tools and no repository access" — is true of every
+ * consultation before the model has said anything, and the browser has always
+ * treated it as an arrival: a `consultation_posture` system event, routed by
+ * `agent_id` into the consultation's tab. That worked while the tab was the
+ * surface people read. It does not survive inline-as-default (AG-29), where a
+ * reader who never opens a tab would be shown an answer with no statement of
+ * what produced it — and there is no fallback channel, because this notice
+ * deliberately raises no toast (one per consultation is a notification the
+ * reader learns to dismiss).
+ *
+ * So the posture becomes framing on the container, read from here. Which
+ * means it has to be able to **retract**, and that is the whole reason this
+ * is a store and not a constant. `_grounding` in src/aic_dc/antigravity/
+ * bridge.py already does exactly this for the model's copy: on a breach it
+ * replaces the assurance outright rather than appending to it, because "a
+ * paragraph that asserted the isolation held and then mentioned that it had
+ * not would be read by exactly the wrong half of its audience". A banner
+ * authored from container identity alone would rebuild that bug in the
+ * browser, proclaiming containment directly above the row saying it failed.
+ *
+ * Four states, not two. `consultation_unverified` retracts differently from
+ * `consultation_breach`: the app does not *know* what happened, and flattening
+ * that into "containment failed" manufactures the certainty the unverified
+ * branch exists to refuse. Each notice carries its own sentence, so this
+ * stores the sentence rather than deriving one from the subtype.
+ */
+/**
+ * Whether a subagent row is a consultation rather than a delegated subagent.
+ *
+ * One predicate for a rule that three surfaces now share: a consultation's
+ * stream renders expanded inline, its posture and warnings are drawn on that
+ * card, and it gets no strip tab until someone asks for one. All three follow
+ * from the same fact — the inline card is a consultation's default surface —
+ * so they should not each carry their own copy of the string.
+ *
+ * `task_type` and not `subagent_type`: the bridge sets the first to
+ * `"consultation"` and the second to the consultant's name, which is a label.
+ */
+export function isConsultation(row) {
+  return row?.task_type === 'consultation';
+}
+
+const POSTURE_RANK = {
+  consultation_posture: 0,
+  consultation_ungrounded: 1,
+  consultation_unverified: 2,
+  consultation_breach: 3,
+};
+
+/**
+ * Record one consultation notice as the container's standing condition.
+ *
+ * Monotonic in severity, and that is load-bearing rather than tidy. The
+ * posture event arrives *first*, at the head of every consultation, so a
+ * last-write-wins store would be correct until an incident and correct
+ * again after it. But `consultation_ungrounded` is raised once at the first
+ * refusal and further refused calls render beneath it, and nothing orders a
+ * late posture against an early breach across a reconnect replay. Ranking
+ * means a retraction cannot be overwritten by the assurance it retracted.
+ */
+export function noteConsultationPosture(panel, agentId, subtype, notice) {
+  if (!panel || !agentId || !notice?.text) return false;
+  const rank = POSTURE_RANK[subtype];
+  if (rank === undefined) return false;
+  if (!panel._consultationPosture) panel._consultationPosture = new Map();
+  const held = panel._consultationPosture.get(agentId);
+  if (held && held.rank >= rank) return false;
+  panel._consultationPosture.set(agentId, {
+    rank,
+    text: notice.text,
+    severity: notice.severity || 'info',
+  });
+  return true;
+}
+
+/** The standing condition for one consultation, or null if none was said. */
+export function consultationPosture(panel, agentId) {
+  if (!panel || !agentId) return null;
+  return panel._consultationPosture?.get(agentId) || null;
+}
+
+/**
+ * Whether a notice subtype is a consultation warning drawn on the card.
+ *
+ * The posture is excluded: it is the container's framing, it has its own
+ * severity-monotonic slot, and it would otherwise be drawn twice.
+ */
+export function isConsultationWarning(subtype) {
+  return (
+    POSTURE_RANK[subtype] !== undefined
+    && subtype !== 'consultation_posture'
+  );
+}
+
+/**
+ * Record a consultation's warning for its inline card.
+ *
+ * Separate from the posture store above, and kept as a list rather than a
+ * severity-monotonic slot, because these are *events* where the posture is a
+ * standing condition: a consultation that was refused a tool and then
+ * breached the gate did two things, and a store that kept only the worse one
+ * would report the second as though the first had not happened.
+ *
+ * The posture is excluded — it is the container's framing and has its own
+ * slot, and repeating it in the list would draw it twice on the same card.
+ *
+ * Deduplicated on the text, which is what a repeat of the same refusal
+ * produces. The warning is about a *kind* of thing having happened; a
+ * consultation refused four times does not need the sentence four times.
+ *
+ * @returns {boolean} whether anything was added, i.e. whether a repaint is owed.
+ */
+export function noteConsultationNotice(panel, agentId, subtype, notice) {
+  if (!panel || !agentId || !notice?.text) return false;
+  if (!isConsultationWarning(subtype)) return false;
+  if (!panel._consultationNotices) panel._consultationNotices = new Map();
+  const held = panel._consultationNotices.get(agentId) || [];
+  if (held.some((entry) => entry.text === notice.text)) return false;
+  panel._consultationNotices.set(agentId, [
+    ...held,
+    { subtype, text: notice.text, severity: notice.severity || 'warning' },
+  ]);
+  return true;
+}
+
+/** Every warning recorded against one consultation, in arrival order. */
+export function consultationNotices(panel, agentId) {
+  if (!panel || !agentId) return [];
+  return panel._consultationNotices?.get(agentId) || [];
 }
 
 // ---------------------------------------------------------------
@@ -472,7 +628,13 @@ export function applyReplayBlocks(turn, blocks) {
       ? raw.kind
       : 'text';
     if (kind === 'tool') {
-      const card = raw.tool && typeof raw.tool === 'object' ? raw.tool : {};
+      const card = raw.tool && typeof raw.tool === 'object' ? raw.tool : null;
+      // A tool block with no card is nothing a reader can be shown: no name,
+      // no input to summarise, no invoked-at, and — having no result either —
+      // a status that renders as permanently pending. Dropped for the same
+      // reason `applyToolResult` drops a headless result: an empty card reads
+      // as a rendering bug, and it is not one the user can dismiss.
+      if (!card) continue;
       const result = card.result && typeof card.result === 'object'
         ? card.result
         : null;

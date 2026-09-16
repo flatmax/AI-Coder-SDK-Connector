@@ -45,6 +45,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from aic_dc import index_tools
 from aic_dc.antigravity.credentials import Credentials
 
 logger = logging.getLogger(__name__)
@@ -122,6 +123,63 @@ NEVER_SET = {
 }
 
 
+def index_tool_callables(bridge: Any) -> tuple[Any, ...]:
+    """The six ``aic-dc`` read tools as SDK callables (AG-34).
+
+    The third packaging of :data:`aic_dc.index_tools.SPECS`, beside the
+    Claude engine's ``@tool`` decorators and the ``agy`` transport's MCP
+    server. Same six names, same six descriptions, same six schemas — a
+    model asked the same question is told about the same tool in the same
+    words whichever engine the user picked, which is the whole of AG-34.
+
+    **``ToolWithSchema`` rather than a bare callable, because of the
+    schemas.** Handed a plain function, the SDK derives the declaration
+    from its *signature* through
+    ``genai_types.FunctionDeclaration.from_callable_with_api_option``
+    (``connections/local/local_connection.py:243``) — so six handlers
+    sharing one ``**arguments`` shape would advertise one empty schema
+    between them and the per-argument prose would not reach the model.
+    ``ToolWithSchema`` is the one branch of that function that takes a
+    schema verbatim (``:222``), and
+    ``schema_utils.normalize_schema`` was measured on 2026-09-15 to return
+    all six of ours **unchanged**, so what the model sees on this transport
+    is byte-identical to what it sees on the other two.
+
+    Three attributes are load-bearing and none of them is an argument:
+
+    - ``__name__`` is the tool name, both to the proto (``:224``) and to
+      ``ToolRunner.register`` (``tools/tool_runner.py:206``).
+    - ``__doc__`` is the *description* (``:225``). There is no description
+      parameter anywhere on this path, so the prose has to be attached to
+      the function object.
+    - ``input_schema`` is the schema, and the only one of the three that
+      is passed rather than set.
+
+    ``**arguments`` is safe here despite ``ToolRunner._coerce_args``
+    inspecting the inner signature: a ``VAR_KEYWORD`` parameter is skipped
+    by name and every argument is then restored by the loop that retains
+    what the signature did not mention (``tools/tool_runner.py:325-328``).
+    Returning plain text rather than the bridge's MCP envelope is for the
+    same reason the ``agy`` server does: ``ToolResult.result`` is ``Any``
+    on this transport, and a content array here would be a wrapper the
+    model has to read through rather than an answer.
+    """
+    from google.antigravity.tools.tool_runner import ToolWithSchema
+
+    def build(spec: index_tools.ToolSpec) -> Any:
+        """One tool. A function, not a loop body, so that each closure
+        binds its own ``spec`` instead of sharing the last one."""
+
+        async def handler(**arguments: Any) -> str:
+            return await spec.invoke_text(bridge, arguments)
+
+        handler.__name__ = spec.name
+        handler.__doc__ = spec.description
+        return ToolWithSchema(handler, spec.schema)
+
+    return tuple(build(spec) for spec in index_tools.SPECS)
+
+
 def build_config_kwargs(
     *,
     repo_root: Path | str,
@@ -155,6 +213,14 @@ def build_config_kwargs(
         absent from ``enabled_tools``, so there is no posture in which a
         write reaches the model with nothing between it and the disk.
         Phase 4 supplies the real hook; phase 3 runs read-only.
+    tools:
+        Custom callables the harness should register alongside the builtin
+        tools — in practice :func:`index_tool_callables`. Ungated on
+        purpose, because all six read: they are the same tools the Claude
+        engine has had since AG-4 and reading the repository is not what
+        the dialog exists to ask about. **They still need naming in
+        ``policies``**, which :func:`build_config` does, since a wildcard
+        deny does not know that a tool this app registered is ours.
     write_tools:
         Which mutating tools to enable. Defaults to all of
         :data:`MUTATING_TOOLS` when a hook was supplied and to none when
@@ -238,9 +304,15 @@ def build_config_kwargs(
         # before it runs.
         kwargs["hooks"] = [decide_hook]
     if tools:
-        # AG-4: the symbol and document indexes as plain callables. No MCP
-        # server, no transport, no lifecycle — the SDK derives schemas from
-        # signatures.
+        # AG-4's channel, carrying the six index tools since AG-34. No MCP
+        # server, no transport, no lifecycle — this transport is in-process
+        # and takes the callables directly, which is why the `agy` one
+        # needs a whole listener to say the same six things.
+        #
+        # AG-4 said "the SDK derives schemas from signatures" here, which
+        # is true of a bare callable and is not the path
+        # `index_tool_callables` takes; read its docstring before passing
+        # anything through this argument.
         kwargs["tools"] = list(tools)
     if resume:
         # Set as a pair, because the SDK validates them as one: RESUME
@@ -270,7 +342,10 @@ def build_config(**kwargs: Any) -> Any:
     - ``enabled_tools``, from names to ``BuiltinTools`` members, expanding
       :data:`READ_ONLY_SENTINEL` to the SDK's ``read_only()`` set.
     - ``policies``, which is **not** optional and is why this function
-      exists at all rather than a bare splat.
+      exists at all rather than a bare splat. Since AG-34 it also carries
+      one allow per *custom* tool passed in ``tools``: those are not
+      ``BuiltinTools`` members, so the wildcard deny below would otherwise
+      refuse the callables this app registered itself.
 
     **Leaving ``policies`` unset is not "no policy".** ``LocalAgentConfig``
     defaults it to ``policy.confirm_run_command()`` — deny ``run_command``,
@@ -293,6 +368,7 @@ def build_config(**kwargs: Any) -> Any:
     behavior = getattr(
         types.AgentBehavior, capabilities.pop("agent_behavior", "INTERACTIVE")
     )
+    custom = _custom_tool_names(kwargs.get("tools") or ())
 
     return LocalAgentConfig(
         # Both capability fields named rather than splatted, so the AG-8
@@ -305,9 +381,50 @@ def build_config(**kwargs: Any) -> Any:
             agent_behavior=behavior,
             **capabilities,
         ),
-        policies=[policy.deny_all(), *(policy.allow(t.value) for t in enabled)],
+        policies=[
+            policy.deny_all(),
+            *(policy.allow(t.value) for t in enabled),
+            # AG-34. ``deny_all()`` is ``deny("*")``, and a custom Python
+            # tool is not a ``BuiltinTools`` member, so it is in neither
+            # ``enabled`` nor the allowlist above — the wildcard deny would
+            # take the six index tools with it, and take them *invisibly*:
+            # the model is still shown a tool it is then refused, which
+            # costs a turn and reads to the user as the tool being broken.
+            #
+            # A specific allow beats a wildcard deny; the precedence is the
+            # SDK's own and stated in ``hooks/policy.py``'s module docstring
+            # — *Specific Deny > Specific Ask > Specific Allow > Wildcard
+            # Deny*. Naming the tools we ourselves registered is consistent
+            # with what this list is: a capability restriction, with the
+            # per-call permission decision left to the decide hook.
+            *(policy.allow(name) for name in custom),
+        ],
         **kwargs,
     )
+
+
+def _custom_tool_names(tools: Any) -> list[str]:
+    """The names the ``ToolRunner`` will register these callables under.
+
+    ``__name__`` and nothing else, because that is the SDK's own rule —
+    ``ToolRunner.register`` falls back to ``type(tool).__name__`` for an
+    object without one, and a policy naming the *class* would allow every
+    instance of it. A callable with no usable name is left out rather than
+    guessed at: it would be denied by the wildcard and reported as such,
+    which is a diagnosable failure, where a wrong allow is not.
+    """
+    names: list[str] = []
+    for tool in tools:
+        name = getattr(tool, "__name__", None)
+        if isinstance(name, str) and name.strip():
+            names.append(name)
+        else:  # pragma: no cover - every caller passes named callables
+            logger.warning(
+                "A custom tool with no __name__ was passed to the Antigravity "
+                "config; the wildcard deny will refuse it. Give the callable "
+                "a __name__ matching what the model should call it."
+            )
+    return names
 
 
 def _resolve_tools(names: list[str], types: Any) -> list[Any]:
