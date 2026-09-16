@@ -15,18 +15,55 @@ file specifies the UI.
 
 ## Placement
 
-Viewport-scoped modal, above everything: above the draggable dialog panel, above every progress overlay,
+Viewport-scoped, above everything: above the draggable dialog panel, above every progress overlay,
 above the toast layer. It is **not** a tab and not hosted inside the dialog body.
 
 The reason is that the dialog panel can be minimized, docked, dragged mostly offscreen, or showing the
 Settings tab, and a permission request has stalled the turn — it cannot be allowed to render somewhere
-the user is not looking. It is the only modal in the application that takes precedence over the shell's
+the user is not looking. It is the only surface in the application that takes precedence over the shell's
 own overlays, including the startup overlay (a permission request during startup is possible when a
 session resumes into a pending call).
 
-While a dialog is open the rest of the UI stays readable but inert: a scrim dims the background, and
-clicks outside the dialog do nothing. Clicking the scrim is **not** a dismiss — see
-[§ Escape and the scrim](#escape-and-the-scrim).
+For every class but one it is **modal**: while a dialog is open the rest of the UI stays readable but
+inert, a scrim dims the background, and clicks outside the dialog do nothing. Clicking the scrim is
+**not** a dismiss — see [§ Escape and the scrim](#escape-and-the-scrim). Modality here is a security
+argument, not a presentation one: a destructive call must not be answerable while the user's attention
+and pointer are somewhere else, and the scrim is what says so.
+
+### A question docks beside the chat instead
+
+An `interact` request is the exception, because that argument does not hold for it and the cost of
+modality is highest there. A question is not a security decision: allow *is* the answer, deny means "ask
+me in prose", and [§ `interact`](#interact--real-choices) already refuses to offer a rule that could
+pre-answer a future one. What a question needs is the transcript it was written about — the agent asks
+"which branch?" about the paragraph it just wrote — and the modal was drawn opaquely over exactly that.
+A user who cannot re-read the conversation answers from memory, or denies the call to go and look.
+
+So a question renders as a non-modal panel over the **viewer region**: to the right of the shell's docked
+panel, top-anchored at its own content height, with no scrim at all. Over the viewer rather than beside
+it — the viewer keeps its layout underneath and nothing reflows, where insetting it would relayout Monaco
+and refit every viewBox when a question arrived and again when it was answered. The picker and the chat
+are untouched, live and readable, which is the whole point.
+
+The shell owns the geometry, because it is the shell's panel that defines it: the shell measures where
+its docked panel ends and publishes that as the dialog's `dockLeft`, re-measured on the same triggers as
+the viewer inset (panel resize, minimize, undock, tab switch, window resize). It reports nothing — and
+the question falls back to the centred modal — when:
+
+- the panel is **floating** (dragged out of the dock) or **minimized**. There is no left-docked chat to sit beside, and a question pinned to the right of nothing is a modal that lost its scrim.
+- the **chat is not on screen**: the Settings, Context or SDK-surface tab is showing, so the transcript the docking exists to expose is not there either.
+- the region left over is **narrower than the compare layout's own breakpoint**. A docked question that had to stack its options above its examples would break § `interact`'s side-by-side requirement to preserve a transcript, which is trading one unreadable thing for another.
+
+The placement is live rather than frozen at arrival. Every input to it is something the user just did
+with their own hands — resized the panel, minimized it, switched tabs — so a placement that follows them
+is not the app moving controls under the pointer that [§ Anti-Click-Through](#anti-click-through) is
+about.
+
+Two behaviours modality was silently carrying have to be named, because dropping the scrim without them
+is a bug:
+
+- **Escape only denies from inside the panel** while docked. Escape in the chat input clears the input, and that input is genuinely live behind a non-modal question, so a window-wide binding would deny the agent's question because the user cleared a half-typed message — resolving a request they never touched. From inside the panel Escape still denies, with the same reason ([§ Escape and the scrim](#escape-and-the-scrim)).
+- **Tab is not trapped** while docked. The trap exists so a keyboard user cannot reach a UI the scrim calls unavailable; with no scrim there is nothing to be inconsistent with, and reaching the transcript is how a keyboard user reads what the question is about.
 
 ## Anatomy
 
@@ -252,6 +289,14 @@ by name if a release moves it. Only the round trip itself needs the live script:
 presents as a note that never reaches the model, and nothing static can tell that from a model with
 nothing to say about it.
 
+**The question is docked beside the chat, not drawn over it.** This is the one class that renders
+non-modal, and the reason is in the content: a question is written about the conversation, and the modal
+covered the conversation. Where it docks, when it falls back to the centre, and what Escape and Tab do
+while it is non-modal are all in [§ Placement](#placement). The two halves of the argument that belong
+here: allowing *is* answering (above), so there is nothing destructive behind the "Answer" button for a
+scrim to be protecting; and the compare layout above is what sets the floor on how narrow a docked
+question may be, since a dock that pushed the examples below the options would defeat its own purpose.
+
 This class is always gated by the SDK, so it is the one dialog a user cannot make go away with a rule or
 a permissive mode. In `dontAsk` it is denied without ever reaching us, which the dialog therefore cannot
 show — the transcript records the denial instead.
@@ -370,7 +415,10 @@ behind a dialog the user believes they closed, which is the worst of the three o
 
 Escape takes priority over every other Escape binding in the application — the chat panel's @-filter,
 the `/` palette, the input-clear chain, the lightbox (see
-[chat.md § Escape Priority Chain](chat.md#escape-priority-chain)).
+[chat.md § Escape Priority Chain](chat.md#escape-priority-chain)). It can, because nothing else on screen
+is reachable while it is modal. A docked `interact` question is the one case where something else *is*,
+so there the priority narrows to keystrokes from inside the panel and every other binding keeps its own
+Escape ([§ Placement](#placement)).
 
 ## Anti-Click-Through
 
@@ -399,7 +447,8 @@ routed around by habit within a day.
 - A queued `interact` request does not jump the queue. It is gated by the SDK regardless of mode, so it will still be there.
 
 When the queue drains, the scrim releases and focus returns to whatever held it before the first
-request — usually the chat input, mid-sentence.
+request — usually the chat input, mid-sentence. A queue holding nothing but docked questions never had a
+scrim to release, and the chat input it hands focus back to was live throughout.
 
 ## Countdown
 
@@ -475,7 +524,7 @@ back to the tab and reads the dialog.
 
 ## Accessibility
 
-- `role="dialog"`, `aria-modal="true"`, labelled by the header; focus is trapped for the dialog's lifetime.
+- `role="dialog"`, labelled by the header. `aria-modal="true"` and a focus trap for the dialog's lifetime — except for a docked `interact` question, which is not modal: asserting it was would tell a screen-reader user that the transcript beside it is unavailable, and trapping Tab would make that true ([§ Placement](#placement)). The attribute is absent rather than `false`, which is what "not a modal" is spelled as.
 - On arrival, screen readers are given the class, the tool, and the target — "permission request: edit, src/auth/session.py, 12 added 3 removed" — rather than being walked through the diff. The diff itself is navigable but is not the announcement.
 - Where a countdown exists it is announced at coarse intervals (five minutes, one minute, ten seconds) via a polite live region. A per-second live region is unusable. A milestone above the time the request actually has is never announced — over a thirty-second window, "five minutes left" is worse than silence — so a clock arming announces itself with the real remaining instead, which is the one thing a reader cannot pick up from a numeral that just appeared.
 - Announcements say "30 seconds left", not the chip's `0:30`, which reads as "zero colon thirty".
@@ -484,10 +533,12 @@ back to the tab and reads the dialog.
 
 ## Invariants
 
-- The dialog renders above every other surface in the application, including the startup overlay and the toast layer.
+- The dialog renders above every other surface in the application, including the startup overlay and the toast layer. A docked question is above all of them too; what it gives up is modality, not precedence.
+- Every class is modal — scrim, `aria-modal`, focus trap — except an `interact` question with room beside the live chat, which has none of the three. No other class docks, whatever the shell reports.
+- A question docks only where the shell reports room beside an on-screen chat. Floating, minimized, another tab, or a region under the compare breakpoint each fall back to the centred modal rather than to a cramped or orphaned panel.
 - The dialog resolves exactly once, through `resolve_permission`, a broadcast `permissionResolved`, or expiry. It never closes without one of those.
 - A `permissionDeadline` never closes a dialog, never restarts its settling interval, and never discards a half-typed deny reason. It changes only whether a clock is running.
-- Escape denies with a reason. The scrim does nothing. Neither ever dismisses a request unresolved.
+- Escape denies with a reason. The scrim does nothing. Neither ever dismisses a request unresolved. A docked question takes Escape from inside its own panel only; elsewhere the keystroke belongs to whatever is focused there, and never resolves the request.
 - Every `write` request shows a diff, the full new content for a new file, or an explicit binary/too-large label — never a tool name and a JSON blob alone.
 - Every request, of every class, offers the verbatim tool input behind a disclosure.
 - The rendered command for an `exec` request is byte-identical to what will run, modulo an explicit truncation with an expander.

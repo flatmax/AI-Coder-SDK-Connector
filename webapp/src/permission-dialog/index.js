@@ -25,7 +25,7 @@
 //   4. **Only localhost gets decision controls**, but every client gets
 //      the full body. The restriction is on authority, not information.
 
-import { LitElement, html } from 'lit';
+import { LitElement, html, nothing } from 'lit';
 
 import { RpcMixin } from '../rpc-mixin.js';
 import { PERMISSION_DIALOG_STYLES } from './styles.js';
@@ -36,6 +36,7 @@ import {
   CLASS_GLYPHS,
   COUNTDOWN_TICK_MS,
   ESCAPE_DENY_REASON,
+  QUESTION_DOCK_GUTTER,
   SETTLING_MS,
   TITLE_MARKER,
 } from './constants.js';
@@ -130,6 +131,17 @@ export class PermissionDialog extends RpcMixin(LitElement) {
     _previewFocus: { type: Object, state: true },
     /** Live-region text: arrival announcement or countdown milestone. */
     _announcement: { type: String, state: true },
+    /**
+     * Where the shell's docked panel ends, in viewport px, or null for
+     * "there is nowhere to dock — use the centred modal".
+     *
+     * Set as a property by the shell, which owns the panel's geometry and
+     * is the only thing that knows whether the chat is on screen at all
+     * (app-shell/dialog.js § questionDockLeft). A property rather than an
+     * attribute because null is one of its values and an absent attribute
+     * and an attribute reading "null" are the same string.
+     */
+    dockLeft: { attribute: false },
   };
 
   static styles = PERMISSION_DIALOG_STYLES;
@@ -155,6 +167,7 @@ export class PermissionDialog extends RpcMixin(LitElement) {
     this._answerNotes = new Map();
     this._previewFocus = new Map();
     this._announcement = '';
+    this.dockLeft = null;
 
     /** Monotonic arrival counter — two requests can share a millisecond. */
     this._arrivalCounter = 0;
@@ -289,6 +302,28 @@ export class PermissionDialog extends RpcMixin(LitElement) {
 
   get _settling() {
     return this._now < this._settleUntil;
+  }
+
+  /**
+   * Whether the current request is docked beside the chat rather than
+   * modal over it.
+   *
+   * `interact` only, and only where the shell says there is room. The
+   * modality of every other class is a security argument — a destructive
+   * call must not be answered while the user is reading something else —
+   * and a question is not a security decision: allow *is* the answer, deny
+   * means "ask me in prose", and § interact already refuses to offer a rule
+   * that could pre-answer one. What a question needs instead is the
+   * transcript it was written about, which is what the modal was covering
+   * (permission-dialog.md § Placement).
+   *
+   * Live rather than frozen at arrival: every input to it is something the
+   * user just did with their own hands — resized the panel, minimized it,
+   * switched tabs — so a placement that follows them is not the app moving
+   * controls under the pointer that § Anti-Click-Through is about.
+   */
+  get _docked() {
+    return this.current?.tool_class === 'interact' && this.dockLeft != null;
   }
 
   _onPermissionRequest(event) {
@@ -662,6 +697,13 @@ export class PermissionDialog extends RpcMixin(LitElement) {
   _onKeydownCapture(event) {
     if (!this.current) return;
     if (event.key === 'Escape') {
+      // A docked question is not modal, so the chat input behind it is
+      // live — and Escape there clears the input. Denying the agent's
+      // question because the user cleared a half-typed message would
+      // resolve a request they never touched, so while docked Escape only
+      // denies from inside the panel. The modal case keeps the priority
+      // the spec gives it, and can: nothing else on screen is reachable.
+      if (this._docked && !event.composedPath?.().includes(this)) return;
       // Escape is a deny, and it takes priority over every other Escape
       // binding in the application — hence stopImmediatePropagation on
       // the capture phase.
@@ -683,7 +725,11 @@ export class PermissionDialog extends RpcMixin(LitElement) {
       event.stopImmediatePropagation();
       return;
     }
-    if (event.key === 'Tab') this._trapFocus(event);
+    // A docked question does not trap Tab. The trap exists so a keyboard
+    // user cannot reach a UI the scrim calls unavailable; with no scrim
+    // there is nothing to be inconsistent with, and reaching the
+    // transcript is how a keyboard user reads what the question is about.
+    if (event.key === 'Tab' && !this._docked) this._trapFocus(event);
   }
 
   /**
@@ -1036,13 +1082,25 @@ export class PermissionDialog extends RpcMixin(LitElement) {
     const glyph = CLASS_GLYPHS[payload.tool_class] || '•';
     const diff = payload.diff;
     const risky = defaultFocusTarget(payload) === 'deny';
+    const docked = this._docked;
 
     return html`
-      <div class="scrim" @click=${(event) => event.stopPropagation()}></div>
+      ${docked
+        // No scrim at all, rather than a transparent one: the picker, the
+        // chat and the viewer are genuinely live behind a docked question,
+        // and a user who wants to open the file it is about should be able
+        // to. Nothing the agent tries meanwhile can slip past — its next
+        // gated call queues behind this one.
+        ? null
+        : html`<div class="scrim" @click=${(event) => event.stopPropagation()}></div>`}
       <div
-        class="dialog ${risky ? 'risky' : ''}"
+        class="dialog ${risky ? 'risky' : ''} ${docked ? 'docked' : ''}"
+        style=${docked
+          ? `--question-dock-gutter: ${QUESTION_DOCK_GUTTER}px;`
+            + ` left: ${this.dockLeft + QUESTION_DOCK_GUTTER}px;`
+          : nothing}
         role="dialog"
-        aria-modal="true"
+        aria-modal=${docked ? nothing : 'true'}
         aria-labelledby="permission-header"
       >
         <header id="permission-header">

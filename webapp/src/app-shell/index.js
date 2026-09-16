@@ -64,6 +64,7 @@ import {
   getDialogRect, onHeaderPointerDown, onHandlePointerDown,
   onPointerMove, onPointerUp, toggleMinimize,
   onWindowResize, handleWindowResize, dialogInlineStyle,
+  syncQuestionDock,
 } from './dialog.js';
 import {
   getFileNav, onGridKeyDown, onGridKeyUp,
@@ -143,6 +144,13 @@ export class AppShell extends JRPCClient {
      * dialog renders with explicit pixel positioning.
      */
     _undockedPos: { type: Object, state: true },
+    /**
+     * Where the docked panel ends, in viewport px, or null when
+     * an `interact` request has nowhere to dock beside the chat
+     * and belongs in the centred modal instead. Measured, not
+     * derived — see `questionDockLeft` in dialog.js.
+     */
+    _questionDockLeft: { type: Number, state: true },
     /**
      * Current primary mode — 'code' or 'doc'. Drives the
      * segmented toggle in the header. Synced with the
@@ -248,6 +256,11 @@ export class AppShell extends JRPCClient {
     this._minimized = loadMinimized(this);
     this._dockedWidth = loadDockedWidth(this);
     this._undockedPos = loadUndockedPos(this);
+    // Null until the first paint has a panel to measure. A
+    // question arriving before then gets the centred modal,
+    // which is the right answer for a shell that has not laid
+    // out yet.
+    this._questionDockLeft = null;
     // Baseline viewport size at the moment _dockedWidth and
     // _undockedPos were last committed (pointerup or
     // resize-driven rescale). Used to rescale proportionally
@@ -1655,6 +1668,11 @@ export class AppShell extends JRPCClient {
     // background needs its inset before either viewer opens
     // a file — including the docked width restored from
     // localStorage, which is applied by the same render.
+    //
+    // The question dock is measured first throughout: it reads
+    // a rect, `syncViewerInset` writes a custom property, and
+    // reading after that write forces a reflow.
+    syncQuestionDock(this);
     syncViewerInset(this);
   }
 
@@ -1674,11 +1692,20 @@ export class AppShell extends JRPCClient {
     // through here at all — they mutate the dialog's inline
     // style directly and go via `_scheduleViewerRelayout`,
     // which syncs the inset on its own RAF.
+    //
+    // `activeTab` is in the list for the question dock alone —
+    // it cannot move the dialog's right edge, so the inset sync
+    // it triggers is a wasted read, but switching away from the
+    // chat is exactly when a docked question has to become a
+    // modal again. One read on a tab switch is the cheaper half
+    // of that trade.
     if (
       changed.has('_dockedWidth')
       || changed.has('_undockedPos')
       || changed.has('_minimized')
+      || changed.has('activeTab')
     ) {
+      syncQuestionDock(this);
       if (syncViewerInset(this)) this._scheduleViewerRelayout();
     }
   }

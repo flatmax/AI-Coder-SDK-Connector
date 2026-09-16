@@ -12,6 +12,7 @@
 
 import { toRepoPath } from '../repo-path.js';
 import { viewerForPath } from '../viewer-routing.js';
+import { dockedPanelRight, syncQuestionDock } from './dialog.js';
 import { reportViewerFile } from './viewer-framing.js';
 import { rememberDiffViewport } from './viewport.js';
 
@@ -397,15 +398,10 @@ export function scheduleViewerRelayout(host) {
  * problem: its full-width right pane spilled its left half
  * under the dialog too.
  *
- * The inset is measured from the dialog's own rect rather
- * than recomputed from `_dockedWidth` or the stylesheet's
- * `width: 50%`. The measured right edge already accounts
- * for `min-width`, the 1px border, and an in-flight resize
- * drag that has written `dialog.style.width` without yet
- * committing it to reactive state — three ways a
- * recomputation would drift.
- *
- * Zero whenever the dialog isn't occluding a full-height
+ * The measurement itself is `dockedPanelRight` in dialog.js,
+ * shared with the question dock so the strip this reserves
+ * and the region a docked question fills are the same number.
+ * It is zero whenever the dialog isn't occluding a full-height
  * strip: undocked (it floats over the layer, so there's no
  * strip to reserve — moving the viewer for it would make
  * the content jump on every drag) or minimized (collapsed
@@ -421,22 +417,8 @@ export function scheduleViewerRelayout(host) {
 export function syncViewerInset(host) {
   const bg = host.shadowRoot?.querySelector('.viewer-background');
   if (!bg) return false;
-  const dialog = host.shadowRoot?.querySelector('.dialog');
-  let value = '0px';
-  if (
-    dialog
-    && !host._minimized
-    && !dialog.classList.contains('floating')
-  ) {
-    const rect = dialog.getBoundingClientRect();
-    // Docked means flush against the left edge. The `left`
-    // guard keeps a mid-drag dialog that hasn't picked up
-    // the `floating` class yet from insetting the viewer by
-    // a rect that no longer starts at the edge.
-    if (rect.width > 0 && rect.left <= 0) {
-      value = `${Math.round(rect.right)}px`;
-    }
-  }
+  const right = dockedPanelRight(host);
+  const value = right == null ? '0px' : `${right}px`;
   if (bg.style.getPropertyValue('--viewer-inset-left') === value) {
     return false;
   }
@@ -452,8 +434,15 @@ export function syncViewerInset(host) {
  * The inset sync runs first: the viewers measure their own
  * containers, so the background's width has to be committed
  * before they read it.
+ *
+ * The question dock is measured ahead of both, because it
+ * reads a rect and `syncViewerInset` writes a custom property
+ * — reading after that write is what turns two cheap reads
+ * into a forced reflow, and this function is on the resize
+ * drag path.
  */
 export function relayoutViewers(host) {
+  syncQuestionDock(host);
   syncViewerInset(host);
   const diff = host.shadowRoot?.querySelector('aic-diff-viewer');
   const svg = host.shadowRoot?.querySelector('aic-svg-viewer');

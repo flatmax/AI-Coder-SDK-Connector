@@ -21,6 +21,34 @@ export const SETTLING_MS = 700;
 /** Countdown re-render cadence. One second; the label shows seconds. */
 export const COUNTDOWN_TICK_MS = 1000;
 
+/**
+ * The narrowest a docked question panel may be, in px.
+ *
+ * A question is docked beside the chat rather than modal over it, because
+ * its options and their examples are written *about* the transcript
+ * (permission-dialog.md § Placement). The floor is the
+ * `.question-compare` breakpoint in styles.js: below it the options and
+ * the example they are being compared against stack, and § interact
+ * requires both on screen at once. Narrower than this and docking would
+ * buy the transcript at the cost of the comparison, so the centred modal
+ * is the better answer there.
+ *
+ * Read by the shell, which decides whether there is room
+ * (app-shell/dialog.js § questionDockLeft). The two numbers have to agree,
+ * so the breakpoint in styles.js names this constant.
+ */
+export const QUESTION_DOCK_MIN_WIDTH = 720;
+
+/**
+ * Breathing room between a docked question panel and the viewport edges.
+ *
+ * Written into the shadow root as `--question-dock-gutter` rather than
+ * duplicated in the stylesheet: the shell adds it to the `left` it sends
+ * and the stylesheet uses it for the other three sides, and a gutter that
+ * disagreed with itself would sit the panel off-centre in its own region.
+ */
+export const QUESTION_DOCK_GUTTER = 10;
+
 /** Under this many seconds remaining the countdown turns amber. */
 export const AMBER_SECONDS = 60;
 

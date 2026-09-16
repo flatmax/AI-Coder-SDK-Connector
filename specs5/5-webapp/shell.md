@@ -110,9 +110,23 @@ See [permission-dialog.md](permission-dialog.md). It is hosted here rather than 
 because the panel can be minimized, docked, dragged mostly off-screen, or showing Settings, and a
 permission request has stalled the turn.
 
+### The shell measures where a question may dock
+
+An `interact` request renders non-modal beside the chat rather than over it
+([permission-dialog.md § Placement](permission-dialog.md#a-question-docks-beside-the-chat-instead)), and
+the one input it cannot work out for itself is where the shell's docked panel ends. The shell passes it
+down as `dockLeft`: the panel's right edge in viewport pixels when the chat is on screen and the region
+left over is wide enough, and null otherwise — which the dialog reads as "no room, be a modal".
+
+- **The same measurement as the viewer inset**, from one function, so the strip the viewer reserves and the region a question fills cannot drift apart by a pixel or disagree about whether the panel is docked at all
+- **Re-measured on the same triggers**: panel resize, minimize, undock, tab switch, window resize. It is taken *before* the inset is written, because the inset writes a custom property on the background and reading a rect after that write is what turns two cheap reads into a forced reflow on the resize-drag path
+- **Null on a non-`files` tab**, even though the panel's geometry is unchanged. The dock exists to keep the transcript readable, and behind the Context tab there is no transcript to keep
+- **Null below a floor** equal to the dialog's own compare-layout breakpoint, imported from the dialog rather than restated here so the two cannot disagree about how narrow is too narrow
+
 ## Viewer Background
 
 - Background layer hosts the diff viewer and SVG viewer as siblings, filling the viewport to the right of the docked dialog
+- A docked `interact` question is drawn *over* this region rather than insetting it further. The viewer keeps its layout and its scroll position underneath, where insetting would relayout Monaco and refit every viewBox each time a question arrived and again when it was answered — a viewer that jumped twice per question, to make room for a panel that is gone in a few seconds
 - Only one is visible at a time — CSS class toggle with a short opacity transition
 - Routing by file extension determines which viewer receives each navigate-file event
 - Both viewers keep independent tab state; switching between file types just toggles the layer
@@ -416,9 +430,14 @@ Alt+5 is bound even though nothing in the chrome advertises it, for the same rea
 Convert is absent: a bound-but-obscure key is a stable escape, and an unbound digit that silently does
 nothing is indistinguishable from a broken one. Alt+6 and above are unmapped and pass through.
 
-Every shortcut is suppressed while the permission dialog is open. It is modal, its focus is trapped, and
-Alt+2 opening the Context tab behind a pending `Bash` approval would be a distraction at the worst
+Every shortcut is suppressed while a modal permission dialog is open. It is modal, its focus is trapped,
+and Alt+2 opening the Context tab behind a pending `Bash` approval would be a distraction at the worst
 possible moment.
+
+A docked `interact` question is the exception, because it is not modal and the UI behind it is genuinely
+live — suppressing the shortcuts would be claiming otherwise. Using one that takes the chat off screen
+(Alt+2, Alt+3, Alt+5) or the panel out of the dock (Alt+M) takes the dock's precondition with it, so the
+question re-centres as a modal rather than hanging beside a tab it was not placed against.
 
 ### Ctrl+Shift+F Selection Capture
 
@@ -457,7 +476,8 @@ Components dispatch toast events; the shell catches and renders them. Chat panel
 - Browser tab title reflects the current repo name with no prefix, except while permission requests are pending, when it carries the pending marker and count
 - The startup overlay is dismissed exactly once per connection lifecycle (first connect)
 - The permission dialog is mounted for the shell's entire lifetime and renders above every other surface, including the startup overlay
-- Global keyboard shortcuts are inert while the permission dialog is open
+- Global keyboard shortcuts are inert while a modal permission dialog is open; a docked `interact` question leaves them live, and any shortcut that removes the dock's precondition re-centres it as a modal
+- One function measures the docked panel's right edge. The viewer inset and the question dock both read it, so they can never disagree about where the panel ends or whether it is docked at all
 - The permission-mode indicator remains visible in every dialog layout state, including minimized
 - The context-capacity bar is fed only by pushed or tab-initiated context snapshots; it never issues its own RPC
 - The compaction indicator never displays a percentage or an `aria-valuenow`, and never stays active longer than its ceiling: the engine reports only the start and the end of a compaction, so anything between the two would be invented, and a spinner nothing retracts is worse than no notice at all

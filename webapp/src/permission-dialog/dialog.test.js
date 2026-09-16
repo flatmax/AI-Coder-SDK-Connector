@@ -140,7 +140,12 @@ vi.mock('monaco-editor/esm/vs/editor/edcore.main.js', () => {
 // ---------------------------------------------------------------------------
 
 import { SharedRpc } from '../rpc.js';
-import { ESCAPE_DENY_REASON, SETTLING_MS, TITLE_MARKER } from './constants.js';
+import {
+  ESCAPE_DENY_REASON,
+  QUESTION_DOCK_GUTTER,
+  SETTLING_MS,
+  TITLE_MARKER,
+} from './constants.js';
 import './index.js';
 
 // ---------------------------------------------------------------------------
@@ -234,6 +239,22 @@ function key(el, k, extra = {}) {
     key: k, bubbles: true, cancelable: true, ...extra,
   });
   window.dispatchEvent(event);
+  return event;
+}
+
+/**
+ * Escape pressed with focus inside the panel.
+ *
+ * `key()` dispatches on `window`, whose composed path is `window` alone —
+ * which is what a keystroke aimed at anything else on screen looks like. A
+ * real keypress inside the panel originates on the focused node in the
+ * shadow root and is `composed`, so the dialog is on its path.
+ */
+function keyFromInside(el, k) {
+  const event = new KeyboardEvent('keydown', {
+    key: k, bubbles: true, cancelable: true, composed: true,
+  });
+  el.shadowRoot.querySelector('.dialog').dispatchEvent(event);
   return event;
 }
 
@@ -2924,6 +2945,162 @@ describe('a question offering examples', () => {
     });
     expect(el.shadowRoot.querySelector('.option-preview-label').textContent)
       .toContain('Sidebar');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// interact — beside the transcript rather than over it
+//
+// A question is written about what was just said, and the modal was drawn
+// opaquely over the one thing the user needs to read to answer it. The shell
+// measures where its docked panel ends and hands that over as `dockLeft`;
+// everything below is what the dialog does with it (§ Placement).
+// ---------------------------------------------------------------------------
+
+describe('a question with room beside the chat', () => {
+  const DOCK_LEFT = 401;
+  const inlineStyle = (el) =>
+    el.shadowRoot.querySelector('.dialog').getAttribute('style') || '';
+
+  /** Mount with the shell already reporting room, and ask a question. */
+  async function askDocked(el, payload = interactPayload()) {
+    el.dockLeft = DOCK_LEFT;
+    await settle(el);
+    await ask(el, payload);
+  }
+
+  it('sits beside the panel instead of over it, with no scrim', async () => {
+    publishRpc();
+    const el = mount();
+    await settle(el);
+    await askDocked(el);
+
+    const dialog = el.shadowRoot.querySelector('.dialog');
+    expect(dialog.classList.contains('docked')).toBe(true);
+    // The gutter is the dialog's own constant, so the left offset and the
+    // three sides the stylesheet sets cannot disagree.
+    expect(inlineStyle(el))
+      .toContain(`left: ${DOCK_LEFT + QUESTION_DOCK_GUTTER}px`);
+    expect(inlineStyle(el))
+      .toContain(`--question-dock-gutter: ${QUESTION_DOCK_GUTTER}px`);
+    // No scrim at all: the picker, the chat and the viewer are live behind
+    // a docked question, and opening the file it is about is a fair thing
+    // to want to do while answering.
+    expect(el.shadowRoot.querySelector('.scrim')).toBeNull();
+  });
+
+  it('stops claiming to be modal when it is not', async () => {
+    // `aria-modal="true"` beside a live transcript tells a screen reader
+    // everything else on screen is unavailable, which would be false.
+    publishRpc();
+    const el = mount();
+    await settle(el);
+    await askDocked(el);
+    expect(el.shadowRoot.querySelector('.dialog').getAttribute('aria-modal'))
+      .toBeNull();
+  });
+
+  it('is still modal when the shell reports no room', async () => {
+    publishRpc();
+    const el = mount();
+    await settle(el);
+    await ask(el, interactPayload());
+
+    const dialog = el.shadowRoot.querySelector('.dialog');
+    expect(dialog.classList.contains('docked')).toBe(false);
+    expect(dialog.getAttribute('aria-modal')).toBe('true');
+    expect(el.shadowRoot.querySelector('.scrim')).not.toBeNull();
+  });
+
+  it('never docks a class whose modality is the point', async () => {
+    // An edit answered while the user was reading something else is the
+    // failure the scrim exists for; room beside the chat is no argument
+    // against it.
+    publishRpc();
+    const el = mount();
+    await settle(el);
+    await askDocked(el, writePayload());
+
+    expect(el.shadowRoot.querySelector('.dialog').classList.contains('docked'))
+      .toBe(false);
+    expect(el.shadowRoot.querySelector('.scrim')).not.toBeNull();
+  });
+
+  it('returns to the centre when the room goes away', async () => {
+    // Minimizing the panel, or dragging it out of the dock, takes the chat
+    // the question was placed beside with it.
+    publishRpc();
+    const el = mount();
+    await settle(el);
+    await askDocked(el);
+
+    el.dockLeft = null;
+    await settle(el);
+
+    expect(el.shadowRoot.querySelector('.dialog').classList.contains('docked'))
+      .toBe(false);
+    expect(el.shadowRoot.querySelector('.scrim')).not.toBeNull();
+    expect(inlineStyle(el)).not.toContain('left:');
+  });
+
+  it('does not deny because Escape was pressed somewhere else', async () => {
+    // Escape in the chat input clears it. Denying the agent's question for
+    // that would resolve a request the user never touched — and unlike the
+    // modal case, the input behind a docked question is genuinely live.
+    publishRpc();
+    const el = mount();
+    await settle(el);
+    await askDocked(el);
+
+    const event = key(el, 'Escape');
+    await settle(el);
+
+    expect(event.defaultPrevented).toBe(false);
+    expect(lastResolve()).toBeUndefined();
+    expect(el.current?.permission_id).toBe('perm_ask');
+  });
+
+  it('still denies on Escape from inside the panel', async () => {
+    // Escape is the way out of a question the user does not want to answer,
+    // and docking must not take it away.
+    publishRpc();
+    const el = mount();
+    await settle(el);
+    await askDocked(el);
+
+    const event = keyFromInside(el, 'Escape');
+    await settle(el);
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(lastResolve().args).toEqual([
+      'perm_ask', { action: 'deny', reason: ESCAPE_DENY_REASON },
+    ]);
+    expect(el.current).toBeNull();
+  });
+
+  it('leaves Tab alone, so the transcript stays reachable', async () => {
+    // The trap exists so a keyboard user cannot reach a UI the scrim calls
+    // unavailable. With no scrim there is nothing to be inconsistent with,
+    // and reading the transcript is how a keyboard user answers this.
+    //
+    // Asserted on the trap being consulted rather than on defaultPrevented:
+    // jsdom lays nothing out, so `_trapFocus` finds no visible focusable
+    // node and returns without preventing anything either way.
+    publishRpc();
+    const el = mount();
+    await settle(el);
+    await askDocked(el);
+    const trapped = vi.fn();
+    el._trapFocus = trapped;
+
+    keyFromInside(el, 'Tab');
+    expect(trapped).not.toHaveBeenCalled();
+
+    // Same keystroke, same request, no room beside the chat: trapped.
+    el.dockLeft = null;
+    await settle(el);
+    keyFromInside(el, 'Tab');
+    expect(trapped).toHaveBeenCalledTimes(1);
   });
 });
 
