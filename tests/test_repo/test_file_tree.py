@@ -457,6 +457,53 @@ class TestFileTree:
         names = {c["name"] for c in result["tree"]["children"]}
         assert weird_name in names
 
+    def test_get_file_tree_non_ascii_name_keeps_its_directory(
+        self, repo: Repo
+    ) -> None:
+        """A non-ASCII filename does not invent a quoted sibling directory.
+
+        ``git ls-files`` wraps any path holding a byte outside
+        printable ASCII in double quotes and octal-escapes the byte.
+        Read as a path and split on ``/``, the leading quote makes
+        ``"docs`` a second top-level directory alongside ``docs``,
+        carrying the whole branch beneath it — what the picker showed
+        for a PDF named with a Roman-numeral Ⅴ.
+        """
+        (repo.root / "docs").mkdir()
+        weird = "Arora \u2164 guide.md"
+        (repo.root / "docs" / weird).write_text("hi", encoding="utf-8")
+        (repo.root / "docs" / "plain.md").write_text("p", encoding="utf-8")
+        _run_git(repo.root, "add", "-A")
+        _run_git(repo.root, "commit", "-q", "-m", "init")
+
+        result = repo.get_file_tree()
+        top = {c["name"] for c in result["tree"]["children"]}
+        assert top == {"docs"}
+        docs = next(
+            c for c in result["tree"]["children"] if c["name"] == "docs"
+        )
+        assert {c["name"] for c in docs["children"]} == {weird, "plain.md"}
+        node = next(c for c in docs["children"] if c["name"] == weird)
+        assert node["path"] == f"docs/{weird}"
+        # The path the picker hands back must open on disk.
+        assert (repo.root / node["path"]).is_file()
+
+    def test_get_flat_file_list_includes_non_ascii_name(
+        self, repo: Repo
+    ) -> None:
+        """A non-ASCII filename survives the flat listing's on-disk filter.
+
+        The quoted form git emits without ``-z`` is not a path that
+        exists, so it failed ``Path.exists()`` and was dropped
+        silently — the doc-index and ``index_repo`` passes never saw
+        the file, the mirror of the tree's phantom directory.
+        """
+        weird = "Arora \u2164 guide.md"
+        (repo.root / weird).write_text("hi", encoding="utf-8")
+        _run_git(repo.root, "add", "-A")
+        _run_git(repo.root, "commit", "-q", "-m", "init")
+        assert repo.get_flat_file_list().splitlines() == [weird]
+
     def test_get_file_tree_classifies_nested_modified_file(
         self, repo: Repo
     ) -> None:

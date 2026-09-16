@@ -165,3 +165,60 @@ Note what the engine's own `history.py` does with the mirror-image case: a `tool
 never saw is dropped, *"rendered on its own: a card with no header reads as a rendering bug."* The rule
 was already written down. It was applied to results read off disk and not to blocks replayed from
 memory.
+
+---
+
+**A top-level directory in the picker that is not on disk.** Reported 2026-09-17 from a live session
+against `TLSSpeaker.ai`, with a screenshot of the tree and an `ls` of the repo root beside it: *"the
+picker shows a directory I can't see."* The tree carried a folder named `"electronics` — with a
+leading double quote — sorted immediately above the real `electronics`. ✅ *Fixed the same day in
+[`tree.py`](../src/aic_dc/repo/tree.py); it never needed triage, since the screenshot and the `ls`
+beside it were the whole diagnosis.*
+
+**It is git's porcelain path quoting, read as a path.** Git wraps any pathname containing bytes
+outside printable ASCII in double quotes and octal-escapes the offending bytes. `TLSSpeaker.ai` has
+exactly one such file, and `git ls-files` prints it as:
+
+    "electronics/FIR_board/FPGA_Tang_Primer_25k/Arora_V_docs/07_Chip_manual/EN/UG714-1.0.5E_Arora \342\205\244 25K FPGA Products Programming and Configuration Guide.pdf"
+
+The Roman numeral Ⅴ (U+2164) in the filename is the whole cause. `get_file_tree`
+([`tree.py`](../src/aic_dc/repo/tree.py)) builds its candidate set straight from that stdout with
+`.splitlines()` and then splits each path on `/`, so `parts[0]` is `"electronics`. It differs from
+`electronics` by one character, so it never resolves to the existing node — it gets its own top-level
+directory and hangs the entire quoted branch underneath, down to a leaf whose name still holds the
+escaped bytes and the closing quote.
+
+**The module already knows about this quoting.** `_unquote_porcelain_path` sits forty lines above the
+tree builder and is applied to `git status --porcelain` and `git diff --numstat` output. It was never
+applied to the two `ls-files` reads — and those are the ones that build the tree.
+
+**`get_flat_file_list` takes the same input and has the same gap, with the opposite symptom.** There
+the quoted string fails `(self._root / rel).exists()`, so the file is dropped silently: the picker
+invents a folder, while the doc-index and `index_repo` passes never see the file at all. One parse,
+two subsystems, and the two failures point in opposite directions — which is why neither was noticed
+from the other.
+
+**Fixed with `-z`, not the existing helper.** `git ls-files -z` emits raw NUL-separated pathnames with
+no quoting, which is the only form that survives the octal escapes.
+`_unquote_porcelain_path` would turn `\342\205\244` into a literal backslash-three-digit run — a name
+that neither matches the bytes on disk nor displays as Ⅴ, so the phantom folder would have become a
+phantom filename that fails on open. Its own docstring says as much: *"Paths with truly exotic bytes
+will display slightly mangled."* Both reads now go through one `_ls_files` helper carrying that
+reasoning.
+
+**Two tests, both shown to fail first.** `tests/test_repo/test_file_tree.py` had no case building a
+tree over a non-ASCII filename — every fixture wrote ASCII names with `encoding="utf-8"`, which looks
+like coverage and is not. The nearest thing, `test_get_file_tree_unquotes_paths_with_spaces`, passes
+either way: `git ls-files` does **not** quote spaces, only `git status --porcelain` does, so that test
+exercises the porcelain parser and never the tree read. The two new cases assert the phantom
+directory is absent and the flat list keeps the file; reverted against the old `tree.py` they
+reproduce both symptoms exactly. Verified against `TLSSpeaker.ai` itself: seven top-level
+directories, no `"electronics`, and the leaf's `path` opens on disk.
+
+**Still open — the status and numstat reads mangle the same file.** They go through
+`_unquote_porcelain_path`, which leaves the octal run literal, so a path holding a non-ASCII byte
+lands in `modified` / `untracked` / `deleted` in a form that no longer matches its own tree node and
+its badge cannot render. Not reached by this fix because the `-z` forms restructure rename and copy
+entries into separate NUL fields — `status -z` emits new-then-old as two fields with no ` -> `
+separator, and `numstat -z` splits the rename's source and destination out behind the counts. That is
+a parser change, not a flag change.
