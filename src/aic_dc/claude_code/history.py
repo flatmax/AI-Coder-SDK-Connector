@@ -460,6 +460,12 @@ async def load_subagent(
     No events are interleaved: ``events.jsonl`` records belong to the
     session, and attributing a commit to whichever subagent happened to be
     running would invent a fact.
+
+    The one read here that passes ``tail_may_be_running``: a background
+    subagent goes on writing its transcript after the turn that spawned it
+    has ended, so its last call may be genuinely in flight while this reads
+    it, and marking that one interrupted would be the mirror image of the
+    bug the flag exists for.
     """
     from claude_agent_sdk import (
         get_subagent_messages_from_store,
@@ -481,7 +487,9 @@ async def load_subagent(
         if subpath
         else []
     )
-    return render_messages(messages, entries, [], session_id=session_id)
+    return render_messages(
+        messages, entries, [], session_id=session_id, tail_may_be_running=True
+    )
 
 
 async def _subagent_subpath(
@@ -644,6 +652,7 @@ def render_messages(
     events: list[dict[str, Any]],
     *,
     session_id: str,
+    tail_may_be_running: bool = False,
 ) -> list[dict[str, Any]]:
     """Parsed messages plus raw entries plus our events → one message list.
 
@@ -655,6 +664,19 @@ def render_messages(
     Assistant entries are folded into turns, because that is what the panel
     renders: one card per turn carrying an ordered block list, not one card
     per API message. A turn runs from a human prompt to the next one.
+
+    ``tail_may_be_running`` exempts the *last* turn from
+    :meth:`_Turn._mark_interrupted`, and only :func:`load_subagent` sets it.
+    A transcript is a record of what has already happened, so a call in it
+    with no result is a call that never returned — except in the one
+    conversation whose tail is still being written while it is read: a
+    background subagent's, which outlives the turn that spawned it
+    (``specs5/3-engine/permissions.md`` § Waiting for an Answer). Nothing on
+    disk says whether that subagent is still going — the CLI's sidecar
+    carries a description and a tool-use id, not a status, and there is
+    deliberately no liveness registry here to ask — so the tail of one is
+    left as it was found rather than declared dead on a guess. Every earlier
+    turn is closed by the prompt after it and is marked whatever this says.
     """
     by_uuid = {
         entry["uuid"]: entry
@@ -701,7 +723,7 @@ def render_messages(
             turn.absorb(body, entry)
 
     if turn is not None:
-        rendered.append(turn.freeze())
+        rendered.append(turn.freeze(still_running=tail_may_be_running))
 
     return _interleave(rendered, events)
 
@@ -1233,6 +1255,45 @@ class _Turn:
                 "resolvedBy": "",
             }
 
+    def _mark_interrupted(self) -> None:
+        """Every call in this turn that never came back, saying so.
+
+        A card is opened ``pending`` and upgraded when its ``tool_result``
+        arrives. A card still pending when the turn freezes is one whose
+        result is never coming: the turn is over — that is what freezing it
+        means — and the store is a mirror of the CLI's own writes, so the
+        transcript holds every entry there will ever be for it. Left
+        ``pending``, the browser draws it as *Running*, with a pulsing dot
+        and a clock counting up from an invocation two days ago
+        (``STATUS_TITLE`` and ``RUNNING_STATUSES``, ``block-render.js``).
+
+        Asserted on the same evidence as ``terminal`` in
+        :meth:`_note_subagent`, and it is the same kind of statement: one
+        about the *turn* rather than about the call. Nothing restored from a
+        turn that ended may spin.
+
+        The permission dialog is what made it worth fixing. A pending
+        ``can_use_tool`` lives in ``PermissionBroker._pending`` and in an
+        ``asyncio.Future``, both of which die with the process, taking the
+        ``permission_id`` that was the only way to answer it — so no restart
+        can put that dialog back on screen, and the request the SDK was
+        waiting on died with the CLI that raised it. What the user was left
+        looking at was an ``AskUserQuestion`` card reporting *Running*, which
+        reads as "the question is still open, the dialog is coming". The
+        truth is the opposite, and it is actionable: that turn ended
+        unanswered, and the question only comes back if the agent is asked
+        for it again. *Found 2026-09-16, after a restart mid-dialog.*
+        """
+        for rendered in self._tools.values():
+            if rendered.get("result") is not None:
+                continue
+            # `done` too: it means "no more content will arrive for this
+            # block", and for this one nothing ever will. A block left
+            # unfinished in a settled message is the same lie in the field
+            # the renderer happens not to read today.
+            rendered["done"] = True
+            rendered["tool"] = {**rendered["tool"], "status": "interrupted"}
+
     def _note_time(self, entry: dict[str, Any]) -> None:
         timestamp = entry.get("timestamp")
         if not isinstance(timestamp, str):
@@ -1243,8 +1304,14 @@ class _Turn:
 
     # -- freezing -------------------------------------------------------
 
-    def freeze(self) -> dict[str, Any]:
+    def freeze(self, *, still_running: bool = False) -> dict[str, Any]:
         """The settled assistant message for this turn.
+
+        ``still_running`` says the turn may not be over after all, which is
+        true of exactly one thing a transcript can hold: the tail of a
+        background subagent's, read while the subagent is still writing it
+        (:func:`render_messages`). It suppresses
+        :meth:`_mark_interrupted` and nothing else.
 
         The usage map goes out as ``turn_model_usage``, not ``model_usage``:
         it is summed from *this turn's* transcript entries, whereas a live
@@ -1253,6 +1320,9 @@ class _Turn:
         renderer cannot read a cumulative figure as a per-turn one — which is
         precisely what a browsed turn and a live turn used to disagree about.
         """
+        if not still_running:
+            self._mark_interrupted()
+
         model_usage: dict[str, dict[str, Any]] = {}
         for model, usage in self._usage.values():
             bucket = model_usage.setdefault(model, {})

@@ -147,6 +147,23 @@ Rendering happens at read time, not write time:
 - Tool calls are summarised for display when the card is built — name, input summary, status, duration.
   A full `Read` result of a 2000-line file has no browse value, but summarising it *into storage* would
   be a second version of the truth; summarising it into a card is just rendering.
+- **A call with no result is reported as `interrupted`, not as pending** (2026-09-16). Pending means "in
+  flight", and a read turn is over: the process that made the call is gone, so a result that has not
+  arrived is never going to. Saying `pending` here made the browser draw a live card — pulsing dot,
+  elapsed clock ticking up from an invocation two days earlier — for a call nothing was running, which is
+  how a permission dialog lost to a restart came to look like it was still waiting for an answer. This is
+  the same reconstruction the turn footer does one bullet up: the absence of an entry is evidence, and
+  reporting it is more honest than leaving the browser to guess from a missing field. The status is set
+  as the turn is frozen, so a call answered later *in the same turn* is untouched — it has a result.
+- **The exception is the last turn of a subagent transcript, which may still be being written.**
+  `load_subagent` reads a conversation that can be live: a background subagent outlives the turn that
+  spawned it, and nothing on disk records whether it is still going — the sidecar carries description,
+  `tool_use_id` and agent type only. So that one reader spares its tail (`tail_may_be_running=True`), and
+  a genuinely in-flight call keeps its spinner. Every other read — a resumed session, the history browser
+  — freezes every turn, because the main session's own live turn never comes from the transcript at all:
+  a browser reconnecting mid-turn takes it from `active_streams` and ignores the rendered messages
+  entirely. Two readers, two different questions; the flag is on the reader that has to ask the harder
+  one.
 - Turn footers are **reconstructed**, not read. The transcript holds no result entry — verified against
   real CLI-written transcripts, and structurally guaranteed: the store is a mirror of the CLI's own
   transcript writes, so it receives exactly the entries the CLI writes and nothing else. So usage comes

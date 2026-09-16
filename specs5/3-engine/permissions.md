@@ -185,6 +185,28 @@ hides one that is.
 A request raised while nobody is connected starts out counting down, which is what the payload's
 `expires_at` and `localhost_available` say. Both are live for the life of the request.
 
+### A request cannot outlive the process that raised it
+
+A pending request is a `permission_id` in `_pending` and an `asyncio.Future` the `can_use_tool` callback
+is awaiting. Neither is on disk, and neither could be: the Future *is* the paused tool call, and the
+thing waiting on it is the CLI subprocess this process is holding open. Kill the server and all three go
+together — the request, the id an answer would have to name, and the agent that would have received the
+answer. **So a hard restart loses an open dialog, and no amount of state on our side would change that**
+(*found 2026-09-16, restarting mid-`AskUserQuestion`*). Every other way a request ends is a resolution
+the SDK is told about; this one is not an ending at all, it is the whole conversation stopping mid-word.
+
+Nor can a resume re-raise it. `can_use_tool` fires because the agent decided to call a tool, and a
+resumed session starts from the transcript, where the unanswered call is the last thing written and its
+result never arrived. The CLI's own interrupted-turn continuation
+(`CLAUDE_CODE_RESUME_INTERRUPTED_TURN`) is background-session respawn machinery and works by injecting a
+*prompt*, not by replaying a tool call — so even that path would ask the model to carry on, and the model
+would decide for itself whether to ask again.
+
+What is owed to the user is therefore honesty rather than recovery: the leftover tool card says the call
+never returned instead of pretending to still be waiting on it, and a lost question offers to have the
+agent ask again — as a prompt, in the composer, unsent. Both live in the browser; see
+[../5-webapp/chat.md § Status](../5-webapp/chat.md#status).
+
 ## Related Hooks
 
 `PermissionRequest` is the right hook for observing that a permission is being asked for; it carries
@@ -200,7 +222,10 @@ prompts-per-turn metric that tells us whether the tiering above is working (see
 - `allowed_tools` is never set by AIC⚡DC.
 - Every permission request resolves exactly once — by a localhost decision, by a stopped turn, by
   the end of its turn, by the end of the subagent that made it, by the no-localhost deadline, or by
-  session teardown — and the SDK always receives a result.
+  session teardown — and the SDK always receives a result. A killed process is not on that list and
+  is not an exception to it: the request, the id and the SDK waiting on it end in the same instant,
+  so there is no unresolved request afterwards, only a transcript that records a call which never
+  returned.
 - No dialog outlives the work it belongs to. Stop denies the turn's open requests before it
   interrupts, and a turn that ends any other way sweeps whatever is left — except a background
   subagent's request, which outlives the turn exactly as the subagent does, and is swept when that

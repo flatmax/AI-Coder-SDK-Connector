@@ -39,6 +39,7 @@ import {
   toolStatus,
 } from './blocks.js';
 import { revealHealth } from './health-banner.js';
+import { fillComposer } from './helpers.js';
 
 // ---------------------------------------------------------------
 // Terminal-reason badge
@@ -122,12 +123,16 @@ export function renderTerminalBadge(reason) {
 /**
  * Whether a block's body is showing.
  *
- * An explicit click always wins. Absent one, three kinds of card open
+ * An explicit click always wins. Absent one, four kinds of card open
  * themselves:
  *
  *   - A call that failed or was denied, driven by the status flag and never
  *     by string-sniffing the result text (specs5/5-webapp/chat.md § Card
  *     Anatomy).
+ *   - A call that never returned, for the same reason: the body is where it
+ *     says so in words, and where an interrupted `AskUserQuestion` offers the
+ *     only way back to a question the restart lost. A collapsed card leaves
+ *     that on a tooltip over a 0.5rem dot.
  *   - An edit-shaped call, because the diff *is* what the card is about: the
  *     header names the file and nothing else, so a collapsed `Edit` row hides
  *     the only part a reader is scanning for. An earlier draft kept these
@@ -146,7 +151,9 @@ export function blockExpanded(panel, block) {
   if (typeof explicit === 'boolean') return explicit;
   if (block?.kind !== 'tool') return false;
   const status = toolStatus(block);
-  if (status === 'error' || status === 'denied') return true;
+  if (status === 'error' || status === 'denied' || status === 'interrupted') {
+    return true;
+  }
   if (status === 'awaiting') return false;
   return diffSegments(block).length > 0;
 }
@@ -793,6 +800,7 @@ const STATUS_GLYPH = {
   ok: '',
   error: '',
   denied: '',
+  interrupted: '',
 };
 
 const STATUS_TITLE = {
@@ -801,6 +809,7 @@ const STATUS_TITLE = {
   ok: 'Finished',
   error: 'Failed',
   denied: 'You denied this call',
+  interrupted: 'Never finished — the turn ended before this call returned',
 };
 
 /**
@@ -810,6 +819,10 @@ const STATUS_TITLE = {
  * `denied` is not one of them. A denied call never ran, so time since it was
  * proposed measures how long the user took to say no — a fact about the
  * reader, rendered as though it were a fact about the tool.
+ *
+ * Nor is `interrupted`, and that is the whole point of the status. The clock
+ * on a card restored from a killed turn counted up from an invocation two days
+ * ago and claimed to be measuring something.
  */
 const RUNNING_STATUSES = new Set(['pending', 'awaiting']);
 
@@ -926,7 +939,9 @@ export function renderToolCard(panel, block) {
         </span>
         <span class="tool-summary">${toolInputSummary(card.input)}</span>
       </button>
-      ${expanded ? renderToolBody(block, card, result, segments) : nothing}
+      ${expanded
+        ? renderToolBody(panel, block, status, card, result, segments)
+        : nothing}
       ${files.length || duration
         ? html`
             <div class="tool-footer">
@@ -953,6 +968,64 @@ const MACHINE_DENIAL_LABELS = {
 };
 
 /**
+ * What an interrupted call's body says, and what the user can do about it.
+ *
+ * The note goes *above* the input rather than instead of it. Unlike a denial,
+ * the input here is not a proposal that was refused — it is the whole record of
+ * what the agent was doing when the turn died, and for a lost question it *is*
+ * the question. So the words explain, and the JSON below them is the evidence.
+ *
+ * The `AskUserQuestion` case gets a button because it is the one interrupted
+ * call the user can still do something about. Nothing can answer the original
+ * request — it lived in the engine process that is gone, along with the
+ * `permission_id` that addressed it — but the agent can be asked to raise the
+ * question again, and the button is that sentence, typed into the composer and
+ * left there. It is not sent for them, and it is not a re-run of the call: it
+ * is a prompt, so the agent's own tool loop decides whether to ask again, which
+ * is what keeps this on the right side of specs5/5-webapp/chat.md § What Tool
+ * Cards Deliberately Do Not Do.
+ *
+ * Every other interrupted tool gets the note alone. A `Bash` or an `Edit` that
+ * never returned may or may not have run before the process died, and a button
+ * offering to re-issue it would be the panel guessing at that.
+ */
+const RE_ASK_PROMPT =
+  'The question you asked me was never answered — the dialog was lost when '
+  + 'the session restarted. Please ask it again.';
+
+function renderInterruptedNote(panel, card) {
+  const isQuestion = card?.name === 'AskUserQuestion';
+  return html`
+    <div class="tool-interrupted">
+      <div class="tool-interrupted-label">
+        ${isQuestion
+          ? 'This question was never answered.'
+          : 'This call never returned.'}
+      </div>
+      <div class="tool-interrupted-reason">
+        ${isQuestion
+          ? html`The dialog was open when the session ended. A permission
+              request lives only in the engine process that raised it, so a
+              restart takes it with it — there is nothing left here to answer.`
+          : html`The turn ended while the call was still open — a stopped
+              session, or a restarted server — so no result was ever
+              recorded.`}
+      </div>
+      ${isQuestion
+        ? html`<button
+            class="tool-reask"
+            title="Puts a request for the question into the prompt box. Nothing is sent until you send it."
+            @click=${(event) => {
+              event.stopPropagation();
+              fillComposer(panel, RE_ASK_PROMPT);
+            }}
+          >Ask me again</button>`
+        : nothing}
+    </div>
+  `;
+}
+
+/**
  * The card body: the denial reason if there was one, otherwise the input and
  * then the result.
  *
@@ -960,7 +1033,7 @@ const MACHINE_DENIAL_LABELS = {
  * ran, so its input is a proposal rather than a record, and the reason the
  * user gave is the thing worth reading — the agent saw it too and acted on it.
  */
-function renderToolBody(block, card, result, segments) {
+function renderToolBody(panel, block, status, card, result, segments) {
   if (block.denial) {
     const machine = MACHINE_DENIAL_LABELS[block.denial.action];
     return html`
@@ -979,6 +1052,7 @@ function renderToolBody(block, card, result, segments) {
   }
   return html`
     <div class="tool-body">
+      ${status === 'interrupted' ? renderInterruptedNote(panel, card) : nothing}
       ${segments.length
         ? segments.map((segment) => html`${unsafeHTML(renderEditBody(segment))}`)
         : renderToolInput(card)}

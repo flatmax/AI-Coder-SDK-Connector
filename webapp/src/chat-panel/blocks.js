@@ -323,6 +323,11 @@ export function applyPermissionOutcome(turn, payload) {
  * Precedence is deliberate: a denial outranks whatever the card's own status
  * field says, because a denied call also produces an error-shaped tool result
  * and "error" would hide the fact that the user caused it.
+ *
+ * `interrupted` arrives only from a transcript read, on a call the engine can
+ * prove never returned (`history.py` § _mark_interrupted), and it is the one
+ * status this function cannot infer for itself: live, a call with no result
+ * yet is running, and that is exactly what `pending` says.
  */
 export function toolStatus(block) {
   if (!block || block.kind !== 'tool') return 'pending';
@@ -331,6 +336,7 @@ export function toolStatus(block) {
   const status = block.result?.status || block.tool?.status;
   if (status === 'error') return 'error';
   if (status === 'ok') return 'ok';
+  if (status === 'interrupted') return 'interrupted';
   return 'pending';
 }
 

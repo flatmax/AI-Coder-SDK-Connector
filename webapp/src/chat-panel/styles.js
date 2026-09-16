@@ -2325,6 +2325,13 @@ export const STYLES = css`
   .tool-card.tool-status-denied {
     border-color: rgba(210, 153, 34, 0.4);
   }
+  /* Grey, and the same grey as the dot below: a call that
+   * never returned is not a failure — nothing reported one —
+   * and dressing it in the error red would say the tool said
+   * no when what happened is that nobody was left to listen. */
+  .tool-card.tool-status-interrupted {
+    border-color: rgba(139, 148, 158, 0.45);
+  }
   /* Two columns: a metadata rail, then the summary. The rail
    * holds everything that says what the call is — caret,
    * status dot, server chip, tool name, invocation time, the
@@ -2438,6 +2445,16 @@ export const STYLES = css`
   }
   .tool-dot.status-denied {
     background: #d29922;
+  }
+  /* Hollow, and it is the hollowness that carries the meaning:
+   * every other dot is a filled circle reporting something that
+   * happened to the call, and this one reports that nothing
+   * did. It does not pulse — the pulse is the panel's one
+   * "still going" signal, and it was a card wearing it two days
+   * after its turn died that this status exists to correct. */
+  .tool-dot.status-interrupted {
+    background: transparent;
+    box-shadow: inset 0 0 0 1px #8b949e;
   }
   @keyframes tool-dot-pulse {
     0%, 100% { opacity: 0.35; }
@@ -2681,6 +2698,46 @@ export const STYLES = css`
     line-height: 1.45;
     color: var(--text-primary, #c9d1d9);
     word-break: break-word;
+  }
+  /* Shaped like the denial note above and tinted like nothing:
+   * the two are the same kind of sentence — this call did not
+   * produce a result, and here is why — and a reader who has
+   * learnt one should not have to learn the other. No accent
+   * colour, because no colour on this palette means "the
+   * process is gone". */
+  .tool-interrupted {
+    padding: 0.4rem 0.5rem;
+    background: rgba(139, 148, 158, 0.07);
+  }
+  .tool-interrupted-label {
+    font-size: 0.7rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: #8b949e;
+    margin-bottom: 0.2rem;
+  }
+  .tool-interrupted-reason {
+    font-size: 0.8125rem;
+    line-height: 1.45;
+    color: var(--text-primary, #c9d1d9);
+    word-break: break-word;
+  }
+  /* Deliberately quiet. It writes the prompt box and sends
+   * nothing, so it must not look like the send button. */
+  .tool-reask {
+    margin-top: 0.4rem;
+    padding: 0.2rem 0.6rem;
+    background: rgba(240, 246, 252, 0.06);
+    border: 1px solid rgba(240, 246, 252, 0.15);
+    border-radius: 4px;
+    color: var(--text-primary, #c9d1d9);
+    font-family: inherit;
+    font-size: 0.75rem;
+    cursor: pointer;
+  }
+  .tool-reask:hover {
+    background: rgba(240, 246, 252, 0.12);
   }
   .tool-footer {
     display: flex;

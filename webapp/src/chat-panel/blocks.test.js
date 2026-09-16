@@ -653,6 +653,34 @@ describe('toolStatus', () => {
     expect(toolStatus(turn.blocks[0])).toBe('error');
   });
 
+  it('carries the engine’s interrupted through, spinner and all', () => {
+    // The one status this function cannot infer: live, a call with no result
+    // is running. Only a transcript read can prove it never returned
+    // (`history.py` § _mark_interrupted), and reporting it as `pending` is
+    // what left a killed turn's card claiming to be running for two days.
+    const turn = makeTurnBlocks();
+    applyToolUse(turn, {
+      tool_use_id: 'toolu_1',
+      name: 'AskUserQuestion',
+      status: 'interrupted',
+    });
+    expect(toolStatus(turn.blocks[0])).toBe('interrupted');
+  });
+
+  it('a result still outranks interrupted, whichever arrives last', () => {
+    // Belt and braces: the engine only marks a card with no result, so the
+    // pair should never coexist — and if they ever do, the result is the
+    // measurement and the mark is the inference.
+    const turn = makeTurnBlocks();
+    applyToolUse(turn, {
+      tool_use_id: 'toolu_1',
+      name: 'Bash',
+      status: 'interrupted',
+    });
+    applyToolResult(turn, { tool_use_id: 'toolu_1', status: 'ok' });
+    expect(toolStatus(turn.blocks[0])).toBe('ok');
+  });
+
   it('an unrecognised status is pending, not an error', () => {
     const turn = makeTurnBlocks();
     applyToolUse(turn, {

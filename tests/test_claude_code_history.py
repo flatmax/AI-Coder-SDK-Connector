@@ -312,17 +312,105 @@ class TestToolBlocks:
         assert block["tool"]["input"] == {"file_path": "/a.py"}
         assert "input_summary" not in block["tool"]
 
-    def test_a_call_with_no_result_stays_pending(self):
-        """A turn the server was killed in the middle of. The card must show
-        as unfinished rather than as having quietly succeeded."""
+    def test_a_call_with_no_result_is_interrupted_not_running(self):
+        """A turn the server was killed in the middle of.
+
+        Not ``pending``, which the browser draws as *Running* with a pulsing
+        dot and a clock counting up: the turn is over, the store holds every
+        entry the CLI wrote for it, and no result is coming. Not ``ok``
+        either — nothing said it succeeded.
+        """
         rendered = render(
             human("u1", "read"),
             assistant("a1", {"type": "tool_use", "id": "t1", "name": "Read", "input": {}}),
         )
         (block,) = rendered[1]["blocks"]
-        assert block["done"] is False
         assert block["result"] is None
+        assert block["tool"]["status"] == "interrupted"
+        # Nothing more will arrive for this block either, and a settled
+        # message carrying an unfinished one is the same claim in the field
+        # the renderer happens not to read.
+        assert block["done"] is True
+
+    def test_an_unanswered_question_keeps_the_question_on_the_card(self):
+        """The card the restart-mid-dialog case leaves behind.
+
+        The pending ``can_use_tool`` died with the process, so the dialog
+        cannot come back — but the questions were in the call's input, which
+        is on disk, so the card can still say what was asked. That is what
+        the browser's re-ask affordance is built on.
+        """
+        questions = [{"question": "Ship it?", "header": "Ship", "options": []}]
+        rendered = render(
+            human("u1", "ask me"),
+            assistant(
+                "a1",
+                {
+                    "type": "tool_use",
+                    "id": "t1",
+                    "name": "AskUserQuestion",
+                    "input": {"questions": questions},
+                },
+            ),
+        )
+        (block,) = rendered[1]["blocks"]
+        assert block["tool"]["status"] == "interrupted"
+        assert block["tool"]["input"]["questions"] == questions
+
+    def test_a_call_answered_later_in_the_turn_is_untouched(self):
+        """The mark is for calls with no result, not for every call in a
+        turn that also had one."""
+        rendered = render(
+            human("u1", "read two"),
+            assistant("a1", {"type": "tool_use", "id": "t1", "name": "Read", "input": {}}),
+            assistant("a2", {"type": "tool_use", "id": "t2", "name": "Read", "input": {}}),
+            tool_reply("u2", "t2", "contents"),
+        )
+        statuses = {
+            block["tool"]["tool_use_id"]: block["tool"]["status"]
+            for block in rendered[1]["blocks"]
+        }
+        assert statuses == {"t1": "interrupted", "t2": "ok"}
+
+    def test_a_conversation_that_may_still_be_running_keeps_its_tail_pending(self):
+        """A background subagent's transcript, read while it writes it.
+
+        Its last call may be genuinely in flight — nothing on disk says
+        whether the subagent is still going — so the tail is left as found.
+        Only :func:`load_subagent` asks for this.
+        """
+        pairs = (
+            human("u1", "read"),
+            assistant("a1", {"type": "tool_use", "id": "t1", "name": "Read", "input": {}}),
+        )
+        rendered = render_messages(
+            [pair[0] for pair in pairs],
+            [pair[1] for pair in pairs],
+            [],
+            session_id=SESSION,
+            tail_may_be_running=True,
+        )
+        (block,) = rendered[1]["blocks"]
         assert block["tool"]["status"] == "pending"
+
+    def test_only_the_tail_is_spared_when_the_conversation_may_be_running(self):
+        """An earlier turn is closed by the prompt after it, whoever is
+        reading and whatever they are reading it for."""
+        pairs = (
+            human("u1", "read"),
+            assistant("a1", {"type": "tool_use", "id": "t1", "name": "Read", "input": {}}),
+            human("u2", "never mind"),
+            assistant("a2", {"type": "tool_use", "id": "t2", "name": "Read", "input": {}}),
+        )
+        rendered = render_messages(
+            [pair[0] for pair in pairs],
+            [pair[1] for pair in pairs],
+            [],
+            session_id=SESSION,
+            tail_may_be_running=True,
+        )
+        assert rendered[1]["blocks"][0]["tool"]["status"] == "interrupted"
+        assert rendered[3]["blocks"][0]["tool"]["status"] == "pending"
 
     def test_an_error_result_is_marked_error(self):
         rendered = render(
@@ -386,12 +474,14 @@ class TestToolBlocks:
         )
         assert rendered[1]["blocks"][0]["tool"]["invoked_at"] == "2026-08-16T12:00:01.000Z"
 
-    def test_a_replayed_card_still_pending_carries_its_time(self):
+    def test_a_replayed_card_that_never_returned_carries_its_time(self):
         """The case the chip is for, read off disk.
 
         A call with no reply is one that hung, was killed, or whose entry was
         lost. It has no ``duration_ms`` and never will, so the invocation time
-        is the only thing on it that says anything about time at all.
+        is the only thing on it that says anything about time at all — and
+        with the elapsed half gone (it is not a ``RUNNING_STATUS``), the chip
+        is the only thing that dates it.
         """
         rendered = render(
             human("u1", "read"),

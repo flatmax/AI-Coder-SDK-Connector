@@ -43,6 +43,7 @@ import {
 import {
   AUTO_SCROLL_DISENGAGE_PX,
   AUTO_SCROLL_TOLERANCE_PX,
+  fillComposer,
   generateRequestId,
 } from './helpers.js';
 import { resetTurnBlocks } from './blocks.js';
@@ -1225,22 +1226,7 @@ export async function copyMessageText(panel, msg) {
  * any selection. Focuses the textarea after.
  */
 export function pasteMessageToPrompt(panel, msg) {
-  const text = extractMessageText(msg);
-  if (!text) return;
-  const ta = panel.shadowRoot?.querySelector('.input-textarea');
-  if (!ta) {
-    panel._input = `${panel._input}${text}`;
-    return;
-  }
-  const before = ta.value.slice(0, ta.selectionStart);
-  const after = ta.value.slice(ta.selectionEnd);
-  const next = `${before}${text}${after}`;
-  panel._input = next;
-  ta.value = next;
-  const cursor = before.length + text.length;
-  ta.setSelectionRange(cursor, cursor);
-  ta.focus();
-  ta.dispatchEvent(new Event('input', { bubbles: true }));
+  fillComposer(panel, extractMessageText(msg));
 }
 
 // ---------------------------------------------------------------

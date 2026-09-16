@@ -1292,6 +1292,93 @@ describe('renderToolCard', () => {
     expect(host.querySelector('.tool-result-body')).toBeNull();
   });
 
+  describe('a call that never returned', () => {
+    // The engine says so — `interrupted` is the only status the browser
+    // cannot infer, because live a call with no result is simply running.
+    const interrupted = (over = {}) => {
+      const { tool = {}, ...rest } = over;
+      return toolBlock({ tool: { status: 'interrupted', ...tool }, ...rest });
+    };
+
+    it('says it never finished instead of saying it is running', () => {
+      const host = draw(renderToolCard(stubPanel(), interrupted()));
+      const card = host.querySelector('.tool-card');
+      expect(card.classList.contains('tool-status-interrupted')).toBe(true);
+      expect(card.classList.contains('tool-status-pending')).toBe(false);
+      expect(card.querySelector('.tool-dot').getAttribute('title'))
+        .toBe('Never finished — the turn ended before this call returned');
+    });
+
+    it('runs no clock on it, whatever the ticker is doing', () => {
+      // The defect this status exists to fix: a card restored from a killed
+      // turn counted up from an invocation two days ago.
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date(2026, 7, 29, 9, 0, 0));
+      const host = draw(renderToolCard(
+        stubPanel({ _streamTimerInterval: 7 }),
+        interrupted({ tool: { invoked_at: new Date(2026, 7, 27, 14, 32, 7).toISOString() } }),
+      ));
+      expect(host.querySelector('.tool-time')).not.toBeNull();
+      expect(host.querySelector('.tool-elapsed')).toBeNull();
+    });
+
+    it('opens itself and explains, keeping the input as the evidence', () => {
+      const host = draw(renderToolCard(stubPanel(), interrupted()));
+      expect(host.querySelector('.tool-header').getAttribute('aria-expanded')).toBe('true');
+      expect(text(host.querySelector('.tool-interrupted-label')))
+        .toBe('This call never returned.');
+      expect(text(host.querySelector('.tool-interrupted-reason')))
+        .toMatch(/turn ended while the call was still open/i);
+      // Above the input, not instead of it: unlike a denial this is not a
+      // proposal that was refused, it is the record of what was in flight.
+      expect(host.querySelector('.tool-input').textContent)
+        .toContain('"command": "ls -la"');
+    });
+
+    it('offers no way to re-run an ordinary tool', () => {
+      // A Bash that never returned may or may not have run. A button here
+      // would be the panel guessing at that.
+      const host = draw(renderToolCard(stubPanel(), interrupted()));
+      expect(host.querySelector('.tool-reask')).toBeNull();
+    });
+
+    it('says a lost question cannot be answered here, and why', () => {
+      const host = draw(renderToolCard(stubPanel(), interrupted({
+        tool: { name: 'AskUserQuestion', input: { questions: [{ question: 'Ship it?' }] } },
+      })));
+      expect(text(host.querySelector('.tool-interrupted-label')))
+        .toBe('This question was never answered.');
+      expect(text(host.querySelector('.tool-interrupted-reason')))
+        .toMatch(/lives only in the engine process that raised it/i);
+      // The question itself survives on the card, because the call's input is
+      // what the transcript kept.
+      expect(host.querySelector('.tool-input').textContent).toContain('Ship it?');
+    });
+
+    it('puts a re-ask in the composer and sends nothing', () => {
+      const panel = stubPanel({ _input: '' });
+      const host = draw(renderToolCard(panel, interrupted({
+        tool: { name: 'AskUserQuestion', input: { questions: [] } },
+      })));
+      const button = host.querySelector('.tool-reask');
+      expect(button.getAttribute('title')).toMatch(/nothing is sent until you send it/i);
+      button.click();
+      expect(panel._input).toMatch(/never answered/i);
+      expect(panel._input).toMatch(/ask it again/i);
+    });
+
+    it('does not toggle the card when the re-ask is clicked', () => {
+      // The button is inside the header's sibling body, and a click that
+      // bubbled to the card's toggle would shut the note it came from.
+      const panel = stubPanel({ _input: '' });
+      const block = interrupted({ tool: { name: 'AskUserQuestion', input: {} } });
+      const host = draw(renderToolCard(panel, block));
+      host.querySelector('.tool-reask').click();
+      render(renderToolCard(panel, block), host);
+      expect(host.querySelector('.tool-body')).not.toBeNull();
+    });
+  });
+
   it('footers the duration and the files it changed', () => {
     const host = draw(renderToolCard(stubPanel(), toolBlock({
       tool: { name: 'Edit', input: { file_path: 'src/a.js' } },
