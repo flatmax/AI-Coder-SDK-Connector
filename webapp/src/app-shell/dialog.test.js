@@ -581,6 +581,55 @@ describe('AppShell dialog UI', () => {
       expect(questionDockLeft(shell)).toBe(401);
     });
 
+    it('takes the floor from the request, not from a constant', async () => {
+      // The floor buys the compare grid, and most questions do not draw one.
+      // As one number it made the dock unreachable: 720 plus gutters wants a
+      // viewport near 1480 before even the default half-width panel leaves
+      // room. The dialog answers which floor applies; the shell asks.
+      const shell = mountShell();
+      await shell.updateComplete;
+      // 623px of room — short for a comparison, ample for a list of labels.
+      stubGeometry(shell, { left: 0, width: 401, viewport: 1024 });
+      const dialog = shell.shadowRoot.querySelector('aic-permission-dialog');
+
+      Object.defineProperty(dialog, 'dockMinWidth', {
+        value: 720, configurable: true,
+      });
+      expect(questionDockLeft(shell)).toBe(null);
+
+      Object.defineProperty(dialog, 'dockMinWidth', {
+        value: 420, configurable: true,
+      });
+      expect(questionDockLeft(shell)).toBe(401);
+    });
+
+    it('re-measures when the request says it needs a different width',
+      async () => {
+        // None of the shell's own triggers — resize, minimize, undock, tab
+        // switch — fire when a request arrives. Without this notification the
+        // second question in a queue inherits the first one's verdict and
+        // stays modal in a region it fits.
+        const shell = mountShell();
+        await shell.updateComplete;
+        stubGeometry(shell, { left: 0, width: 401, viewport: 1024 });
+        const dialog = shell.shadowRoot.querySelector('aic-permission-dialog');
+        Object.defineProperty(dialog, 'dockMinWidth', {
+          value: 720, configurable: true,
+        });
+        syncQuestionDock(shell);
+        expect(shell._questionDockLeft).toBe(null);
+
+        // A plain question replaces the compare one. Geometry has not moved.
+        Object.defineProperty(dialog, 'dockMinWidth', {
+          value: 420, configurable: true,
+        });
+        dialog.dispatchEvent(new CustomEvent('dock-requirement-changed', {
+          bubbles: true, composed: true,
+        }));
+        await shell.updateComplete;
+        expect(shell._questionDockLeft).toBe(401);
+      });
+
     it('publishes the dock to state, and only on a change', async () => {
       const shell = mountShell();
       await shell.updateComplete;

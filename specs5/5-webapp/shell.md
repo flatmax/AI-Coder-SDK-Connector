@@ -121,7 +121,8 @@ left over is wide enough, and null otherwise — which the dialog reads as "no r
 - **The same measurement as the viewer inset**, from one function, so the strip the viewer reserves and the region a question fills cannot drift apart by a pixel or disagree about whether the panel is docked at all
 - **Re-measured on the same triggers**: panel resize, minimize, undock, tab switch, window resize. It is taken *before* the inset is written, because the inset writes a custom property on the background and reading a rect after that write is what turns two cheap reads into a forced reflow on the resize-drag path
 - **Null on a non-`files` tab**, even though the panel's geometry is unchanged. The dock exists to keep the transcript readable, and behind the Context tab there is no transcript to keep
-- **Null below a floor** equal to the dialog's own compare-layout breakpoint, imported from the dialog rather than restated here so the two cannot disagree about how narrow is too narrow
+- **Null below a floor the *dialog* supplies**, read off its `dockMinWidth` rather than restated here. Which floor applies depends on the layout the pending request will draw — 720px for a question comparing examples, 420px for a plain list — and that is the dialog's fact, not the panel's. Restating it here would be a copy that can disagree with what rendered
+- **Also re-measured when the dialog says the floor moved.** The triggers above are all ways the shell's *own* geometry changes, and none of them fire when a request arrives. That was safe while the floor was a constant; now the second question in a queue would inherit the first one's verdict, so the dialog emits `dock-requirement-changed` and the shell measures again. The inset is deliberately untouched on that path — the panel's right edge has not moved, only whether a question fits beside it
 
 ## Viewer Background
 
@@ -457,6 +458,15 @@ A docked `interact` question is the exception, because it is not modal and the U
 live — suppressing the shortcuts would be claiming otherwise. Using one that takes the chat off screen
 (Alt+2, Alt+3, Alt+5) or the panel out of the dock (Alt+M) takes the dock's precondition with it, so the
 question re-centres as a modal rather than hanging beside a tab it was not placed against.
+
+**Alt+M is taken over by a question that could not be docked**, which is the one shortcut here the shell
+does not get the final say on. The dialog collapses to its header on that key
+([permission-dialog.md § Collapsing the modal fallback](permission-dialog.md#collapsing-the-modal-fallback)),
+and it cannot be a binding in the table above: the suppression rule turns every Alt shortcut off while the
+question is modal, which is exactly when collapsing it is the thing the user wants. The dialog's handler
+runs capture-phase on `window`, ahead of this one on `document`, and consumes the keystroke — which is also
+what stops Alt+M minimizing the shell's panel *as well* once the collapse has made the question non-modal.
+Requests with nothing to park never reach that branch, so Alt+M is the panel's as usual.
 
 ### Ctrl+Shift+F Selection Capture
 

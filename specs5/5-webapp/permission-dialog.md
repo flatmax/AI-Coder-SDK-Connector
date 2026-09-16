@@ -52,7 +52,35 @@ the question falls back to the centred modal — when:
 
 - the panel is **floating** (dragged out of the dock) or **minimized**. There is no left-docked chat to sit beside, and a question pinned to the right of nothing is a modal that lost its scrim.
 - the **chat is not on screen**: the Settings, Context or SDK-surface tab is showing, so the transcript the docking exists to expose is not there either.
-- the region left over is **narrower than the compare layout's own breakpoint**. A docked question that had to stack its options above its examples would break § `interact`'s side-by-side requirement to preserve a transcript, which is trading one unreadable thing for another.
+- the region left over is **narrower than the floor this request needs** — see below.
+
+The floor is the **pending request's**, not one number for all of them. It was a single 720px, the
+`.question-compare` breakpoint, and that made the dock unreachable in practice rather than merely strict:
+720 plus gutters needs a viewport around 1480 before even the *default* half-width panel leaves room, so
+on any panel the user had widened, no question ever docked and the feature was invisible. What 720 buys
+is the options-beside-example grid, and most questions do not draw one. So:
+
+- **720px** when a question renders the compare grid. Below it the options and the example they are being compared against stack, and § `interact` requires both on screen at once — trading one unreadable thing for another.
+- **420px** otherwise. A list of labels and descriptions is perfectly legible in half the width, and holding it to the wider floor was enforcing a layout it never uses.
+
+The test is the one the grid is actually rendered on — `!multi_select && hasPreviews` — not `hasPreviews`
+alone. The compare pane is single-select only, so a multi-select question carrying previews renders as a
+plain list; giving it the wide floor would reserve room for a layout it never draws, which is the same
+mistake as the single constant in miniature.
+
+**The dialog answers which floor applies and the shell asks**, for the same reason it asks about modality:
+which layout a request will draw is a fact about that request, and a copy of the rule in the shell is a
+copy that can disagree with what rendered. With nothing pending the answer is the wide floor — the shell
+measures on its own schedule, including before any request exists, and the two ways of being wrong are not
+symmetrical. Too wide costs a centred modal the user can collapse; too narrow docks a comparison into a
+region that stacks it.
+
+Because the floor is no longer constant, the shell's cached verdict can go stale in a way it could not
+before: **the dialog announces when the width it needs changes** and the shell re-measures. None of the
+shell's own triggers fire when a request arrives, so without this the second question in a queue would
+inherit the first one's verdict. The announcement comes from the dialog rather than the shell listening
+for `permission-request` itself, because the answer depends on the dialog's queue having already absorbed
+the payload — two window listeners racing to be second is not an ordering to rely on.
 
 The placement is live rather than frozen at arrival. Every input to it is something the user just did
 with their own hands — resized the panel, minimized it, switched tabs — so a placement that follows them
@@ -65,6 +93,51 @@ is a bug:
 - **Escape only denies from inside the panel** while docked. Escape in the chat input clears the input, and that input is genuinely live behind a non-modal question, so a window-wide binding would deny the agent's question because the user cleared a half-typed message — resolving a request they never touched. From inside the panel Escape still denies, with the same reason ([§ Escape and the scrim](#escape-and-the-scrim)).
 - **Tab is not trapped** while docked. The trap exists so a keyboard user cannot reach a UI the scrim calls unavailable; with no scrim there is nothing to be inconsistent with, and reaching the transcript is how a keyboard user reads what the question is about.
 - **The shell's global shortcuts stay live** while docked, and are inert otherwise. The dialog answers whether it is currently modal, and the shell asks rather than re-deriving it ([shell.md § Global Keyboard Shortcuts](shell.md#global-keyboard-shortcuts)). Modality has two inputs here — the tool class and whether the shell found room — so a second copy of the rule elsewhere is a copy that can disagree with the scrim on screen. The element that draws the scrim owns the answer.
+
+### Collapsing the modal fallback
+
+The fallback is not a neutral outcome. The three conditions above are met often — the width floor alone
+rules out any panel the user has dragged past about half the viewport — and when they are, the question
+lands back on the centred modal, over the transcript it was written about. The user is returned to the
+problem the dock exists to solve, with no way out but answering from memory or denying a question they
+do want to answer.
+
+So a question that **could not be docked** carries a collapse control in its header: `▾` parks it,
+leaving the header alone at the top of the screen, and `▴` brings it back. Same glyph pair and same
+direction as the chat panel's own minimize ([shell.md § Dialog Container](shell.md#dialog-container)) —
+a second collapse gesture in the same app pointing the other way would be a worse control than none.
+
+**Alt+M** does it too, taking the shortcut over from the shell's panel minimize while a collapsible
+question is on screen. It has to be implemented in the dialog rather than added to the shell's global
+table: the shell makes every Alt binding inert while a modal permission dialog is open, which is exactly
+the state the shortcut needs to act in, so a binding living there could never be the one that collapses
+the question. The dialog's handler is on `window` in the capture phase and the shell's is on `document`
+bubbling, so consuming the event is also what stops Alt+M collapsing the shell's panel *as well* once the
+question has gone non-modal. On a request with nothing to park the key is left alone entirely, not
+swallowed — declining a shortcut and then eating it is how a suppressed one becomes indistinguishable
+from a broken one.
+
+Collapsing is presentation only, and the three things it must not do are the ones that make it safe:
+
+- **It resolves nothing.** No decision is sent, the request stays at the head of the queue, and the countdown is untouched — including the live-region milestones, so a parked request cannot expire silently ([§ Accessibility](#accessibility)). This is invariant 1: the only exits are a decision, a broadcast, or expiry, and collapsing is none of them.
+- **It removes the decision controls from the DOM**, rather than hiding them. A `display: none` Allow button is still Tab-reachable and still activates, which is precisely the click-through [§ Anti-Click-Through](#anti-click-through) is about. Nothing can be approved from a collapsed question; expanding it is the only route to a decision. The half-typed answers survive the round trip, because they live on the element rather than in the markup.
+- **The next request opens.** The collapse is per-request state, cleared when the visible request changes. A queue that inherited it would show the next question — or the next `write` — as a one-line bar the user has no reason to look at, which reaches "resolved silently" by another road.
+
+Collapsing drops the scrim, and so takes the same three behaviours as docking: Escape only denies from
+inside the panel, Tab is not trapped, and the shell's shortcuts stay live. That is what the control is
+*for* — a collapse that left the chat inert would be the app agreeing to uncover the transcript in
+appearance only. The dialog therefore reports itself non-modal while collapsed, from the same single
+owner as before.
+
+The control is offered on **`interact` only, and only in the fallback**. A docked question has nothing
+to collapse away from; it is already beside the transcript. Every other class keeps its modal: collapsing
+could not approve one either, but dropping the scrim off a pending destructive call is a change to the
+security argument at the top of this section rather than a way of reading the chat, and it is not one
+this control is making.
+
+Because `dockLeft` is live, so is the interaction between the two: collapse the modal, widen the panel,
+and the question **docks** — the collapse has been granted by better means, and honouring the flag as
+well would hide the panel the user can now see. Narrow it again and the collapse is still theirs.
 
 ## Anatomy
 

@@ -28,6 +28,21 @@ import {
 } from '../permission-dialog/constants.js';
 
 /**
+ * The narrowest region the pending question could be docked into.
+ *
+ * Asked of the dialog, which is the only thing that knows what the request's
+ * body will lay out as. Falls back to the wide floor when the element has not
+ * upgraded yet or there is nothing pending — the conservative direction, since
+ * being wrong that way costs a centred modal the user can collapse, and being
+ * wrong the other way docks a comparison into a region that stacks it.
+ */
+function questionDockMinWidth(host) {
+  const dialog = host.shadowRoot?.querySelector('aic-permission-dialog');
+  const width = dialog?.dockMinWidth;
+  return typeof width === 'number' ? width : QUESTION_DOCK_MIN_WIDTH;
+}
+
+/**
  * Query the dialog element's current rect. Used at drag
  * start to snapshot the starting geometry — from there
  * we apply pointer deltas. Returns null when the shadow
@@ -355,13 +370,23 @@ export function dockedPanelRight(host) {
  *     instead of beside them, and § interact wants both at
  *     once — so a user who has dragged the panel out to 80%
  *     gets the modal back rather than a cramped dock.
+ *
+ * The floor is the pending request's rather than one number for
+ * all of them. As a constant 720 it made the dock unreachable
+ * in practice: with gutters it wants a viewport near 1480 before
+ * even the default half-width panel leaves room, so any panel the
+ * user had widened never docked anything. It buys the compare
+ * grid, and most questions do not draw one — so the ones that do
+ * keep it and the rest dock at 420
+ * (permission-dialog.md § A question docks beside the chat).
  */
 export function questionDockLeft(host) {
   if (host.activeTab !== 'files') return null;
   const left = dockedPanelRight(host);
   if (left == null) return null;
   const available = (window.innerWidth || 0) - left;
-  if (available < QUESTION_DOCK_MIN_WIDTH + 2 * QUESTION_DOCK_GUTTER) {
+  const floor = questionDockMinWidth(host);
+  if (available < floor + 2 * QUESTION_DOCK_GUTTER) {
     return null;
   }
   return left;

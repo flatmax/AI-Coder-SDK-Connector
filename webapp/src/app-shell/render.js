@@ -220,9 +220,17 @@ export function renderTemplate(host) {
       where the chat ends — or whether it is on screen at all — is the
       panel's geometry, which lives here. Null means "nowhere to dock",
       and the dialog falls back to the centred modal.
+
+      The traffic goes both ways, because how much room is *enough* is a
+      fact about the request rather than the panel. The dialog says when
+      that changed and the shell re-measures — none of the shell's own
+      triggers (resize, minimize, undock, tab switch) fire when a request
+      arrives, so without this the second question in a queue would
+      inherit the first one's verdict.
     -->
     <aic-permission-dialog
       .dockLeft=${host._questionDockLeft}
+      @dock-requirement-changed=${host._onDockRequirementChanged}
     ></aic-permission-dialog>
   `;
 }

@@ -1454,6 +1454,18 @@ export class AppShell extends JRPCClient {
     return toggleMinimize(this);
   }
 
+  /**
+   * The pending question needs a different amount of room than the last one
+   * did, so the cached dock verdict is stale — re-measure.
+   *
+   * The inset is deliberately not touched. This changes only whether a
+   * *question* fits beside the panel; the panel's own right edge has not
+   * moved, so the strip the viewer reserves is the same one it was.
+   */
+  _onDockRequirementChanged() {
+    syncQuestionDock(this);
+  }
+
   _onWindowResize() {
     return onWindowResize(this);
   }
