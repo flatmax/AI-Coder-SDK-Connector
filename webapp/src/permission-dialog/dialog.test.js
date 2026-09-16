@@ -3102,6 +3102,34 @@ describe('a question with room beside the chat', () => {
     keyFromInside(el, 'Tab');
     expect(trapped).toHaveBeenCalledTimes(1);
   });
+
+  it('reports its own modality, because the shell asks', async () => {
+    // The shell makes its global shortcuts inert while a modal request is up
+    // (shell.md § Keyboard Shortcuts) and asks here rather than re-deriving
+    // the rule, so a second copy cannot disagree with the scrim on screen.
+    publishRpc();
+    const el = mount();
+    await settle(el);
+    // Nothing on screen is not a modal, whatever the dock says.
+    el.dockLeft = DOCK_LEFT;
+    await settle(el);
+    expect(el.modal).toBe(false);
+
+    await ask(el, interactPayload());
+    expect(el.modal).toBe(false);
+
+    el.dockLeft = null;
+    await settle(el);
+    expect(el.modal).toBe(true);
+  });
+
+  it('is modal for every other class, room or not', async () => {
+    publishRpc();
+    const el = mount();
+    await settle(el);
+    await askDocked(el, writePayload());
+    expect(el.modal).toBe(true);
+  });
 });
 
 // ---------------------------------------------------------------------------

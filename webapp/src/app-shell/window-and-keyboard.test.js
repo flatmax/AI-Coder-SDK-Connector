@@ -364,5 +364,152 @@ describe('AppShell window resize and keyboard shortcuts', () => {
       ).not.toThrow();
       expect(shell.activeTab).toBe(before);
     });
+
+    // -------------------------------------------------------------
+    // While a permission request is on screen
+    // -------------------------------------------------------------
+    //
+    // shell.md § Keyboard Shortcuts: every shortcut is inert while a
+    // modal permission dialog is open, because each of them changes
+    // something the scrim is covering. Alt+Arrow is included here even
+    // though its own semantics live in viewers.test.js — one rule
+    // covers every shortcut, and splitting it across two files is how
+    // half of it gets dropped.
+
+    describe('while a permission request is open', () => {
+      /** Queue a real request on the dialog the shell mounts. */
+      function askPermission(over = {}) {
+        window.dispatchEvent(new CustomEvent('permission-request', {
+          detail: {
+            permission_id: 'perm_1',
+            tool_use_id: 'toolu_1',
+            request_id: 'req_1',
+            tool_name: 'Bash',
+            display_name: 'Bash',
+            tool_class: 'exec',
+            gated_by_default: true,
+            summary: 'ls -la',
+            input: { command: 'ls -la' },
+            command: { command: 'ls -la', cwd: '/repo', flags: [] },
+            suggested_rules: [],
+            expires_at: null,
+            localhost_available: true,
+            ...over,
+          },
+        }));
+      }
+
+      function fireAltArrow(shell, dir) {
+        const ev = new KeyboardEvent('keydown', {
+          key: `Arrow${dir}`,
+          altKey: true,
+          bubbles: true,
+          cancelable: true,
+        });
+        document.dispatchEvent(ev);
+        return ev;
+      }
+
+      it('Alt+digit does not switch the tab behind the scrim', async () => {
+        // The tab would change where the user cannot see it, and they
+        // would find themselves somewhere else on answering.
+        const shell = mountShell();
+        await shell.updateComplete;
+        askPermission();
+        const ev = fireKey({ key: '2', altKey: true });
+        expect(shell.activeTab).toBe('files');
+        // Not consumed either: declining a key and swallowing it makes a
+        // suppressed shortcut indistinguishable from a broken one.
+        expect(ev.defaultPrevented).toBe(false);
+      });
+
+      it('Alt+M does not collapse the panel behind it', async () => {
+        const shell = mountShell();
+        await shell.updateComplete;
+        askPermission();
+        fireKey({ key: 'm', altKey: true });
+        expect(shell._minimized).toBe(false);
+      });
+
+      it('Ctrl+Shift+F does not focus a field the user cannot see', async () => {
+        // The worst of the four: it moves focus to a search input behind
+        // the scrim while focus is meant to be trapped in the dialog, so
+        // the next thing typed goes somewhere invisible.
+        const shell = mountShell();
+        shell.activeTab = 'settings';
+        await shell.updateComplete;
+        const switched = vi.spyOn(shell, '_switchTab');
+        askPermission();
+        fireKey({ key: 'F', ctrlKey: true, shiftKey: true });
+        expect(switched).not.toHaveBeenCalled();
+        switched.mockRestore();
+      });
+
+      it('leaves Alt+Arrow for the dialog\'s own diff editor', async () => {
+        // A `write` request puts a Monaco diff on screen, where Alt+Arrow
+        // is word navigation. The grid handler consumes it capture-phase,
+        // so without the guard the caret stays put and a file swaps in
+        // the viewer nobody can see.
+        const shell = mountShell();
+        await shell.updateComplete;
+        const nav = shell.shadowRoot.querySelector('aic-file-nav');
+        nav.openFile('a.py');
+        nav.openFile('b.py');
+        await shell.updateComplete;
+        const navigate = vi.spyOn(nav, 'navigateDirection');
+
+        askPermission({ tool_class: 'write', tool_name: 'Write' });
+        const ev = fireAltArrow(shell, 'Left');
+
+        expect(navigate).not.toHaveBeenCalled();
+        // Left unconsumed on purpose — this is the keystroke reaching the
+        // editor it was aimed at.
+        expect(ev.defaultPrevented).toBe(false);
+        navigate.mockRestore();
+      });
+
+      it('hands the shortcuts back when the request is answered', async () => {
+        // The reason the dialog is asked rather than mirrored: a mirror
+        // that misses one of the ways a queue drains disables the
+        // keyboard for the rest of the session.
+        const shell = mountShell();
+        await shell.updateComplete;
+        askPermission();
+        fireKey({ key: '2', altKey: true });
+        expect(shell.activeTab).toBe('files');
+
+        window.dispatchEvent(new CustomEvent('permission-resolved', {
+          detail: { permission_id: 'perm_1', action: 'allow' },
+        }));
+        await shell.updateComplete;
+
+        fireKey({ key: '2', altKey: true });
+        expect(shell.activeTab).toBe('context');
+      });
+
+      it('leaves them live for a question docked beside the chat', async () => {
+        // A docked question has no scrim and the UI behind it is genuinely
+        // live, so suppressing the shortcuts would be claiming otherwise.
+        // Alt+2 takes the chat off screen, which is what un-docks the
+        // question — it re-centres as a modal rather than being ignored.
+        const shell = mountShell();
+        await shell.updateComplete;
+        const panel = shell.shadowRoot.querySelector('.dialog');
+        panel.getBoundingClientRect = () => ({
+          left: 0, right: 400, top: 0, bottom: 800, width: 400, height: 800,
+        });
+        Object.defineProperty(window, 'innerWidth', {
+          value: 1600, configurable: true, writable: true,
+        });
+        shell._relayoutViewers();
+        await shell.updateComplete;
+        const dialog = shell.shadowRoot.querySelector('aic-permission-dialog');
+        askPermission({ tool_class: 'interact', tool_name: 'AskUserQuestion' });
+        expect(dialog.modal).toBe(false);
+
+        fireKey({ key: '2', altKey: true });
+        expect(shell.activeTab).toBe('context');
+      });
+    });
   });
 });

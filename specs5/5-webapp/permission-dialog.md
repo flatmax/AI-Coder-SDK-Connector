@@ -64,6 +64,7 @@ is a bug:
 
 - **Escape only denies from inside the panel** while docked. Escape in the chat input clears the input, and that input is genuinely live behind a non-modal question, so a window-wide binding would deny the agent's question because the user cleared a half-typed message — resolving a request they never touched. From inside the panel Escape still denies, with the same reason ([§ Escape and the scrim](#escape-and-the-scrim)).
 - **Tab is not trapped** while docked. The trap exists so a keyboard user cannot reach a UI the scrim calls unavailable; with no scrim there is nothing to be inconsistent with, and reaching the transcript is how a keyboard user reads what the question is about.
+- **The shell's global shortcuts stay live** while docked, and are inert otherwise. The dialog answers whether it is currently modal, and the shell asks rather than re-deriving it ([shell.md § Global Keyboard Shortcuts](shell.md#global-keyboard-shortcuts)). Modality has two inputs here — the tool class and whether the shell found room — so a second copy of the rule elsewhere is a copy that can disagree with the scrim on screen. The element that draws the scrim owns the answer.
 
 ## Anatomy
 
@@ -536,6 +537,7 @@ back to the tab and reads the dialog.
 - The dialog renders above every other surface in the application, including the startup overlay and the toast layer. A docked question is above all of them too; what it gives up is modality, not precedence.
 - Every class is modal — scrim, `aria-modal`, focus trap — except an `interact` question with room beside the live chat, which has none of the three. No other class docks, whatever the shell reports.
 - A question docks only where the shell reports room beside an on-screen chat. Floating, minimized, another tab, or a region under the compare breakpoint each fall back to the centred modal rather than to a cramped or orphaned panel.
+- The dialog is the single source of truth for whether a request is on screen as a modal. Nothing outside it re-derives that from the tool class, and with nothing on screen the answer is no, whatever the dock reports.
 - The dialog resolves exactly once, through `resolve_permission`, a broadcast `permissionResolved`, or expiry. It never closes without one of those.
 - A `permissionDeadline` never closes a dialog, never restarts its settling interval, and never discards a half-typed deny reason. It changes only whether a clock is running.
 - Escape denies with a reason. The scrim does nothing. Neither ever dismisses a request unresolved. A docked question takes Escape from inside its own panel only; elsewhere the keystroke belongs to whatever is focused there, and never resolves the request.

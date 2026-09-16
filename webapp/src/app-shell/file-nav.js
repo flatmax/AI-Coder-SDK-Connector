@@ -20,6 +20,26 @@ export function getFileNav(host) {
 }
 
 /**
+ * Whether a modal permission dialog is on screen, which makes every
+ * shortcut below inert (shell.md § Keyboard Shortcuts).
+ *
+ * The dialog is asked rather than tracked. Tracking would mean mirroring a
+ * queue that drains on decisions, expiries, cancellations and other
+ * clients' answers — and a mirror stuck on "open" disables the keyboard for
+ * the rest of the session.
+ *
+ * A docked `interact` question answers false: it has no scrim, the UI behind
+ * it is genuinely live, and suppressing the shortcuts would be claiming
+ * otherwise (permission-dialog.md § Placement). So does an element that has
+ * not upgraded yet, which is the right way round — a shortcut that silently
+ * stops working is worse than one that fires under a dialog.
+ */
+export function permissionModalOpen(host) {
+  const dialog = host.shadowRoot?.querySelector('aic-permission-dialog');
+  return dialog?.modal === true;
+}
+
+/**
  * Alt+Arrow keydown — navigate the file grid. When the
  * grid has nodes, all Alt+Arrow events are consumed
  * (preventDefault + stopPropagation) to prevent Monaco's
@@ -53,6 +73,14 @@ export function onGridKeyDown(host, event) {
   };
   const dir = dirMap[event.key];
   if (!dir) return;
+
+  // While a modal permission dialog is open, Alt+Arrow belongs to whatever
+  // holds focus inside it — for a `write` request that is the Monaco diff
+  // the user is reading, where Alt+Arrow is word navigation. Consuming it
+  // here would swap a file in the viewer behind the scrim: a navigation the
+  // user cannot see, and a caret that did not move. Returned rather than
+  // consumed, so the keystroke reaches the editor it was aimed at.
+  if (permissionModalOpen(host)) return;
 
   // When the grid has nodes, consume the event regardless
   // of whether a neighbor exists — prevents Monaco's
@@ -190,6 +218,10 @@ export function onGridKeyUp(host, event) {
 
  *
  * Guards:
+ *   - Skips every shortcut while a modal permission
+ *     dialog is open — each of them changes something
+ *     the scrim is covering. A docked question is not
+ *     modal and does not suppress them.
  *   - Skips when Ctrl / Meta / Shift are also held.
  *     Alt+Shift+digit is a macOS symbol-entry shortcut
  *     and Alt+Ctrl+digit is used by some window
@@ -207,6 +239,21 @@ export function onGridKeyUp(host, event) {
  * browser chrome level) don't steal the keystroke.
  */
 export function onGlobalKeyDown(host, event) {
+  // Every shortcut here is inert while a modal permission dialog is open.
+  // Each of them changes something the scrim is covering: Alt+digit switches
+  // the tab behind it, Alt+M collapses the panel behind it, and
+  // Ctrl+Shift+F focuses a search field the user cannot see while focus is
+  // meant to be trapped in the dialog. The keystroke is not consumed —
+  // declining a key and then swallowing it is how a suppressed shortcut
+  // becomes indistinguishable from a broken one.
+  //
+  // Guarded by a cheap superset of the keys this function handles, so an
+  // ordinary keypress in the chat input does not pay for a shadow-DOM query.
+  // Alt+Shift+1 and friends fall out below in either case.
+  if ((event.altKey || (event.ctrlKey && event.shiftKey))
+      && permissionModalOpen(host)) {
+    return;
+  }
   // Ctrl+Shift+F — activate file search. Read the
   // selection FIRST, synchronously, before any await
   // or property update. Tab switching clears focus

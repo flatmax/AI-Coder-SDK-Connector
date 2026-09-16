@@ -116,6 +116,8 @@ When an Alt+Arrow key is pressed:
 
 Handled at the app shell level with a capture-phase listener to intercept before Monaco's word-navigation Alt+Arrow bindings. When the grid has nodes, all Alt+Arrow events are consumed regardless of whether a neighbor exists — prevents unintended edits in Monaco while the HUD is visible.
 
+**Except while a modal permission dialog is open**, where the handler declines the keystroke and lets it travel ([shell.md § Global Keyboard Shortcuts](shell.md#global-keyboard-shortcuts)). The precedence above is written for a viewer the user is looking at; a `write` request draws its own Monaco diff over that viewer, and there Alt+Arrow is the word navigation the user meant. Consuming it would leave the caret where it was and swap a file in the viewer behind the scrim — a navigation nobody can see, arrived at by a keystroke aimed somewhere else.
+
 The debounce is necessary because the diff viewer refetches on every `openFile` (see [diff-viewer.md](diff-viewer.md#no-caching-across-switches)). Without coalescing, holding Alt and pressing an arrow key ten times in a second would trigger ten round-trip fetches, most of which would be wasted work superseded by the final position. Debouncing aligns the user's intent ("move to the file at the end of this sequence") with the cost model ("one fetch per visible target").
 ### Edge Wrapping
 When Alt+Arrow is pressed and no node exists in the adjacent cell, navigation wraps to the opposite edge of the grid along the same row or column:
@@ -291,6 +293,7 @@ Events the grid dispatches (or reacts to) carry optional flags that modify app-s
 - App shell intercepts all four Alt+Arrow combinations at the document level with a capture-phase listener, before they reach Monaco
 - When the grid has nodes, all Alt+Arrow events are consumed regardless of whether a neighbor exists — prevents unintended side effects (word jumps, line moves) in the editor while the HUD is showing
 - When the grid is empty (no files opened yet), events propagate normally
+- While a modal permission dialog is open the priority inverts: the keystroke is neither handled nor consumed, so it reaches the dialog's own diff editor, where Alt+Arrow is the word navigation the user aimed at
 ### Existing App Shortcuts
 - Existing global shortcuts (Alt+1..N for tabs, Ctrl+Shift+F for search) are unaffected
 - Alt+Arrow is a new binding that doesn't conflict with any existing shortcut
@@ -306,5 +309,5 @@ Events the grid dispatches (or reacts to) carry optional flags that modify app-s
 - Alt+Arrow navigation never creates a new node; only file-open actions do
 - HUD click teleport never creates a new node; it's pure navigation
 - Replacement picks the neighbor with the lowest travel count; tie-break order is fixed and reverse of placement order
-- Monaco word-navigation works only when the grid is empty; otherwise Alt+Arrow is consumed by the grid
+- Monaco word-navigation works only when the grid is empty, or while a modal permission dialog is open; otherwise Alt+Arrow is consumed by the grid
 - Each collaboration client maintains an independent grid — navigation broadcasts from other clients create nodes on each client's local grid

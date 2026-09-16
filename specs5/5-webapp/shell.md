@@ -430,9 +430,28 @@ Alt+5 is bound even though nothing in the chrome advertises it, for the same rea
 Convert is absent: a bound-but-obscure key is a stable escape, and an unbound digit that silently does
 nothing is indistinguishable from a broken one. Alt+6 and above are unmapped and pass through.
 
-Every shortcut is suppressed while a modal permission dialog is open. It is modal, its focus is trapped,
-and Alt+2 opening the Context tab behind a pending `Bash` approval would be a distraction at the worst
-possible moment.
+Every shortcut is suppressed while a modal permission dialog is open — the list above, and Alt+Arrow file
+navigation, whose handler lives with the file grid ([`file-navigation.md`](file-navigation.md)). Each of
+them changes something the scrim is covering: Alt+digit switches the tab behind it, Alt+M collapses the
+panel behind it, and Ctrl+Shift+F moves focus to a search field the user cannot see, at the one moment
+focus is meant to be trapped in the dialog.
+
+Alt+Arrow is the case that is more than a distraction. A `write` request puts a Monaco diff on screen, and
+inside an editor Alt+Arrow is word navigation — so the grid handler, which runs capture-phase to get ahead
+of exactly that binding, would consume the keystroke the user aimed at the diff they are reading. The
+result is a caret that did not move and a file swapped in the viewer behind the scrim.
+
+A suppressed keystroke is **not** consumed. The handler declines it and lets it travel, so it reaches
+whatever holds focus inside the dialog. Swallowing it instead is how a suppressed shortcut becomes
+indistinguishable from a broken one, and in the Alt+Arrow case swallowing it is the whole bug.
+
+The shell asks the dialog whether it is currently modal rather than tracking the request queue itself.
+Modality has two inputs — the tool class and whether the shell found room beside the chat — and a second
+copy of that rule can disagree with the scrim actually on screen. Tracking would also mean mirroring a
+queue that drains on decisions, expiries, cancellations and other clients' answers, and a mirror stuck on
+"open" disables the keyboard for the rest of the session. A dialog element that has not upgraded yet
+reports not-modal, which is the right way round: a shortcut firing under a dialog is recoverable, a
+shortcut that silently stopped working is not.
 
 A docked `interact` question is the exception, because it is not modal and the UI behind it is genuinely
 live — suppressing the shortcuts would be claiming otherwise. Using one that takes the chat off screen
@@ -476,7 +495,9 @@ Components dispatch toast events; the shell catches and renders them. Chat panel
 - Browser tab title reflects the current repo name with no prefix, except while permission requests are pending, when it carries the pending marker and count
 - The startup overlay is dismissed exactly once per connection lifecycle (first connect)
 - The permission dialog is mounted for the shell's entire lifetime and renders above every other surface, including the startup overlay
-- Global keyboard shortcuts are inert while a modal permission dialog is open; a docked `interact` question leaves them live, and any shortcut that removes the dock's precondition re-centres it as a modal
+- Global keyboard shortcuts — including Alt+Arrow — are inert while a modal permission dialog is open, and a suppressed keystroke is declined rather than consumed, so it reaches whatever holds focus inside the dialog
+- Modality is asked of the dialog, never re-derived by the shell; a not-yet-upgraded dialog reports not-modal
+- A docked `interact` question leaves the shortcuts live, and any shortcut that removes the dock's precondition re-centres it as a modal
 - One function measures the docked panel's right edge. The viewer inset and the question dock both read it, so they can never disagree about where the panel ends or whether it is docked at all
 - The permission-mode indicator remains visible in every dialog layout state, including minimized
 - The context-capacity bar is fed only by pushed or tab-initiated context snapshots; it never issues its own RPC

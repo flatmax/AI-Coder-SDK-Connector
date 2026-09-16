@@ -326,6 +326,21 @@ export class PermissionDialog extends RpcMixin(LitElement) {
     return this.current?.tool_class === 'interact' && this.dockLeft != null;
   }
 
+  /**
+   * Whether a request is on screen *as a modal* — a scrim over an inert UI
+   * with focus trapped inside it. Public, because the shell asks: it is what
+   * makes its global shortcuts inert (shell.md § Keyboard Shortcuts).
+   *
+   * Asked rather than re-derived. "Is this modal" has two inputs — the tool
+   * class and whether the shell reported room beside the chat — and a second
+   * copy of that rule in the shell would be a copy that can disagree with
+   * the scrim actually on screen. There is one owner, and it is the element
+   * that draws it.
+   */
+  get modal() {
+    return !!this.current && !this._docked;
+  }
+
   _onPermissionRequest(event) {
     const payload = event?.detail;
     if (payload) this._enqueue(payload);
