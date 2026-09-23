@@ -33,6 +33,39 @@ class TreeMixin:
     # so they went with the engine rather than becoming published RPC
     # methods with no caller.
 
+    def _ls_files(self, *extra: str) -> list[str]:
+        """Return repo-relative paths from ``git ls-files``, unquoted.
+
+        Passes ``-z`` so git emits raw NUL-separated pathnames
+        instead of its porcelain quoting. Without it, any path
+        holding a byte outside printable ASCII comes back wrapped in
+        double quotes with the offending bytes octal-escaped, and
+        both callers here split the result on ``/``. A single
+        Roman-numeral Ⅴ in one PDF filename was enough to give the
+        picker a phantom top-level ``"electronics`` directory beside
+        the real ``electronics``, carrying the whole quoted branch
+        beneath it; the same path failed the on-disk check in
+        :meth:`get_flat_file_list` and so disappeared from the index
+        builders' input instead. One parse, two subsystems, two
+        failures pointing opposite ways.
+
+        ``-z`` rather than :meth:`_unquote_porcelain_path` because
+        that helper reverses the backslash escapes but not the octal
+        ones — it would hand back a name carrying a literal
+        ``\\342\\205\\244`` run, which matches nothing on disk and
+        displays as noise. Git's raw output needs no reversing at
+        all. The status and numstat reads still go through the
+        helper: their ``-z`` forms restructure rename and copy
+        entries into separate NUL fields, so switching them is a
+        larger change than this one.
+
+        The trailing NUL terminates the last entry rather than
+        separating a further one, so the empty final split is
+        dropped.
+        """
+        result = self._run_git(["ls-files", "-z", *extra], check=True)
+        return [rel for rel in result.stdout.split("\0") if rel]
+
     def get_flat_file_list(self) -> str:
         """Return a sorted newline-separated list of all repo files.
 
@@ -69,14 +102,8 @@ class TreeMixin:
         the user can recover them — that path uses a different
         source set and is unaffected.
         """
-        tracked = self._run_git(
-            ["ls-files"],
-            check=True,
-        ).stdout.splitlines()
-        untracked = self._run_git(
-            ["ls-files", "--others", "--exclude-standard"],
-            check=True,
-        ).stdout.splitlines()
+        tracked = self._ls_files()
+        untracked = self._ls_files("--others", "--exclude-standard")
         all_files = sorted(set(tracked) | set(untracked))
         existing = [
             rel for rel in all_files
@@ -262,13 +289,8 @@ class TreeMixin:
         can display it as the tree root header.
         """
         # Candidate file set: tracked ∪ untracked (non-ignored).
-        tracked = set(
-            self._run_git(["ls-files"], check=True).stdout.splitlines()
-        )
-        untracked_raw = self._run_git(
-            ["ls-files", "--others", "--exclude-standard"],
-            check=True,
-        ).stdout.splitlines()
+        tracked = set(self._ls_files())
+        untracked_raw = self._ls_files("--others", "--exclude-standard")
         all_files = sorted(tracked | set(untracked_raw))
 
         # Status — the four classification lists.

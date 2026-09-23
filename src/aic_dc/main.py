@@ -934,7 +934,6 @@ async def run(
         # Vite dev/preview server
         import subprocess
 
-        node_modules = repo_path.parent / "webapp" / "node_modules"
         # Try finding webapp relative to the package
         pkg_dir = Path(__file__).resolve().parent
         project_root = pkg_dir.parent.parent
@@ -942,9 +941,27 @@ async def run(
         if not webapp_dir.is_dir():
             webapp_dir = repo_path / "webapp"
 
+        if not (webapp_dir / "package.json").is_file():
+            # --dev/--preview run Vite over the webapp sources, which
+            # only exist in a source checkout. A wheel install carries
+            # the built bundle at most, so the package-relative lookup
+            # lands in site-packages and the fallback in the user's repo.
+            logger.error(
+                "--%s needs the webapp sources, but none were found at "
+                "%s or %s. aic_dc is installed from %s, which is not an "
+                "editable source checkout. Install it editable "
+                "(uv pip install -e /path/to/AI-Coder-SDK-Connector) "
+                "or launch without --%s.",
+                "dev" if dev else "preview",
+                project_root / "webapp", repo_path / "webapp", pkg_dir,
+                "dev" if dev else "preview",
+            )
+            return
+
         if not (webapp_dir / "node_modules").is_dir():
             logger.error(
-                "webapp/node_modules not found. Run: cd webapp && npm install"
+                "%s not found. Run: cd %s && npm install",
+                webapp_dir / "node_modules", webapp_dir,
             )
             return
 
