@@ -544,12 +544,13 @@ class ClaudeCodeService:
 
         # The turn footer the terminal HUD prints, held between the
         # `streamComplete` that carries it and the `_post_response` that has
-        # the context figure to print beside it. One slot rather than a map
-        # keyed by request: turns are sequential, and a map would grow for
-        # every turn whose post-response never ran. The request ID travels
-        # with it so a stale footer cannot be printed under a later turn's
-        # context usage.
-        self._turn_footer: tuple[str, dict[str, Any]] | None = None
+        # the context figure to print beside it. Keyed by request, because a
+        # background turn's continuation can land between a later turn's
+        # result and that turn's post-response, and one slot would print the
+        # wrong footer or none. Bounded by the turns still live: every entry
+        # is popped by its turn's post-response, and a continuation that does
+        # not end the run overwrites its own entry rather than adding one.
+        self._turn_footers: dict[str, dict[str, Any]] = {}
 
         self.review = ReviewMode(
             repo=repo,
@@ -1541,10 +1542,9 @@ class ClaudeCodeService:
         # turn's footer and the context figure fetched above. Popped, so a
         # second `_post_response` for the same turn — the background-subagent
         # path below — prints only if a revised footer arrived with it.
-        footer = self._turn_footer
-        if footer is not None and footer[0] == request_id:
-            self._turn_footer = None
-            log_turn_hud(footer[1], context_usage, self._repo_root)
+        footer = self._turn_footers.pop(request_id, None)
+        if footer is not None:
+            log_turn_hud(footer, context_usage, self._repo_root)
 
         await self._dispatch(
             Event(
@@ -1661,11 +1661,19 @@ class ClaudeCodeService:
             "takes_effect": "on the CLI's next read of its settings sources",
         }
 
-    def _note_permission_prompt(self, tool_use_id: str | None) -> str | None:
-        """Bridge from the broker to the turn in flight."""
+    def _note_permission_prompt(
+        self, tool_use_id: str | None, agent_id: str | None = None
+    ) -> str | None:
+        """Bridge from the broker to the turn that owns the call.
+
+        A background subagent's call belongs to the turn that spawned it,
+        which the session can name even after a later turn has started.
+        """
         note = getattr(self.session, "note_permission_prompt", None)
         if note is None:
             return None
+        if agent_id:
+            return note(tool_use_id, agent_id=agent_id)
         return note(tool_use_id)
 
     async def _note_permission_mode(self, mode: str) -> None:
@@ -3335,7 +3343,7 @@ class ClaudeCodeService:
             # `_post_response` synchronously from here and the footer has to
             # be there when it does.
             if isinstance(event.payload, dict):
-                self._turn_footer = (request_id, event.payload)
+                self._turn_footers[request_id] = event.payload
             await self._post_response_for_background(event.payload, request_id)
 
     async def _post_response_for_background(
@@ -3346,7 +3354,7 @@ class ClaudeCodeService:
         ``_post_response`` runs in ``_run_turn``'s ``finally``, which is
         reached at the turn's *first* result. A background subagent outlives
         that: the drain follows the stream past it (``session.py`` §
-        ``_drain_background``) and only the last of its continuations reports
+        ``_complete``) and only the last of its continuations reports
         the run as over. Until this, the Context tab and the file tree kept
         describing the session as it was before the background work — the
         turn's own footer revised itself, but the derived state around it did

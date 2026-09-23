@@ -233,8 +233,10 @@ KNOWN_BETAS: dict[str, str] = {
 #: Client methods that exist for hosts we are not. Checked so the client
 #: surface has the same three buckets as the rest.
 DECLINED_CLIENT_METHODS: dict[str, str] = {
-    "receive_messages": "receive_response() is the same stream bounded by "
-    "ResultMessage, which is what a turn is",
+    "receive_response": "returns at the first ResultMessage of any turn, and "
+    "with a background turn still being followed the stream carries more than "
+    "one — so the session reads receive_messages() and ends a pump on its own "
+    "turn's result (EngineSession._pump)",
 }
 
 

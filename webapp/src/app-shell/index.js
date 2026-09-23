@@ -1602,12 +1602,12 @@ export class AppShell extends JRPCClient {
     return onReviewStateChanged(this, event);
   }
 
-  _onStreamChunkHeader() {
-    return onStreamChunkHeader(this);
+  _onStreamChunkHeader(event) {
+    return onStreamChunkHeader(this, event);
   }
 
-  _onStreamCompleteHeader() {
-    return onStreamCompleteHeader(this);
+  _onStreamCompleteHeader(event) {
+    return onStreamCompleteHeader(this, event);
   }
 
   async _onCopyDiff() {

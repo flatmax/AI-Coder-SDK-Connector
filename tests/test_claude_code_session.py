@@ -35,6 +35,7 @@ from claude_agent_sdk import (
     TaskStartedMessage,
     TaskUpdatedMessage,
     TextBlock,
+    ToolUseBlock,
 )
 
 from aic_dc.claude_code import session as session_module
@@ -1954,12 +1955,13 @@ class TestBackgroundDrain:
             engine, [task_started(), task_notification(), result_message()]
         )
         assert result["background_tasks"] == []
-        assert engine._drain is None
+        assert engine._background == {}
 
-    async def test_an_ordinary_turn_starts_no_drain(self, engine):
+    async def test_an_ordinary_turn_is_not_followed(self, engine):
         """Nothing in flight, nothing to follow: the common case is untouched."""
         await self.drained(engine, list(DEFAULT_MESSAGES))
-        assert engine._drain is None
+        assert engine._background == {}
+        assert engine._owners == {}
 
     async def test_a_bash_task_is_not_a_reason_to_keep_reading(self, engine):
         """A slow shell command is a task too, but the engine does not hold
@@ -1968,7 +1970,7 @@ class TestBackgroundDrain:
             engine, [task_started(task_type="local_bash"), result_message()]
         )
         assert result["background_tasks"] == []
-        assert engine._drain is None
+        assert engine._background == {}
 
     async def test_a_bash_task_stays_filtered_in_the_turns_after_it(self, engine):
         """The session owns the latch, so a slow command that finishes two
@@ -2015,7 +2017,7 @@ class TestBackgroundDrain:
 
         client.messages = [task_started(), cancel_mid_turn, result_message()]
         await engine.run_turn(text_turn())
-        assert engine._drain is None
+        assert engine._background == {}
 
     async def test_the_next_turn_takes_the_stream_back(self, engine):
         """Two iterators over one stream would split its messages between
@@ -2035,7 +2037,8 @@ class TestBackgroundDrain:
         client.messages = list(DEFAULT_MESSAGES)
         await engine.run_turn(text_turn())
         assert drain.cancelled()
-        assert engine._drain is None
+        # And a fresh one reads between this turn and the next.
+        assert engine._drain is not drain
 
     async def test_a_disconnect_ends_the_drain(self, engine):
         """Otherwise shutdown waits on a task reading a stream that is going."""
@@ -2087,6 +2090,259 @@ class TestBackgroundDrain:
         assert session_module.DEFERRING_TASK_TYPES == DEFERRING_TASK_TYPES
 
 
+class TestTurnRouting:
+    """Each message goes to the turn that owns it, not the turn that is current.
+
+    The engine admits a new turn while a background subagent is still
+    working — waiting for it would defeat the point of running one — so the
+    stream carries two turns' messages at once. Measured against the CLI on
+    2026-09-23: a subagent's messages keep naming the spawning ``Task`` call
+    after the next turn has started, and main's reply to a notification
+    starts with a fresh ``init`` and ends with a result of its own.
+    """
+
+    SECOND = "1736956800000-d4e5f6"
+
+    def spawn(self):
+        """Turn one's script: spawn a background subagent and return."""
+        return [
+            DEFAULT_MESSAGES[0],
+            AssistantMessage(
+                content=[
+                    ToolUseBlock(
+                        id="toolu_task-1",
+                        name="Agent",
+                        input={"prompt": "audit", "run_in_background": True},
+                    )
+                ],
+                model="m",
+                message_id="msg_spawn",
+            ),
+            task_started(),
+            AssistantMessage(content=[TextBlock(text="Launched.")], model="m", message_id="m1"),
+            result_message(),
+        ]
+
+    @staticmethod
+    def said(text, parent=None, message_id="msg_x"):
+        return AssistantMessage(
+            content=[TextBlock(text=text)],
+            model="m",
+            parent_tool_use_id=parent,
+            message_id=message_id,
+        )
+
+    async def two_turns(self, engine, second, *, settle=True):
+        first_events: list[Event] = []
+        second_events: list[Event] = []
+
+        async def first_emit(event):
+            first_events.append(event)
+
+        async def second_emit(event):
+            second_events.append(event)
+
+        client = client_of(engine)
+        client.messages = self.spawn()
+        await engine.run_turn(text_turn(), first_emit)
+        await engine._stop_background_drain()
+        assert REQUEST_ID in engine._background
+        client.messages = second
+        await engine.run_turn(Turn(request_id=self.SECOND, message="next"), second_emit)
+        if settle and engine._drain is not None:
+            await engine._drain
+        return first_events, second_events
+
+    @staticmethod
+    def texts(events):
+        return [e.payload.get("content") for e in events if e.name == "streamChunk"]
+
+    @staticmethod
+    def footers(events):
+        return [e.payload for e in events if e.name == "streamComplete"]
+
+    async def test_a_subagents_messages_reach_the_turn_that_spawned_it(self, engine):
+        first, second = await self.two_turns(
+            engine,
+            [
+                DEFAULT_MESSAGES[0],
+                self.said("subagent at work", parent="toolu_task-1"),
+                self.said("Hi", message_id="msg_2"),
+                result_message(),
+            ],
+        )
+        assert "subagent at work" in str(self.texts(first) + [e.payload for e in first])
+        assert "subagent at work" not in str([e.payload for e in second])
+        assert len(self.footers(second)) == 1
+        assert self.footers(second)[0].get("continuation") is None
+
+    async def test_a_nested_tool_call_follows_its_subagent(self, engine):
+        """A subagent's own tool call is registered to its turn, so the task
+        the CLI opens for it — keyed only by that call — routes there too."""
+        inner = AssistantMessage(
+            content=[ToolUseBlock(id="toolu_inner", name="Bash", input={"command": "sleep 1"})],
+            model="m",
+            parent_tool_use_id="toolu_task-1",
+            message_id="msg_inner",
+        )
+        nested = task_started("bash-9", task_type="local_bash", agent_id="")
+        nested.tool_use_id = "toolu_inner"
+        await self.two_turns(
+            engine,
+            [DEFAULT_MESSAGES[0], inner, nested, result_message()],
+        )
+        assert engine._owners.get("bash-9") is not None
+        assert engine._owners["bash-9"].request_id == REQUEST_ID
+
+    async def test_a_notification_inside_another_turn_closes_its_own(self, engine):
+        """The CLI answers it within the running turn, so the spawning turn
+        never gets a result of its own — without a synthetic one it would
+        stay open for ever."""
+        first, second = await self.two_turns(
+            engine,
+            [
+                DEFAULT_MESSAGES[0],
+                task_notification(),
+                self.said("Hi", message_id="msg_2"),
+                result_message(),
+            ],
+        )
+        closing = self.footers(first)[-1]
+        assert closing["continuation"] is True
+        assert closing["background_finished"] is True
+        assert closing["background_tasks"] == []
+        assert len(self.footers(second)) == 1
+        assert engine._background == {}
+
+    async def test_a_synthetic_close_carries_the_sessions_current_total(self, engine):
+        """A browser adopts `total_cost_usd` from every result as the session's
+        running total, so replaying the older turn's figure would wind it back."""
+        first = self.spawn()
+        first[-1] = result_message(total_cost_usd=0.10)
+        client = client_of(engine)
+        client.messages = first
+        events: list[Event] = []
+
+        async def emit(event):
+            events.append(event)
+
+        await engine.run_turn(text_turn(), emit)
+        await engine._stop_background_drain()
+        client.messages = [
+            DEFAULT_MESSAGES[0],
+            task_notification(),
+            result_message(total_cost_usd=0.25),
+        ]
+        await engine.run_turn(Turn(request_id=self.SECOND, message="next"))
+        closing = self.footers(events)[-1]
+        assert closing["total_cost_usd"] == pytest.approx(0.25)
+        # Its own turn's cost is still its own.
+        assert closing["turn_cost_usd"] == pytest.approx(0.10)
+
+    async def test_an_unprompted_reply_answers_the_turn_that_woke_it(self, engine):
+        first, second = await self.two_turns(
+            engine,
+            [
+                DEFAULT_MESSAGES[0],
+                self.said("Second answer", message_id="msg_2"),
+                result_message(),
+                # Read by the drain, after the second turn has ended.
+                task_notification(),
+                DEFAULT_MESSAGES[0],
+                self.said("The audit is done", message_id="msg_3"),
+                result_message(),
+            ],
+        )
+        assert len(self.footers(second)) == 1
+        assert "The audit is done" not in self.footers(second)[0]["response"]
+        closing = self.footers(first)[-1]
+        assert closing["continuation"] is True
+        assert closing["background_finished"] is True
+        assert "The audit is done" in closing["response"]
+
+    async def test_sending_finishes_a_turn_whose_work_is_already_done(self, engine):
+        """A notification read between turns wakes main, but a prompt sent
+        before main's reply is folded into it — so the new turn takes main,
+        and the finished turn is closed there and then."""
+        first_events: list[Event] = []
+
+        async def first_emit(event):
+            first_events.append(event)
+
+        client = client_of(engine)
+        client.messages = self.spawn() + [task_notification()]
+        await engine.run_turn(text_turn(), first_emit)
+        await engine._drain
+        assert engine._woken is not None
+        client.messages = list(DEFAULT_MESSAGES)
+        result = await engine.run_turn(Turn(request_id=self.SECOND, message="next"))
+        assert self.footers(first_events)[-1]["background_finished"] is True
+        assert result.get("continuation") is None
+        assert engine._background == {}
+
+    async def test_a_late_message_for_a_retired_turn_is_dropped(self, engine):
+        _, second = await self.two_turns(
+            engine,
+            [
+                DEFAULT_MESSAGES[0],
+                task_notification(),
+                result_message(),
+                self.said("stale", parent="toolu_task-1", message_id="msg_late"),
+                DEFAULT_MESSAGES[0],
+                self.said("Hi", message_id="msg_2"),
+                result_message(),
+            ],
+            settle=False,
+        )
+        assert "stale" not in str([e.payload for e in second])
+
+    async def test_a_background_turn_is_replayed_to_a_reconnecting_client(self, engine):
+        client = client_of(engine)
+        client.messages = self.spawn()
+        await engine.run_turn(text_turn())
+        streams = engine.active_streams()
+        assert [s["request_id"] for s in streams] == [REQUEST_ID]
+        assert streams[0]["background"] is True
+
+    async def test_a_subagents_permission_prompt_is_its_turns(self, engine):
+        release = asyncio.Event()
+        asked: list[str | None] = []
+
+        async def ask():
+            asked.append(engine.note_permission_prompt("toolu_x", agent_id="agent-7"))
+            release.set()
+
+        await self.two_turns(
+            engine, [DEFAULT_MESSAGES[0], ask, result_message()]
+        )
+        assert asked == [REQUEST_ID]
+
+    async def test_a_continuation_after_a_newer_turn_keeps_its_own_cost(self, engine):
+        """The ledger is anchored at the newer turn, so re-pricing the older
+        one there would report the newer turn's spend as its own."""
+        client = client_of(engine)
+        client.messages = self.spawn()
+        client.messages[-1] = result_message(total_cost_usd=0.10)
+        events: list[Event] = []
+
+        async def emit(event):
+            events.append(event)
+
+        await engine.run_turn(text_turn(), emit)
+        await engine._stop_background_drain()
+        client.messages = [
+            DEFAULT_MESSAGES[0],
+            result_message(total_cost_usd=0.15),
+            task_notification(),
+            DEFAULT_MESSAGES[0],
+            result_message(total_cost_usd=0.20),
+        ]
+        second = await engine.run_turn(Turn(request_id=self.SECOND, message="next"))
+        await engine._drain
+        assert second["turn_cost_usd"] == pytest.approx(0.05)
+        assert self.footers(events)[-1]["turn_cost_usd"] == pytest.approx(0.10)
+
+
 # ---------------------------------------------------------------------------
 # The rate-limit record survives a reload
 # ---------------------------------------------------------------------------
@@ -2114,6 +2370,7 @@ class TestRateLimitState:
             request_id="req-1",
             tasks_in_flight=set(),
             accrue=lambda result: result,
+            priced=None,
             note_task_flight=lambda payload: None,
         )
         return engine._fold_session_state(active, event)
@@ -2266,6 +2523,7 @@ class TestCompactionState:
             request_id="req-1",
             tasks_in_flight=set(),
             accrue=lambda result: result,
+            priced=None,
             note_task_flight=lambda payload: None,
         )
         return engine._fold_session_state(
@@ -2334,6 +2592,7 @@ class TestCompactionState:
             request_id="req-1",
             tasks_in_flight=set(),
             accrue=lambda result: result,
+            priced=None,
             note_task_flight=lambda payload: None,
         )
         engine._fold_session_state(active, Event("streamComplete", {}))

@@ -51,6 +51,7 @@ import {
   handleStreamStartError,
   handleUnsupportedSlash,
   maybeStopStreamTimerTick,
+  parkBackgroundTurn,
   startStreamTimerTick,
 } from './streaming.js';
 import { setSearchMode } from './search.js';
@@ -168,6 +169,10 @@ export async function send(panel) {
     setSearchMode(panel, 'message');
   }
 
+  // A previous turn whose background subagents are still running keeps its
+  // request id and blocks — that is where their work arrives. Move it aside
+  // before this turn claims the slot, so each keeps its own events.
+  if (activeTab) parkBackgroundTurn(activeTab);
   const requestId = generateRequestId();
   panel._currentRequestId = requestId;
   panel._streams.set(requestId, { content: '', sticky: true });
@@ -228,7 +233,7 @@ export async function send(panel) {
   // tab's settled turn is history, not staleness.
   if (activeTab) resetTurnBlocks(activeTab.turnBlocks);
   // Last turn's subagent tabs leave the strip with its blocks, for the same
-  // reason: they are feeds of the turn that just ended, and a strip that
+  // reason: they are feeds of a turn that has ended, and a strip that
   // accumulated every turn's delegations would be the user's to clean up by
   // hand. Their transcripts stay reachable through "View subagents" on the
   // settled turn (specs5/5-webapp/subagent-browser.md § Tab Lifetime). Safe
@@ -239,7 +244,13 @@ export async function send(panel) {
   // feed" is the wrong description of what the user is looking at: they
   // opened it by hand to read a second opinion, and the prompt being sent
   // is usually the answer to it (AG-31).
-  clearSubagentTabs(panel, { keepConsultations: true });
+  //
+  // So do the tabs of a turn parked above: its subagents are still running,
+  // and their feeds are still arriving.
+  clearSubagentTabs(panel, {
+    keepConsultations: true,
+    keepRequests: new Set(activeTab?.backgroundTurns.keys() ?? []),
+  });
   // Stamp the run-timer start the instant the prompt is
   // sent, and kick the panel-level ticker so the live
   // elapsed counter on the streaming card starts moving.

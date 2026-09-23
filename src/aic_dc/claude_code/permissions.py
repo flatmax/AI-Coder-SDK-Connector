@@ -1218,10 +1218,13 @@ def write_denied_read_files(repo_root: Path | str, paths: list[str]) -> list[str
 # ---------------------------------------------------------------------------
 
 Broadcast = Callable[[Event], Awaitable[None]]
-# Records a prompt against the turn in flight and returns its request ID,
+# Records a prompt against the turn that owns it and returns its request ID,
 # so the dialog can be attributed to a turn without this module knowing
-# anything about turns.
-NotePrompt = Callable[[str | None], str | None]
+# anything about turns. Called with the tool call's id, plus `agent_id=` for
+# a subagent's call — keyword and only when there is one, because a
+# subagent's turn need not be the one in flight and only the Claude Code
+# session can tell them apart; the other engines' callbacks take the id alone.
+NotePrompt = Callable[..., str | None]
 # Tells the caller the session's permission mode has changed underneath it,
 # because the CLI applies a mode carried on a permission result without
 # announcing it on the message stream. Without this the mode selector keeps
@@ -1355,7 +1358,12 @@ class PermissionBroker:
         request_id: str | None = None
         if self._note_prompt is not None:
             try:
-                request_id = self._note_prompt(tool_use_id or None)
+                agent_id = getattr(context, "agent_id", None) or None
+                request_id = (
+                    self._note_prompt(tool_use_id or None, agent_id=agent_id)
+                    if agent_id
+                    else self._note_prompt(tool_use_id or None)
+                )
             except Exception:
                 logger.exception("Could not record the permission prompt on the turn")
 

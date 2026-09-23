@@ -30,7 +30,9 @@
 //
 //   - Streaming state keyed by request ID. Each tab has its own `streams` Map
 //     and its own block state; this module routes by request ID via
-//     `findTabForRequest`.
+//     `findTabForRequest`, and to a turn parked with its background subagents
+//     still running via `findBackgroundTurn` — an older turn's events keep
+//     arriving after the next one starts, and they are that turn's.
 //
 //   - Chunks are cumulative *within a block*, not across a turn. The old
 //     contract — every chunk carries the whole accumulated turn, so any one
@@ -53,6 +55,7 @@ import {
   collectFilesModified,
   drainChunks,
   freezeBlocks,
+  makeTurnBlocks,
   markAwaitingPermission,
   isConsultationWarning,
   noteConsultationNotice,
@@ -67,7 +70,11 @@ import {
   settleLiveSubagentTabs,
   syncSubagentTab,
 } from './subagent-tabs.js';
-import { findTabForRequest, loadSubagentFeedIfEmpty } from './tabs.js';
+import {
+  findBackgroundTurn,
+  findTabForRequest,
+  loadSubagentFeedIfEmpty,
+} from './tabs.js';
 import { formatResetTime, limitTypeLabel } from '../rate-limit.js';
 
 // ---------------------------------------------------------------
@@ -238,37 +245,86 @@ export function maybeStopStreamTimerTick(panel) {
  * is explicit that the handler accepts both the current and the most recently
  * completed request ID (specs5/5-webapp/chat.md § Engine Event Routing).
  *
- * Returns `{tabId, tab, live}` or null. `live` distinguishes "this turn is
- * still running" from "this is a straggler", which matters because a straggler
- * must not restart the streaming card.
+ * Returns `{tabId, tab, live, turn}` or null. `live` distinguishes "this turn
+ * is still running" from "this is a straggler", which matters because a
+ * straggler must not restart the streaming card. `turn` is the block state the
+ * event folds into — the tab's own, or a parked background turn's.
  */
 export function findTabForRecentRequest(panel, requestId) {
   if (!requestId) return null;
-  const liveId = findTabForRequest(panel, requestId);
-  if (liveId) {
-    const tab = panel._tabs.get(liveId);
-    return tab ? { tabId: liveId, tab, live: true } : null;
+  const owner = liveOwner(panel, requestId);
+  if (owner) {
+    return {
+      tabId: owner.tabId,
+      tab: owner.tab,
+      live: !owner.background,
+      turn: owner.turn,
+    };
   }
   for (const [tabId, tab] of panel._tabs) {
     if (tab.lastRequestId === requestId) {
-      return { tabId, tab, live: false };
+      return { tabId, tab, live: false, turn: tab.turnBlocks };
     }
   }
   return null;
 }
 
 /**
- * Resolve the tab for a live turn event and note whether it is the active one.
+ * Resolve the turn a live event belongs to and note whether its tab is active.
  * Returns null for a request no tab owns — a collaborator's stream reaching
  * our panel, or an event for a turn we already tore down.
+ *
+ * `turn` is the block state to fold into and `source` what the subagent-tab
+ * helpers read it from: the tab itself for the turn it is streaming, or the
+ * parked record for a turn whose background subagents outlived it
+ * (`background: true`).
  */
 function liveOwner(panel, requestId) {
   if (!requestId) return null;
   const tabId = findTabForRequest(panel, requestId);
-  if (!tabId) return null;
-  const tab = panel._tabs.get(tabId);
-  if (!tab) return null;
-  return { tabId, tab, active: tabId === panel._activeTabId };
+  if (tabId) {
+    const tab = panel._tabs.get(tabId);
+    if (!tab) return null;
+    return {
+      tabId,
+      tab,
+      active: tabId === panel._activeTabId,
+      turn: tab.turnBlocks,
+      source: tab,
+      background: false,
+    };
+  }
+  const parked = findBackgroundTurn(panel, requestId);
+  if (!parked) return null;
+  return {
+    tabId: parked.tabId,
+    tab: parked.tab,
+    active: parked.tabId === panel._activeTabId,
+    turn: parked.turn.turnBlocks,
+    source: parked.turn,
+    background: true,
+  };
+}
+
+/**
+ * Move a tab's lingering turn aside before the next one starts.
+ *
+ * A turn whose result left background subagents running keeps
+ * `currentRequestId` and `turnBlocks` after its presentation settles, because
+ * that is where the subagents' remaining work arrives. The next send used to
+ * overwrite both — dropping every later event for the older turn, and handing
+ * its subagents' blocks to the new one. Parking it keeps both turns whole:
+ * each event goes to the turn whose request id it carries.
+ *
+ * Returns whether a turn was parked.
+ */
+export function parkBackgroundTurn(tab) {
+  const requestId = tab?.currentRequestId;
+  if (!requestId || tab.streaming) return false;
+  tab.backgroundTurns.set(requestId, { requestId, turnBlocks: tab.turnBlocks });
+  tab.turnBlocks = makeTurnBlocks();
+  tab.currentRequestId = null;
+  return true;
 }
 
 /**
@@ -290,7 +346,7 @@ function liveOwner(panel, requestId) {
  * updated; they render when the user switches to it.
  */
 function markBlocksDirty(panel, owner) {
-  const mirrored = mirrorSubagentBlocks(panel, owner.tab);
+  const mirrored = mirrorSubagentBlocks(panel, owner.source);
   if (owner.active || mirrored) panel.requestUpdate();
 }
 
@@ -331,14 +387,14 @@ function routeChunk(panel, detail, kind) {
   const owner = liveOwner(panel, requestId);
   if (!owner) return;
   const { tab } = owner;
-  if (!stageChunk(tab.turnBlocks, payload, kind)) return;
+  if (!stageChunk(owner.turn, payload, kind)) return;
   scheduleFlush(panel);
   // Apply synchronously in addition to scheduling the rAF coalesce. The rAF
   // caps re-render rate for rapid chunks; the sync path is insurance against
   // rAF starvation (backgrounded tab, panel briefly display:none). Both drain
   // the same staging map, so whichever runs second finds it empty.
-  if (requestId === tab.currentRequestId && tab.streaming) {
-    if (drainChunks(tab.turnBlocks)) markBlocksDirty(panel, owner);
+  if (owner.background || (requestId === tab.currentRequestId && tab.streaming)) {
+    if (drainChunks(owner.turn)) markBlocksDirty(panel, owner);
   }
 }
 
@@ -356,12 +412,16 @@ export function scheduleFlush(panel) {
     let activeChanged = false;
     const activeTab = panel._tabs.get(panel._activeTabId);
     for (const tab of panel._tabs.values()) {
-      if (!drainChunks(tab.turnBlocks)) continue;
-      if (tab === activeTab) activeChanged = true;
-      // A drained chunk can be the first one for a block produced inside a
-      // subagent, so the mirror runs on the same frame — otherwise the
-      // subagent's tab would sit on "Working…" until the next tool event.
-      if (mirrorSubagentBlocks(panel, tab)) activeChanged = true;
+      // A parked turn's subagents are still streaming into it.
+      const sources = [tab, ...(tab.backgroundTurns?.values() ?? [])];
+      for (const source of sources) {
+        if (!drainChunks(source.turnBlocks)) continue;
+        if (tab === activeTab) activeChanged = true;
+        // A drained chunk can be the first one for a block produced inside a
+        // subagent, so the mirror runs on the same frame — otherwise the
+        // subagent's tab would sit on "Working…" until the next tool event.
+        if (mirrorSubagentBlocks(panel, source)) activeChanged = true;
+      }
     }
     if (activeChanged) panel.requestUpdate();
   });
@@ -396,8 +456,8 @@ export function onTurnUsage(panel, event) {
     ? usage.turn_model_usage
     : null;
   if (!models || typeof models !== 'object') return;
-  owner.tab.turnBlocks.usage = usage;
-  if (owner.active) panel.requestUpdate();
+  owner.turn.usage = usage;
+  if (owner.active && !owner.background) panel.requestUpdate();
 }
 
 // ---------------------------------------------------------------
@@ -414,7 +474,7 @@ export function onToolUse(panel, event) {
   const { requestId, data } = event.detail || {};
   const owner = liveOwner(panel, requestId);
   if (!owner || !data) return;
-  if (applyToolUse(owner.tab.turnBlocks, data)) markBlocksDirty(panel, owner);
+  if (applyToolUse(owner.turn, data)) markBlocksDirty(panel, owner);
 }
 
 /**
@@ -427,7 +487,7 @@ export function onToolResult(panel, event) {
   const { requestId, data } = event.detail || {};
   const owner = liveOwner(panel, requestId);
   if (!owner || !data) return;
-  if (applyToolResult(owner.tab.turnBlocks, data)) markBlocksDirty(panel, owner);
+  if (applyToolResult(owner.turn, data)) markBlocksDirty(panel, owner);
 }
 
 // ---------------------------------------------------------------
@@ -452,7 +512,7 @@ export function onPermissionRequest(panel, event) {
   if (!toolUseId) return;
   const owner = findTabForRecentRequest(panel, data.request_id);
   if (!owner) return;
-  if (markAwaitingPermission(owner.tab.turnBlocks, toolUseId)) {
+  if (markAwaitingPermission(owner.turn, toolUseId)) {
     if (owner.tabId === panel._activeTabId) panel.requestUpdate();
   }
 }
@@ -470,7 +530,7 @@ export function onPermissionResolved(panel, event) {
   if (!data.tool_use_id) return;
   const owner = findTabForRecentRequest(panel, data.request_id);
   if (!owner) return;
-  if (applyPermissionOutcome(owner.tab.turnBlocks, data)) {
+  if (applyPermissionOutcome(owner.turn, data)) {
     if (owner.tabId === panel._activeTabId) panel.requestUpdate();
   }
 }
@@ -532,13 +592,13 @@ export function onSubagentEvent(panel, event) {
   const { requestId, data } = event.detail || {};
   const owner = liveOwner(panel, requestId);
   if (!owner || !data) return;
-  const turn = owner.tab.turnBlocks;
+  const turn = owner.turn;
   if (!applySubagentEvent(turn, data)) return;
   const synced = syncSubagentTab(
     panel,
     requestId,
     subagentRowFor(turn, data),
-    owner.tab,
+    owner.source,
   );
   markBlocksDirty(panel, owner);
   if (!synced) return;
@@ -1015,23 +1075,13 @@ export function onHookEvent(panel, event) {
  * A turn that produced no blocks at all still appends a message when it
  * errored: an empty transcript with a red LED gives the user nothing to read.
  *
- * A turn can end more than once. **A result message ends a turn, not the run**:
- * while a background subagent is in flight the engine keeps reading the stream
- * and main is woken for a follow-up turn, which ends in a result of its own
- * flagged `continuation` (`session.py` § `_drain_background`). Those revise the
- * message this handler already settled rather than appending a second one —
- * every field on the payload is cumulative over the request, so a second
- * message would repeat the whole turn under a second footer, and the subagent
- * row with it.
+ * A turn can end more than once — see `settleTurnMessage`. When it ends again
+ * after the next turn has started, it has been parked (`parkBackgroundTurn`)
+ * and `settleBackgroundTurn` revises it without touching the running turn.
  */
 export function onStreamComplete(panel, event) {
   const { requestId, result } = event.detail || {};
   if (!requestId) return;
-  const ownerTabId = findTabForRequest(panel, requestId);
-  if (!ownerTabId) return;
-  const ownerTab = panel._tabs.get(ownerTabId);
-  if (!ownerTab) return;
-  const ownerIsActive = ownerTabId === panel._activeTabId;
   // Task ids this result did *not* end — see `settleLiveSubagentTabs` and the
   // teardown below. Absent on a synthetic footer the browser built itself, and
   // on any engine older than the background drain, so an empty list is the
@@ -1039,76 +1089,35 @@ export function onStreamComplete(panel, event) {
   const backgroundTasks = Array.isArray(result?.background_tasks)
     ? result.background_tasks.filter((id) => typeof id === 'string' && id)
     : [];
+  const ownerTabId = findTabForRequest(panel, requestId);
+  if (!ownerTabId) {
+    settleBackgroundTurn(panel, requestId, result, backgroundTasks);
+    return;
+  }
+  const ownerTab = panel._tabs.get(ownerTabId);
+  if (!ownerTab) return;
+  const ownerIsActive = ownerTabId === panel._activeTabId;
 
   if (requestId === ownerTab.currentRequestId) {
-    // Drain anything staged but not yet applied: the engine can send the
-    // result immediately after its last chunk, before the rAF fires.
-    drainChunks(ownerTab.turnBlocks);
-    // Last chance to mirror: `resetTurnBlocks` below empties the list these
-    // blocks are read from, and a subagent's final tool result can arrive on
-    // the same tick as the turn's result.
-    mirrorSubagentBlocks(panel, ownerTab);
-
     const turn = ownerTab.turnBlocks;
-    const blocks = freezeBlocks(turn);
-    const subagents = [...turn.subagents.values()].map((row) => ({ ...row }));
-    // Union of the engine's own list and the one recovered from the blocks.
-    // The result message is authoritative when it arrives, but a turn that
-    // ended badly may carry tool results it never summarised.
-    const files = [...new Set([
-      ...(Array.isArray(result?.files_modified) ? result.files_modified : []),
-      ...collectFilesModified(blocks),
-    ])].filter((path) => typeof path === 'string' && path);
-
-    const content = typeof result?.response === 'string' ? result.response : '';
     const startedAt = ownerTab.streamStartedAt;
-    const durationField = typeof startedAt === 'number'
-      ? { durationMs: Math.max(0, Date.now() - startedAt) }
-      : {};
-
     // `user_message_id` identifies the turn for `rewind_files`. Stamped onto
     // the user message that started it, because that is the card the undo
     // affordance belongs on — "put the files back the way they were before I
-    // asked this".
-    if (typeof result?.user_message_id === 'string' && result.user_message_id) {
+    // asked this". A continuation's user message is long settled, and the
+    // last one in the tab may by now belong to a later turn.
+    if (
+      !result?.continuation
+      && typeof result?.user_message_id === 'string'
+      && result.user_message_id
+    ) {
       stampUserMessageId(ownerTab, result.user_message_id);
     }
-
-    const settled = {
-      role: 'assistant',
-      // The request this turn answered, so a continuation can find the message
-      // it has to revise. Nothing else reads it.
-      requestId,
-      content,
-      blocks,
-      subagents,
-      files,
-      turn: result && typeof result === 'object' ? { ...result } : {},
-      terminalReason: result?.terminal_reason ?? null,
-      ...durationField,
-    };
-    const revising = result?.continuation
-      ? findSettledTurn(ownerTab, requestId)
-      : -1;
-    if (revising >= 0) {
-      const previous = ownerTab.messages[revising];
-      ownerTab.messages = [
-        ...ownerTab.messages.slice(0, revising),
-        {
-          ...settled,
-          // The run timer stopped when the turn's presentation finished, so
-          // there is no new wall-clock reading to take. The first one measured
-          // what the user waited for and is the one the ⏱ chip means.
-          ...(previous.durationMs != null ? { durationMs: previous.durationMs } : {}),
-        },
-        ...ownerTab.messages.slice(revising + 1),
-      ];
-    } else if (blocks.length > 0 || content || result?.is_error) {
-      ownerTab.messages = [...ownerTab.messages, settled];
-    }
-
-    if (result?.is_error) emitEngineErrorToast(panel, result);
-    if (result?.deferred_tool_use) emitDeferredToolToast(panel, result);
+    const files = settleTurnMessage(panel, ownerTab, ownerTab, requestId, result, {
+      durationMs: typeof startedAt === 'number'
+        ? Math.max(0, Date.now() - startedAt)
+        : null,
+    });
 
     ownerTab.lastEditOutcome = computeTurnOutcome(result, files);
     // Subagent tabs settle with the turn, *except* the ones the engine says
@@ -1118,7 +1127,7 @@ export function onStreamComplete(panel, event) {
     // (outcome *unknown*, never "completed", per
     // specs5/5-webapp/subagent-browser.md § Status LEDs) or one still working.
     // Only `background_tasks` distinguishes them. The tabs stay in the strip
-    // for the rest of the turn; the next send clears them.
+    // until the turn that owns them finishes.
     settleLiveSubagentTabs(
       panel,
       requestId,
@@ -1136,9 +1145,9 @@ export function onStreamComplete(panel, event) {
     // spinner stopped, composer released — but a turn with background work
     // still on the stream keeps the state that work arrives through: emptying
     // `turnBlocks` or clearing `currentRequestId` would route the subagent's
-    // remaining blocks nowhere (`findTabForRequest` matches on
-    // `currentRequestId` alone) and its tab would stay as empty as it looked
-    // before the engine started following it.
+    // remaining blocks nowhere and its tab would stay as empty as it looked
+    // before the engine started following it. The next send parks it
+    // (`parkBackgroundTurn`) rather than overwriting it.
     if (backgroundTasks.length === 0) {
       resetTurnBlocks(turn);
       ownerTab.currentRequestId = null;
@@ -1155,6 +1164,104 @@ export function onStreamComplete(panel, event) {
 
   ownerTab.streams.delete(requestId);
   if (!ownerIsActive) panel.requestUpdate();
+}
+
+/**
+ * A result for a turn parked behind a newer one.
+ *
+ * Its background subagents finished, or main answered their notification: the
+ * engine revises that turn's footer with a `continuation` result. Everything
+ * here touches the parked record and the settled message alone — the tab's
+ * streaming state, run timer and edit LED belong to whichever turn is running
+ * now, and a stale result must not stop it.
+ */
+function settleBackgroundTurn(panel, requestId, result, backgroundTasks) {
+  const parked = findBackgroundTurn(panel, requestId);
+  if (!parked) return;
+  const { tab, turn } = parked;
+  settleTurnMessage(panel, tab, turn, requestId, result, { durationMs: null });
+  if (result?.is_error) emitEngineErrorToast(panel, result);
+  settleLiveSubagentTabs(
+    panel,
+    requestId,
+    Boolean(result?.is_error),
+    backgroundTasks,
+  );
+  loadSubagentFeedIfEmpty(panel, panel._activeTabId);
+  if (backgroundTasks.length === 0) tab.backgroundTurns.delete(requestId);
+  panel.requestUpdate();
+}
+
+/**
+ * Fold a turn's blocks and result into its settled assistant message.
+ *
+ * `source` is where the turn's blocks live — the tab for the turn it is
+ * streaming, or a parked record. Appends the message, or revises the one a
+ * continuation already settled. Returns the files the turn modified.
+ *
+ * A result can arrive more than once for a request: a background subagent
+ * outlives the turn's result and main is woken for a follow-up, which ends in
+ * a result flagged `continuation` (`session.py` § `_complete`). Those revise
+ * the message rather than appending a second one — every field on the payload
+ * is cumulative over the request, so a second message would repeat the whole
+ * turn under a second footer, and the subagent row with it.
+ */
+function settleTurnMessage(panel, tab, source, requestId, result, { durationMs }) {
+  // Drain anything staged but not yet applied: the engine can send the
+  // result immediately after its last chunk, before the rAF fires.
+  drainChunks(source.turnBlocks);
+  // Last chance to mirror: the turn's blocks are emptied once it settles, and
+  // a subagent's final tool result can arrive on the same tick as the result.
+  mirrorSubagentBlocks(panel, source);
+
+  const turn = source.turnBlocks;
+  const blocks = freezeBlocks(turn);
+  const subagents = [...turn.subagents.values()].map((row) => ({ ...row }));
+  // Union of the engine's own list and the one recovered from the blocks.
+  // The result message is authoritative when it arrives, but a turn that
+  // ended badly may carry tool results it never summarised.
+  const files = [...new Set([
+    ...(Array.isArray(result?.files_modified) ? result.files_modified : []),
+    ...collectFilesModified(blocks),
+  ])].filter((path) => typeof path === 'string' && path);
+  const content = typeof result?.response === 'string' ? result.response : '';
+
+  const settled = {
+    role: 'assistant',
+    // The request this turn answered, so a continuation can find the message
+    // it has to revise. Nothing else reads it.
+    requestId,
+    content,
+    blocks,
+    subagents,
+    files,
+    turn: result && typeof result === 'object' ? { ...result } : {},
+    terminalReason: result?.terminal_reason ?? null,
+    ...(durationMs != null ? { durationMs } : {}),
+  };
+  const revising = result?.continuation ? findSettledTurn(tab, requestId) : -1;
+  if (revising >= 0) {
+    const previous = tab.messages[revising];
+    tab.messages = [
+      ...tab.messages.slice(0, revising),
+      {
+        ...settled,
+        // The run timer stopped when the turn's presentation finished, so
+        // there is no new wall-clock reading to take. The first one measured
+        // what the user waited for and is the one the ⏱ chip means.
+        ...(previous.durationMs != null ? { durationMs: previous.durationMs } : {}),
+      },
+      ...tab.messages.slice(revising + 1),
+    ];
+  } else if (blocks.length > 0 || content || result?.is_error) {
+    tab.messages = [...tab.messages, settled];
+  }
+
+  if (source === tab) {
+    if (result?.is_error) emitEngineErrorToast(panel, result);
+    if (result?.deferred_tool_use) emitDeferredToolToast(panel, result);
+  }
+  return files;
 }
 
 /**
@@ -1232,11 +1339,26 @@ export function emitDeferredToolToast(panel, result) {
  * stands rather than an empty card waiting for the next token. The next live
  * chunk for a block is compared against the snapshot's `seq`, so replay does
  * not reopen the door to stale chunks.
+ *
+ * An entry flagged `background` is an older turn whose result is already
+ * settled but whose background subagents are still running: it comes back
+ * parked (`parkBackgroundTurn`), with its blocks and none of the streaming
+ * state — the composer, spinner and run timer belong to the turn in flight.
+ *
+ * Returns what the turn's blocks now live in — the tab, or the parked record —
+ * so the caller can rebuild the subagent tabs from it; null for a malformed
+ * entry.
  */
 export function resumeStreamBlocks(panel, tab, stream) {
-  if (!tab || !stream || typeof stream !== 'object') return false;
+  if (!tab || !stream || typeof stream !== 'object') return null;
   const requestId = stream.request_id;
-  if (typeof requestId !== 'string' || !requestId) return false;
+  if (typeof requestId !== 'string' || !requestId) return null;
+  if (stream.background) {
+    const parked = { requestId, turnBlocks: makeTurnBlocks() };
+    applyReplayBlocks(parked.turnBlocks, stream.blocks);
+    tab.backgroundTurns.set(requestId, parked);
+    return parked;
+  }
   applyReplayBlocks(tab.turnBlocks, stream.blocks);
   // The counter as it stood, for the same reason the blocks come back: the
   // next push is a whole assistant message away, and a reconnect in the middle
@@ -1255,7 +1377,7 @@ export function resumeStreamBlocks(panel, tab, stream) {
   tab.streamStartedAt = Number.isFinite(startedAt) && startedAt > 0
     ? startedAt * 1000
     : Date.now();
-  return true;
+  return tab;
 }
 
 // The retry banner lived here until conversion phase 3. AIC⚡DC's own
@@ -1286,8 +1408,15 @@ export function resumeStreamBlocks(panel, tab, stream) {
  * entirely — the files the agent modified — and is untouched.
  */
 export function onUserMessage(panel, event) {
-  if (panel._currentRequestId) return;
   const data = event.detail || {};
+  // Our own echo is the request we are running. A turn parked with background
+  // work keeps its request id without being ours to answer for, so a
+  // collaborator's prompt arriving meanwhile is still theirs to show.
+  if (data.request_id) {
+    if (liveOwner(panel, data.request_id)) return;
+  } else if (panel._currentRequestId) {
+    return;
+  }
   const content = data.content ?? '';
   if (!content) return;
   panel.messages = [

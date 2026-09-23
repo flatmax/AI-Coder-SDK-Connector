@@ -1133,6 +1133,152 @@ describe('ChatPanel agent tabs', () => {
     await continuation(p, reqId);
     expect(p.messages.at(-1).content).toContain('The background agent finished.');
   });
+
+  // -------------------------------------------------------------------
+  // Sending while an older turn's subagents still run
+  // -------------------------------------------------------------------
+  //
+  // The composer is free once a turn's result lands, background work or not.
+  // The next send used to take the older turn's `currentRequestId` and
+  // `turnBlocks`, so its subagents' remaining work became unroutable and their
+  // tabs left the strip. Now the older turn is parked and each event goes to
+  // the turn whose request id it carries.
+
+  it('sending parks a turn whose subagents are still running', async () => {
+    const p = mountPanel();
+    const first = await backgroundTurn(p);
+    const second = await startMainStream(p, 'next');
+    const main = p._tabs.get('main');
+    expect(main.currentRequestId).toBe(second);
+    expect(main.backgroundTurns.has(first)).toBe(true);
+    // Its subagent's tab survives the send.
+    expect(subagentTab(p)).toBeTruthy();
+  });
+
+  it('an older turn’s blocks stay out of the running turn', async () => {
+    const p = mountPanel();
+    const first = await backgroundTurn(p);
+    await startMainStream(p, 'next');
+    pushEvent('tool-use', {
+      requestId: first,
+      data: {
+        tool_use_id: 'toolu_bash',
+        name: 'Bash',
+        input: { command: 'git log --stat' },
+        agent_id: 'toolu_task',
+      },
+    });
+    await settle(p);
+    const main = p._tabs.get('main');
+    expect(main.turnBlocks.index.has('toolu_bash')).toBe(false);
+    expect(main.backgroundTurns.get(first).turnBlocks.index.has('toolu_bash')).toBe(true);
+    // And it still reaches the subagent's feed.
+    const commands = subagentTab(p).turnBlocks.blocks
+      .map((b) => b.tool?.input?.command)
+      .filter(Boolean);
+    expect(commands).toContain('git log --stat');
+  });
+
+  it('an older turn’s late result revises it and leaves the running turn alone', async () => {
+    const p = mountPanel();
+    const first = await backgroundTurn(p);
+    const second = await startMainStream(p, 'next');
+    pushEvent('stream-complete', {
+      requestId: first,
+      result: {
+        response: 'dispatched, and done',
+        terminal_reason: 'completed',
+        continuation: true,
+        background_finished: true,
+        background_tasks: [],
+      },
+    });
+    await settle(p);
+    const main = p._tabs.get('main');
+    // The running turn is still running.
+    expect(p._streaming).toBe(true);
+    expect(main.currentRequestId).toBe(second);
+    expect(main.streamStartedAt).toEqual(expect.any(Number));
+    // The older turn's message is revised in place, not appended after the
+    // newer prompt.
+    const answers = p.messages.filter((m) => m.role === 'assistant');
+    expect(answers).toHaveLength(1);
+    expect(answers[0].requestId).toBe(first);
+    expect(answers[0].content).toBe('dispatched, and done');
+    expect(main.backgroundTurns.has(first)).toBe(false);
+  });
+
+  it('a parked turn’s subagent settles on its own terminal event', async () => {
+    const p = mountPanel();
+    const first = await backgroundTurn(p);
+    await startMainStream(p, 'next');
+    pushEvent('subagent-event', {
+      requestId: first,
+      data: {
+        task_id: 'task-1',
+        agent_id: 'agent-1',
+        status: 'completed',
+        terminal: true,
+        summary: 'listed 1 commit',
+      },
+    });
+    await settle(p);
+    expect(subagentTab(p).subagent.status).toBe('completed');
+    expect(subagentTab(p).subagent.unknown).toBe(false);
+  });
+
+  it('the running turn’s result leaves the parked turn’s tabs alone', async () => {
+    const p = mountPanel();
+    await backgroundTurn(p);
+    const second = await startMainStream(p, 'next');
+    pushEvent('stream-complete', {
+      requestId: second,
+      result: { response: '51', terminal_reason: 'completed', background_tasks: [] },
+    });
+    await settle(p);
+    const tab = subagentTab(p);
+    expect(tab.subagent.settled).toBe(false);
+    expect(tab.subagent.unknown).toBe(false);
+  });
+
+  it('a turn with nothing left running is not parked', async () => {
+    const p = mountPanel();
+    const first = await startMainStream(p);
+    pushEvent('stream-complete', {
+      requestId: first,
+      result: { response: 'done', terminal_reason: 'completed', background_tasks: [] },
+    });
+    await settle(p);
+    await startMainStream(p, 'next');
+    expect(p._tabs.get('main').backgroundTurns.size).toBe(0);
+  });
+
+  it('a refresh brings a background turn back parked', async () => {
+    const p = mountPanel();
+    resumeActiveStreams(p, [
+      {
+        request_id: 'req-old',
+        background: true,
+        blocks: [],
+        subagents: [{
+          key: 'task-1',
+          task_id: 'task-1',
+          agent_id: 'agent-1',
+          tool_use_id: 'toolu_task',
+          description: 'describe git log --stat',
+          task_type: 'local_agent',
+          status: 'running',
+        }],
+      },
+      { request_id: 'req-new', blocks: [], started_at: Date.now() / 1000 },
+    ]);
+    await settle(p);
+    const main = p._tabs.get('main');
+    expect(main.currentRequestId).toBe('req-new');
+    expect(main.streaming).toBe(true);
+    expect(main.backgroundTurns.has('req-old')).toBe(true);
+    expect(subagentTab(p).subagent.requestId).toBe('req-old');
+  });
 });
 
 // The `onStreamRetry` suite stood here until conversion phase 3. It asserted

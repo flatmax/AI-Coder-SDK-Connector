@@ -362,10 +362,15 @@ function _syncSubagentTab(panel, requestId, row, ownerTab, allowCreate) {
     // `clearSubagentTabs`) would otherwise make the next turn's first
     // delegation `2` with no `1` beside it. Numbering them by turn instead
     // is worse, not better — it puts two tabs labelled `1` in the strip.
+    // One past the highest rather than a count: an older turn's tabs survive
+    // a send while its subagents run (`keepRequests`), and a count taken after
+    // some of them left would hand out a number still on screen.
     ordinal = isConsultation(row)
       ? 0
       : subagentTabs(panel)
-        .filter(({ tab }) => !isConsultation(tab.subagent)).length + 1;
+        .filter(({ tab }) => !isConsultation(tab.subagent))
+        .reduce((most, { tab }) => Math.max(most, tab.subagent.ordinal || 0), 0)
+        + 1;
     const state = makeTabState();
     // No input surface at all on this tab — see the module note.
     state.readOnly = true;
@@ -508,16 +513,16 @@ export function settleSubagentTab(panel, tab, options = {}) {
  * That reading is only true of the tasks this result actually ended, which is
  * why `stillRunning` exists. **A result message ends a turn, not the run**: a
  * background subagent outlives the turn that spawned it, the engine keeps
- * following it (`session.py` § `_drain_background`), and it names what is still
+ * following it (`session.py` § `_complete`), and it names what is still
  * going in `background_tasks`. Settling those was this bug's most visible face
  * — an amber "status unknown at turn end" LED on a subagent that went on to
  * finish successfully seconds later, on a tab whose feed was empty because
  * nothing after the result had been read.
  *
- * Tabs whose `requestId` names a different turn are left alone: nothing
- * currently produces them (subagent tabs are cleared at each send) but
- * settling another turn's feed on this turn's result would be wrong if
- * anything ever did.
+ * Tabs whose `requestId` names a different turn are left alone: an older
+ * turn's tabs stay in the strip while its background subagents run
+ * (`clearSubagentTabs` § `keepRequests`), and this turn's result says nothing
+ * about them.
  */
 export function settleLiveSubagentTabs(panel, requestId, errored, stillRunning = []) {
   const running = new Set(Array.isArray(stillRunning) ? stillRunning : []);
@@ -562,13 +567,23 @@ export function settleLiveSubagentTabs(panel, requestId, errored, stillRunning =
  * this replaces, was the unbounded one — but there is no way to close one by
  * hand, which is AG-R-31.
  *
+ * `keepRequests` spares the tabs of turns the send is not ending: a turn
+ * parked with its background subagents still running (`parkBackgroundTurn`
+ * in streaming.js). Their feeds are still arriving, and the tab is the only
+ * place they show until that turn settles. The session change passes nothing
+ * and takes them too.
+ *
  * Switches to Main before deleting when the active tab is one of them, so the
  * per-tab accessors are never left pointing at a missing key (they would
  * silently lazy-read `undefined[field]` and throw).
  */
-export function clearSubagentTabs(panel, { keepConsultations = false } = {}) {
+export function clearSubagentTabs(
+  panel,
+  { keepConsultations = false, keepRequests = null } = {},
+) {
   const open = subagentTabs(panel).filter(
-    ({ tab }) => !(keepConsultations && isConsultation(tab.subagent)),
+    ({ tab }) => !(keepConsultations && isConsultation(tab.subagent))
+      && !keepRequests?.has(tab.subagent.requestId),
   );
   if (open.length === 0) return false;
   if (open.some(({ tabId }) => tabId === panel._activeTabId)) {
@@ -648,11 +663,17 @@ export function mirrorSubagentBlocks(panel, ownerTab) {
  * message when it ends, and which one has them is a fact about the *turn*,
  * not about the subagent. Searching both is what lets the caller stop caring:
  * one consultation tab, whether the turn that asked it is still going or not.
+ * A turn parked behind a newer one (`parkBackgroundTurn`) is still going.
  */
 export function findSubagentBlocks(ownerTab, toolUseId) {
   if (!toolUseId || !ownerTab || ownerTab.subagent) return [];
-  const live = ownerTab.turnBlocks?.blocks;
-  if (Array.isArray(live)) {
+  const running = [
+    ownerTab.turnBlocks,
+    ...Array.from(ownerTab.backgroundTurns?.values() ?? [], (parked) => parked.turnBlocks),
+  ];
+  for (const turn of running) {
+    const live = turn?.blocks;
+    if (!Array.isArray(live)) continue;
     const mine = live.filter((block) => block?.agent_id === toolUseId);
     if (mine.length > 0) return mine;
   }
@@ -697,6 +718,9 @@ export function openConsultationTab(panel, requestId, row, ownerTab) {
   // state; `mirrorSubagentBlocks` is idempotent on `block_id`, so the
   // catch-up and the next streamed block cannot double up.
   mirrorSubagentBlocks(panel, ownerTab);
+  for (const parked of ownerTab?.backgroundTurns?.values() ?? []) {
+    mirrorSubagentBlocks(panel, parked);
+  }
   if (synced.tab.turnBlocks.blocks.length === 0) {
     // The settled route: the turn ended and emptied the list mirroring
     // reads, so its record is in a message now. Projected into the feed

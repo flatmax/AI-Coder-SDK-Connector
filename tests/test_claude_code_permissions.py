@@ -85,7 +85,7 @@ def broker(tmp_path, events):
     return PermissionBroker(
         tmp_path,
         broadcast=events,
-        note_prompt=lambda tool_use_id: "req-1",
+        note_prompt=lambda tool_use_id, **_: "req-1",
         no_localhost_timeout=1.0,
     )
 
@@ -1090,7 +1090,7 @@ class TestOurOwnToolsAreUngated:
         broker = PermissionBroker(
             tmp_path,
             broadcast=events,
-            note_prompt=lambda tool_use_id: noted.append(tool_use_id) or "req-1",
+            note_prompt=lambda tool_use_id, **_: noted.append(tool_use_id) or "req-1",
         )
         await broker.can_use_tool("mcp__aic-dc__doc_outline", {}, FakeContext())
         assert noted == []
@@ -1559,7 +1559,7 @@ class TestCancelForTurn:
         broker = PermissionBroker(
             tmp_path,
             broadcast=events,
-            note_prompt=lambda tool_use_id: next(turns),
+            note_prompt=lambda tool_use_id, **_: next(turns),
         )
         first = await ask(broker)
         second = asyncio.create_task(
@@ -1575,6 +1575,31 @@ class TestCancelForTurn:
         await broker.cancel_all()
         await second
 
+    async def test_a_subagents_request_names_its_agent_to_the_turn_lookup(
+        self, tmp_path, events
+    ):
+        """A background subagent's turn need not be the one in flight, and
+        only the session can tell which it is — by the agent. Main's own call
+        is noted with the id alone, which is all the other engines take."""
+        noted: list[tuple] = []
+
+        def note(tool_use_id, **kwargs):
+            noted.append((tool_use_id, kwargs))
+            return "req-1"
+
+        broker = PermissionBroker(tmp_path, broadcast=events, note_prompt=note)
+        subagent = await ask(broker, context=FakeContext(agent_id="agent-7"))
+        main = asyncio.create_task(
+            broker.can_use_tool("Bash", {"command": "pwd"}, FakeContext("toolu_02"))
+        )
+        await settle(lambda: len(broker.pending()) >= 2)
+        assert noted[0][1] == {"agent_id": "agent-7"}
+        assert noted[1] == ("toolu_02", {})
+
+        await broker.cancel_all()
+        await subagent
+        await main
+
     async def test_a_request_with_no_turn_is_never_swept(self, tmp_path, events):
         """A request raised outside a turn belongs to no turn.
 
@@ -1585,7 +1610,7 @@ class TestCancelForTurn:
         broker = PermissionBroker(
             tmp_path,
             broadcast=events,
-            note_prompt=lambda tool_use_id: None,
+            note_prompt=lambda tool_use_id, **_: None,
         )
         task = await ask(broker)
 
@@ -1678,7 +1703,7 @@ class TestSpareSubagents:
 
     async def test_cancel_for_agent_leaves_other_scopes_alone(self, tmp_path, events):
         broker = PermissionBroker(
-            tmp_path, broadcast=events, note_prompt=lambda tool_use_id: "req-1"
+            tmp_path, broadcast=events, note_prompt=lambda tool_use_id, **_: "req-1"
         )
         mine = await ask(broker, context=FakeContext(agent_id="agent-7"))
         theirs = asyncio.create_task(

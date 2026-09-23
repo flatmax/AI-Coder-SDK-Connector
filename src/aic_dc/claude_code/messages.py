@@ -1315,7 +1315,7 @@ class TurnTranslator:
             # them: a turn that used a subagent on a cheaper model reports
             # both models here. **Cumulative across the session**, not this
             # turn's — the CLI's own schema says so, and
-            # `EngineSession._price_turn` adds the per-turn difference beside
+            # `EngineSession._price_for` adds the per-turn difference beside
             # it rather than reinterpreting this field.
             "model_usage": {k: dict(v) for k, v in (model_usage or {}).items()} or None,
             # Also cumulative: the session's running estimate, not this

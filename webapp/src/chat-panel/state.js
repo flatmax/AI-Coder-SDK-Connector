@@ -100,6 +100,13 @@ export function makeTabState() {
     // the same object. Frozen onto the settled assistant message at
     // completion, then reset — a tab never carries two turns' live blocks.
     turnBlocks: makeTurnBlocks(),
+    // Turns this tab has moved on from while their background subagents are
+    // still working, by request id: `{requestId, turnBlocks}`. A send parks
+    // the lingering turn here instead of resetting it, so the older turn's
+    // remaining events still have blocks to fold into — see
+    // `parkBackgroundTurn` in streaming.js. Deleted when the engine reports
+    // that turn's background work finished.
+    backgroundTurns: new Map(),
     // Run-timer start stamp. Set to Date.now() the
     // moment a turn's stream is armed on this tab
     // (send, resume-after-reconnect, agent spawn /

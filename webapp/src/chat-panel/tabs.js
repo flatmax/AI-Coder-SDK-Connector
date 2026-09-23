@@ -91,6 +91,27 @@ export function findTabForRequest(panel, requestId) {
   return null;
 }
 
+/**
+ * The parked turn that owns ``requestId``, or null.
+ *
+ * A turn whose result left background subagents running is moved aside when
+ * the next message is sent (`parkBackgroundTurn` in streaming.js), and its
+ * events keep arriving under its own request id after that. They belong to
+ * the parked turn, never to whichever turn is current — which is why this is
+ * a separate lookup rather than a third pass in `findTabForRequest`, whose
+ * callers all mean "the turn this tab is streaming".
+ *
+ * Returns ``{tabId, tab, turn}`` or null.
+ */
+export function findBackgroundTurn(panel, requestId) {
+  if (!requestId) return null;
+  for (const [tabId, tab] of panel._tabs) {
+    const turn = tab.backgroundTurns?.get(requestId);
+    if (turn) return { tabId, tab, turn };
+  }
+  return null;
+}
+
 // ---------------------------------------------------------------
 // Tab activation, close, overflow menu
 // ---------------------------------------------------------------

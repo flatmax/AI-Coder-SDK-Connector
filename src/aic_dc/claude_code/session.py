@@ -19,8 +19,9 @@ Three behaviours here are load-bearing and easy to lose in a refactor
   disconnecting mid-turn is AIC-DC's normal case, not an edge case.
 - **A result message ends a turn, not the run.** While a background task is
   in flight the stream keeps carrying that task's life *and* main's reply to
-  its notification, so consumption continues past the turn's result — see
-  :meth:`EngineSession._drain_background`.
+  its notification, so the stream is read between turns too, and every
+  message goes to the turn that owns it rather than the one that happens to
+  be current — see :meth:`EngineSession._route`.
 - **A turn's lifetime is independent of any WebSocket.** The pump writes
   into the translator, which accumulates the transcript, so a client that
   reconnects mid-turn replays from server state.
@@ -152,11 +153,25 @@ class ActiveTurn:
     drain_watchdog: asyncio.Task[None] | None = None
     # Task ids started but not yet finished. Non-empty at the result message
     # means the run has not ended, only this turn has — see
-    # `EngineSession._drain_background`.
+    # `EngineSession._complete`.
     tasks_in_flight: set[str] = field(default_factory=set)
     # Engine-side counters summed over every result this turn produces, for
     # the same reason the cost baseline is per-turn — see `accrue`.
     accrued: dict[str, int] = field(default_factory=dict)
+    # Where this turn's events go. Held on the turn rather than passed to
+    # whichever loop is reading, because a turn's events can now be read by a
+    # *later* turn's pump — see `EngineSession._route`.
+    emit: Emit | None = None
+    # Results this turn has produced. The first is the turn's own footer and
+    # every later one a continuation.
+    results: int = 0
+    # The last `streamComplete` payload emitted for this turn, so a turn whose
+    # background work ends inside another turn can still be closed with one.
+    last_result: dict[str, Any] | None = None
+    # The cost fields that payload carried. Reused, not re-priced, for a
+    # result read after a newer turn took the pricing anchor — see
+    # `EngineSession._price_for`.
+    priced: dict[str, Any] | None = None
 
     def accrue(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         """Sum the engine's per-result counters over the whole turn.
@@ -338,9 +353,29 @@ class EngineSession:
         self._cost = CostLedger()
         self._client: Any = None
         self._active_turn: ActiveTurn | None = None
-        # Consumes the stream between turns while a background task is still
-        # running. Never concurrent with a pump: see _stop_background_drain.
+        # Consumes the stream between turns. Never concurrent with a pump: see
+        # _stop_background_drain.
         self._drain: asyncio.Task[None] | None = None
+        # Turns whose result arrived with background tasks still in flight,
+        # by request id. They outlive their turn and go on receiving events
+        # while later turns run — see `_route`.
+        self._background: dict[str, ActiveTurn] = {}
+        # Routing keys — `Task` call ids, task ids, agent ids, nested tool
+        # call ids — to the turn that owns them. Pruned when a turn retires,
+        # because the value holds the turn's whole translator.
+        self._owners: dict[str, ActiveTurn] = {}
+        # The turn main is speaking for, and whether it is still speaking.
+        # Closed by a result; opened by a user turn or by main waking up.
+        self._main: ActiveTurn | None = None
+        self._main_open = False
+        # The turn whose background task most recently finished, which is the
+        # one main's next unprompted reply answers.
+        self._woken: ActiveTurn | None = None
+        # The turn that anchored the cost ledger last — see `_price_for`.
+        self._pricing: ActiveTurn | None = None
+        # Routing keys of turns that have retired. A late message keyed to one
+        # is dropped rather than handed to whichever turn is current.
+        self._retired_keys: set[str] = set()
         # Task ids the CLI typed as something other than a subagent — in
         # practice a backgrounded `Bash` command. Held here rather than on the
         # translator because a slow command outlives the turn that ran it and
@@ -555,24 +590,48 @@ class EngineSession:
         return self._active_turn.request_id if self._active_turn is not None else None
 
     def active_streams(self) -> list[dict[str, Any]]:
-        """Replay payload for a client that connects mid-turn."""
-        return [self._active_turn.to_dict()] if self._active_turn else []
+        """Replay payload for a client that connects mid-turn.
 
-    def note_permission_prompt(self, tool_use_id: str | None = None) -> str | None:
-        """Record a permission prompt against the turn in flight.
+        Background turns first, oldest first, then the turn in flight. A
+        background entry is flagged ``background``: its own presentation has
+        settled and only its subagents are still working, so a client must
+        not resume it as the foreground stream.
+        """
+        streams = [
+            {**turn.to_dict(), "background": True}
+            for turn in self._background.values()
+            if turn is not self._active_turn
+        ]
+        if self._active_turn is not None:
+            streams.append(self._active_turn.to_dict())
+        return streams
+
+    def note_permission_prompt(
+        self, tool_use_id: str | None = None, agent_id: str | None = None
+    ) -> str | None:
+        """Record a permission prompt against the turn that raised it.
 
         The permission layer calls this once per request: it counts the
         prompt for the turn footer's click-through metric, marks the tool
         card as gated, and hands back the request ID so the dialog can be
-        attributed to a turn. Returns ``None`` when no turn is running,
-        which is a request raised outside a turn — legal, and rendered
-        without a turn attribution.
+        attributed to a turn. A subagent's request belongs to the turn that
+        spawned the subagent, which is not the turn in flight once a
+        background subagent has outlived its own. Returns ``None`` when no
+        turn owns it, which is a request raised outside a turn — legal, and
+        rendered without a turn attribution.
         """
-        active = self._active_turn
-        if active is None:
+        owner = next(
+            (
+                self._owners[key]
+                for key in (agent_id, tool_use_id)
+                if key and key in self._owners
+            ),
+            self._active_turn,
+        )
+        if owner is None:
             return None
-        active.translator.note_permission_prompt(tool_use_id)
-        return active.request_id
+        owner.translator.note_permission_prompt(tool_use_id)
+        return owner.request_id
 
     def _note_cli_stderr(self, line: str) -> None:
         """Receive one line of the CLI's own stderr.
@@ -687,6 +746,8 @@ class EngineSession:
             # "resumed sessions start fresh". Carrying our baseline across a
             # connect would price the new session's first turn as a refund.
             self._cost.reset()
+            # Nothing a previous process started can still be running.
+            self._forget_turns()
             # The wall clock `/usage` reports restarts with the ledger it sits
             # beside, and for the same reason: both describe what this engine
             # process has done, and a duration carried across a reconnect
@@ -916,12 +977,15 @@ class EngineSession:
             request_id=turn.request_id,
             translator=translator,
             started_at=self._clock(),
+            emit=emit,
         )
         self._active_turn = active
+        self._pricing = active
 
         try:
+            await self._take_main(active)
             await self._send(turn)
-            return await self._pump(active, emit)
+            return await self._pump(active)
         finally:
             self._last_session_id = translator.session_id or self._last_session_id
             active.done.set()
@@ -933,7 +997,11 @@ class EngineSession:
             # background agent to finish before accepting a message would
             # defeat the point of running one.
             self._active_turn = None
-            self._start_background_drain(active, emit)
+            if active.results == 0:
+                # Failed before any result was routed to it — `_fail_turn`
+                # emitted the footer directly — so nothing retired it.
+                self._retire(active)
+            self._start_background_drain()
 
     async def _send(self, turn: Turn) -> None:
         """Write the user turn to the CLI."""
@@ -947,24 +1015,30 @@ class EngineSession:
         else:
             await client.query(compose_prompt(turn))
 
-    async def _pump(self, active: ActiveTurn, emit: Emit | None) -> dict[str, Any]:
-        """Iterate to ``ResultMessage``, translating and emitting.
+    async def _pump(self, active: ActiveTurn) -> dict[str, Any]:
+        """Iterate to this turn's ``ResultMessage``, routing and emitting.
 
-        Never exits the iterator early. The one exception is the engine
-        itself failing, which raises out of the iterator rather than being
-        a decision we make.
+        Leaves the iterator only at this turn's result, exactly where
+        ``receive_response()`` would, or when the engine itself fails and
+        raises out of it.
+
+        Reads ``receive_messages()`` rather than ``receive_response()``,
+        which returns at the first result of any turn. With a background
+        turn still being followed, the stream carries that turn's messages
+        too, and every message is handed to the turn that owns it
+        (:meth:`_route`) — so the pump ends on *its own* result, the same
+        way ``receive_response()`` ends on the result, just without that
+        method's single-turn assumption.
         """
         client = self._client
-        translator = active.translator
         result: dict[str, Any] | None = None
 
         try:
-            async for message in client.receive_response():
-                for event in translator.translate(message):
-                    event = self._fold_session_state(active, event)
-                    if event.name == "streamComplete":
-                        result = event.payload
-                    await self._emit(emit, event)
+            async for message in client.receive_messages():
+                await self._deliver(message)
+                if active.results:
+                    result = active.last_result
+                    break
         except asyncio.CancelledError:
             # Someone cancelled the pump task itself. The turn is still
             # running inside the CLI, so say so rather than reporting a
@@ -973,14 +1047,14 @@ class EngineSession:
             raise
         except Exception as exc:
             logger.exception("Message pump failed for request %s", active.request_id)
-            result = await self._fail_turn(active, emit, exc)
+            result = await self._fail_turn(active, active.emit, exc)
 
         if result is None:
-            # The iterator ended without a result message, which
-            # receive_response() only does if the stream closed under it.
+            # The iterator ended without a result message, which it only
+            # does if the stream closed under it.
             result = await self._fail_turn(
                 active,
-                emit,
+                active.emit,
                 SessionLostError("The engine closed the stream before the turn finished."),
             )
         return result
@@ -1042,7 +1116,7 @@ class EngineSession:
             return Event(
                 "streamComplete",
                 {
-                    **self._price_turn(active.accrue(event.payload)),
+                    **self._price_for(active, active.accrue(event.payload)),
                     # Which background tasks this result did *not* end. The
                     # browser settles a live subagent tab at the turn's result
                     # and has no other way to tell "its terminal event never
@@ -1058,22 +1132,225 @@ class EngineSession:
         return event
 
     # ------------------------------------------------------------------
+    # Routing
+    # ------------------------------------------------------------------
+
+    async def _deliver(self, message: Any) -> None:
+        """Translate one SDK message for the turn that owns it, and emit it.
+
+        Whichever loop is reading — a turn's pump or the drain between turns
+        — hands every message here, so a background subagent's messages reach
+        the turn that spawned it however many turns later they arrive.
+        """
+        owner = self._route(message)
+        if owner is None:
+            return
+        # Registered before translating: a nested tool call's own events can
+        # follow in the same breath, and they route by the id this message
+        # introduces.
+        self._register(owner, message)
+        for event in owner.translator.translate(message):
+            event = self._fold_session_state(owner, event)
+            if event.name == "streamComplete":
+                await self._complete(owner, event)
+                continue
+            if event.name == "subagentEvent" and (
+                event.payload.get("type") == "notification"
+                or event.payload.get("terminal")
+            ):
+                # Main's next unprompted reply is to this.
+                self._woken = owner
+            await self._emit(owner.emit, event)
+
+    def _route(self, message: Any) -> ActiveTurn | None:
+        """The turn ``message`` belongs to.
+
+        **Every message carries enough to say whose it is, and that is the
+        whole design.** A subagent's messages carry the spawning ``Task``
+        call's id as ``parent_tool_use_id``; a task's lifecycle messages carry
+        its ``task_id`` and the id of the call that started it; a nested
+        ``Bash`` inside a subagent is a task whose ``tool_use_id`` is the
+        subagent's own tool call. Each of those was registered to a turn when
+        it first appeared (:meth:`_register`), so a chain of lookups reaches
+        the owner however deep the nesting — measured against the CLI on
+        2026-09-23, not assumed.
+
+        What carries none of those is main speaking, and main speaks for
+        :attr:`_main`: the user turn that last took it, or — once a result
+        has closed it — the turn whose task notification woke main up.
+
+        A message keyed to a turn that has already retired is dropped rather
+        than handed to whoever is current, which is the mis-attribution this
+        routing exists to end.
+        """
+        keys = _routing_keys(message)
+        for key in keys:
+            owner = self._owners.get(key)
+            if owner is not None:
+                return owner
+        if any(key in self._retired_keys for key in keys):
+            return None
+        if _is_main_speech(message) and not self._main_open:
+            # Main speaking unprompted: the follow-up a task notification
+            # woke it for, which answers the turn that owns the task.
+            self._main = self._woken or self._main or self._pricing
+            self._main_open = True
+            self._woken = None
+        return self._main or self._pricing
+
+    def _register(self, owner: ActiveTurn, message: Any) -> None:
+        """File every id ``message`` introduces under ``owner``."""
+        from claude_agent_sdk import AssistantMessage
+
+        if isinstance(message, AssistantMessage):
+            for block in message.content or ():
+                block_id = getattr(block, "id", None)
+                if isinstance(block_id, str) and block_id:
+                    self._owners[block_id] = owner
+            return
+        for key in _task_keys(message):
+            self._owners[key] = owner
+
+    async def _complete(self, owner: ActiveTurn, event: Event) -> None:
+        """Emit a result for ``owner`` and settle what it ends.
+
+        A result is always main's, and it closes main. The owner's *first*
+        result is its footer; any later one is main's reply to a task
+        notification and is flagged ``continuation`` so the browser revises
+        the settled turn instead of appending a second footer —
+        ``background_finished`` marks the last of them, which is what the
+        service runs its post-turn housekeeping a second time on.
+        """
+        self._main_open = False
+        owner.results += 1
+        payload = dict(event.payload)
+        if owner.results > 1:
+            payload["continuation"] = True
+            payload["background_finished"] = not owner.tasks_in_flight
+        owner.last_result = payload
+        await self._emit(
+            owner.emit, Event("streamComplete", payload, turn_scoped=event.turn_scoped)
+        )
+        if owner.tasks_in_flight and not (owner.results == 1 and owner.cancelled):
+            if owner.request_id not in self._background:
+                logger.info(
+                    "Turn %s finished with %d background task(s) still running; "
+                    "following them past its result",
+                    owner.request_id,
+                    len(owner.tasks_in_flight),
+                )
+            self._background[owner.request_id] = owner
+        else:
+            self._retire(owner)
+        await self._finalize_background(skip=owner)
+
+    async def _take_main(self, turn: ActiveTurn) -> None:
+        """Give main to a user turn as it is sent.
+
+        Immediately, not once main's current reply ends: the CLI folds a
+        prompt that arrives mid-reply into that reply, so the one result both
+        produce is the only one the new turn will ever get.
+        """
+        self._main = turn
+        self._main_open = True
+        self._woken = None
+        await self._finalize_background(skip=turn)
+
+    async def _finalize_background(self, skip: ActiveTurn | None) -> None:
+        """Close every background turn whose tasks have all finished.
+
+        A turn whose task notification landed inside another turn gets no
+        result of its own — the CLI answers it within that turn — so this is
+        the only thing that ends it. The footer is its last one, revised with
+        what the background work added.
+        """
+        for turn in list(self._background.values()):
+            if turn is skip or turn.tasks_in_flight:
+                continue
+            base = turn.last_result or {}
+            stats = turn.translator.stats
+            # The engine's cumulative figures move on after `base` was
+            # reported, and a browser adopts them as the session's total from
+            # every result — so a stale pair here would wind that total back.
+            current = {
+                name: value
+                for name, value in self._cost.session_totals().items()
+                if value is not None
+            }
+            await self._emit(
+                turn.emit,
+                Event(
+                    "streamComplete",
+                    {
+                        **base,
+                        **current,
+                        "response": turn.translator.response_text()
+                        or base.get("response", ""),
+                        "tool_calls": stats.tool_calls,
+                        "permission_prompts": stats.permission_prompts,
+                        "files_modified": list(stats.files_modified),
+                        "background_tasks": [],
+                        "continuation": True,
+                        "background_finished": True,
+                    },
+                ),
+            )
+            self._retire(turn)
+
+    def _retire(self, turn: ActiveTurn) -> None:
+        """Stop routing to ``turn``; nothing more of it will be shown."""
+        self._background.pop(turn.request_id, None)
+        for key in [key for key, owner in self._owners.items() if owner is turn]:
+            del self._owners[key]
+            self._retired_keys.add(key)
+        if self._woken is turn:
+            self._woken = None
+
+    def _forget_turns(self) -> None:
+        """Drop every turn the router holds, for a new CLI process."""
+        self._background.clear()
+        self._owners.clear()
+        self._retired_keys.clear()
+        self._main = None
+        self._main_open = False
+        self._woken = None
+        self._pricing = None
+
+    def _price_for(self, turn: ActiveTurn, payload: dict[str, Any]) -> dict[str, Any]:
+        """Price one result for ``turn``.
+
+        The ledger's anchor is per turn and belongs to the newest one, so a
+        result read for an older turn after a newer one started would be
+        differenced against the wrong point. That turn keeps the cost its
+        own last result was priced at; spend in the overlap is charged to the
+        newer turn, whose anchor it falls after. The ledger still sees every
+        result, which is what keeps its session totals current.
+        """
+        answer = self._cost.price(payload)
+        if turn is self._pricing or turn.priced is None:
+            turn.priced = answer
+        return {**payload, **turn.priced}
+
+    # ------------------------------------------------------------------
     # Background drain
     # ------------------------------------------------------------------
 
-    def _start_background_drain(self, active: ActiveTurn, emit: Emit | None) -> None:
-        """Follow the stream past this turn's result, if anything is still on it."""
-        if not active.tasks_in_flight or active.cancelled or self._client is None:
+    def _start_background_drain(self) -> None:
+        """Read the stream between turns.
+
+        **A result message ends a turn, not the run.** The SDK goes on
+        emitting for background tasks past a result, plus main's own reply
+        once a task notification wakes it. Left unread, that sat in the
+        client's buffer until the next turn read it — attributed to whatever
+        turn happened to be reading, long after it meant anything live.
+        Always on between turns, rather than only while a task is known to
+        be in flight, so an unprompted reply is shown as it happens.
+        """
+        if self._client is None or self._session_lost:
             return
-        logger.info(
-            "Turn %s finished with %d background task(s) still running; "
-            "following the stream past its result",
-            active.request_id,
-            len(active.tasks_in_flight),
-        )
-        self._drain = asyncio.create_task(
-            self._drain_background(active, emit), name=f"cc-drain-{active.request_id}"
-        )
+        if self._drain is not None and not self._drain.done():
+            return
+        self._drain = asyncio.create_task(self._drain_background(), name="cc-drain")
 
     async def _stop_background_drain(self) -> None:
         """Give the stream back before another consumer takes it.
@@ -1085,7 +1362,6 @@ class EngineSession:
         task, self._drain = self._drain, None
         if task is None or task.done():
             return
-        logger.info("Ending the background drain; the stream has a new consumer")
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await task
@@ -1104,86 +1380,25 @@ class EngineSession:
         with contextlib.suppress(asyncio.CancelledError):
             await task
 
-    async def _drain_background(self, active: ActiveTurn, emit: Emit | None) -> None:
-        """Keep translating while background tasks outlive their turn.
+    async def _drain_background(self) -> None:
+        """Deliver every message that arrives between turns.
 
-        **A result message ends a turn, not the run.** The SDK says so in as
-        many words — "Result received with N task(s) in flight; keeping stdin
-        open" — and goes on emitting for the tasks still going, plus main's
-        own reply once a task notification wakes it. ``receive_response()``
-        stops at the result regardless, so stopping with it left a background
-        subagent's entire life unread: an empty tab, an activity LED stuck at
-        "status unknown at turn end", a permission request attributed to no
-        turn at all, and main's closing answer missing — all of it written to
-        the transcript meanwhile, so it appeared only if the user reloaded.
-
-        Nothing was being lost to the buffer, which is why the symptom read as
-        a rendering bug: the SDK's stream is a 100-slot anyio buffer owned by
-        the client, so those messages sat there and a later iterator would
-        still get them. What was lost was *when* — they arrived attributed to
-        whatever turn happened to be reading next, long after they meant
-        anything live. This drain reads them while they still do.
-
-        Ends on a result message that arrives with the in-flight set empty,
-        which is the SDK's own definition of the run ending, or when
-        :meth:`_stop_background_drain` hands the stream to the next turn.
+        Runs until :meth:`_stop_background_drain` hands the stream to the
+        next turn, or the stream ends.
         """
         client = self._client
         if client is None:
             return
         try:
             async for message in client.receive_messages():
-                for event in active.translator.translate(message):
-                    event = self._fold_session_state(active, event)
-                    if event.name != "streamComplete":
-                        await self._emit(emit, event)
-                        continue
-                    # Main's own follow-up turn ends here — the one a task
-                    # notification woke it for — and its answer is in this
-                    # payload. Flagged so the browser revises the turn it has
-                    # already settled instead of appending a second footer to
-                    # a turn the user has read: every field is cumulative over
-                    # the request, so this result *supersedes* the last one
-                    # rather than adding to it.
-                    #
-                    # `background_finished` marks the *last* of these. The
-                    # service's post-turn housekeeping runs when `run_turn`
-                    # returns, which is at the first result — this drain is a
-                    # detached task that outlives it — so the Context tab and
-                    # the file tree were left describing the session as it was
-                    # before the background work, until the next turn moved
-                    # them on. The flag is what lets the service run that
-                    # housekeeping a second time, at the point the run really
-                    # ends.
-                    finished = not active.tasks_in_flight
-                    await self._emit(
-                        emit,
-                        Event(
-                            "streamComplete",
-                            {
-                                **event.payload,
-                                "continuation": True,
-                                "background_finished": finished,
-                            },
-                            turn_scoped=event.turn_scoped,
-                        ),
-                    )
-                    if finished:
-                        logger.info(
-                            "Background work for turn %s finished; drain ending",
-                            active.request_id,
-                        )
-                        return
+                await self._deliver(message)
         except asyncio.CancelledError:
             raise
         except Exception:
-            # Never fatal: the turn is long over and the next one re-reads the
+            # Never fatal: no turn is running, and the next one re-reads the
             # stream from scratch. Losing the tail of a background agent is
             # worth strictly less than a raise out of a detached task.
-            logger.exception(
-                "Background drain for turn %s failed; stopping it",
-                active.request_id,
-            )
+            logger.exception("Background drain failed; stopping it")
 
     async def _fail_turn(
         self, active: ActiveTurn, emit: Emit | None, exc: BaseException
@@ -1197,9 +1412,14 @@ class EngineSession:
         context.
         """
         lost = _is_connection_failure(exc)
+        self._main_open = False
         if lost:
             self._session_lost = True
             self.health.connected = False
+            # Nothing more will arrive for them either.
+            for turn in self._background.values():
+                turn.tasks_in_flight.clear()
+            await self._finalize_background(skip=active)
         self.health.last_error = str(exc) or type(exc).__name__
 
         result = {
@@ -1226,7 +1446,7 @@ class EngineSession:
         # this footer is ours, the engine never sent one, and whatever the turn
         # spent before it died is still on the session's running total for the
         # next turn to be measured against.
-        result = self._price_turn(result)
+        result = self._price_for(active, result)
         await self._emit(emit, Event("streamComplete", result))
         if lost:
             await self._emit(
@@ -1250,17 +1470,6 @@ class EngineSession:
             **self._cost.session_totals(),
             "duration_seconds": self.session_duration_seconds,
         }
-
-    def _price_turn(self, result: dict[str, Any]) -> dict[str, Any]:
-        """Add this turn's own cost and per-model usage to a result payload.
-
-        ``total_cost_usd`` and ``model_usage`` stay exactly as the engine sent
-        them — they are its numbers and they are cumulative. The three fields
-        added beside them are ours and are per-turn; see
-        :mod:`aic_dc.claude_code.cost` for why the difference has to be taken
-        here rather than in the browser, and what makes it unavailable.
-        """
-        return {**result, **self._cost.price(result)}
 
     async def _emit(self, emit: Emit | None, event: Event) -> None:
         """Deliver one event, absorbing consumer failures.
@@ -1469,6 +1678,64 @@ async def _single_message_stream(turn: Turn) -> Any:
         "message": {"role": "user", "content": build_content_blocks(turn)},
         "parent_tool_use_id": None,
     }
+
+
+def _task_keys(message: Any) -> list[str]:
+    """The ids a ``Task*Message`` is known by, most specific first."""
+    from claude_agent_sdk import (
+        TaskNotificationMessage,
+        TaskProgressMessage,
+        TaskStartedMessage,
+        TaskUpdatedMessage,
+    )
+
+    if not isinstance(
+        message,
+        (TaskStartedMessage, TaskProgressMessage, TaskUpdatedMessage, TaskNotificationMessage),
+    ):
+        return []
+    data = getattr(message, "data", None) or {}
+    patch = getattr(message, "patch", None) or {}
+    candidates = (
+        getattr(message, "task_id", None),
+        getattr(message, "tool_use_id", None),
+        data.get("agent_id") if isinstance(data, dict) else None,
+        patch.get("agent_id") if isinstance(patch, dict) else None,
+    )
+    return [key for key in candidates if isinstance(key, str) and key]
+
+
+def _routing_keys(message: Any) -> list[str]:
+    """The registered ids that can say which turn ``message`` belongs to.
+
+    A subagent's messages name their parent call. A task's name the task.
+    Main's own tool results name the call they answer, which is how the
+    result of a backgrounded main-scope command reaches the turn that ran it.
+    """
+    from claude_agent_sdk import ToolResultBlock, UserMessage
+
+    parent = getattr(message, "parent_tool_use_id", None)
+    if isinstance(parent, str) and parent:
+        return [parent]
+    keys = _task_keys(message)
+    if keys:
+        return keys
+    if isinstance(message, UserMessage) and isinstance(message.content, list):
+        return [
+            block.tool_use_id
+            for block in message.content
+            if isinstance(block, ToolResultBlock) and block.tool_use_id
+        ]
+    return []
+
+
+def _is_main_speech(message: Any) -> bool:
+    """Whether ``message`` is main starting or continuing a reply of its own."""
+    from claude_agent_sdk import AssistantMessage, StreamEvent, SystemMessage, UserMessage
+
+    if isinstance(message, SystemMessage):
+        return getattr(message, "subtype", None) == "init"
+    return isinstance(message, (AssistantMessage, StreamEvent, UserMessage))
 
 
 async def _quiet_disconnect(client: Any) -> None:

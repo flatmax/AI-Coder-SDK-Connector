@@ -281,7 +281,7 @@ def format_turn_hud(
     """One turn's summary block, or ``None`` when there is nothing to say.
 
     ``result`` is a ``streamComplete`` payload as
-    :meth:`~aic_dc.claude_code.session.EngineSession._price_turn` leaves it —
+    :meth:`~aic_dc.claude_code.session.EngineSession._price_for` leaves it —
     per-turn cost fields already folded in. ``context_usage`` is the
     ``get_context_usage()`` response the same post-turn pass fetched, which may
     be ``None`` when the engine could not answer; the block drops the ``Ctx:``

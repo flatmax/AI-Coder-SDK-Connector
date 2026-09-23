@@ -58,7 +58,7 @@ path rather than treated as an optimisation.
 
 ### Streaming State Keyed by Request ID
 
-Streaming state (per-block content, passive flag, streaming card DOM node) is keyed by request ID, not held as a singleton. Only one user-initiated turn is active at a time, so there is at most one active key; the singleton-like behavior is an emergent property, not a structural assumption.
+Streaming state (per-block content, passive flag, streaming card DOM node) is keyed by request ID, not held as a singleton. Only one user-initiated turn *streams* at a time, but an older one can still be receiving: a turn whose background subagents outlive its result goes on getting their events under its own request id after the next turn starts. The send parks it in the tab's `backgroundTurns` rather than overwriting it, and every handler resolves an event to its turn — the tab's streaming one, or a parked one — by request id (§ A Turn Can End More Than Once).
 
 Subagents produce concurrent activity *inside* one turn. Their events carry the parent turn's request ID plus an `agent_id`, so routing is two-level: request ID selects the turn, `agent_id` selects where inside it the event belongs. Main-scope events have a null `agent_id`.
 
@@ -70,7 +70,7 @@ The transport never assumes a singleton stream — every event carries the exact
 message, attaches the footer, and tears the streaming card down. A turn that left a background subagent
 running goes on to end again — main's reply to the task notification is a further turn on the same
 request, and it arrives as a second `streamComplete` flagged `continuation`
-([`../3-engine/session.md` § Every result the drain reads is emitted](../3-engine/session.md#every-result-the-drain-reads-is-emitted-flagged-continuation)).
+([`../3-engine/session.md` § Every result after a turn's first is emitted](../3-engine/session.md#every-result-after-a-turns-first-is-emitted-flagged-continuation)).
 
 A continuation **revises the message already settled for that request** rather than appending a second
 one. Appending is the wrong reading because every field on the payload is cumulative over the request,
@@ -82,6 +82,22 @@ only thing that reads it, and the handler replaces that message in place.
 - Everything else comes from the continuation: it is the whole turn's state, including main's closing answer, which is the content the revision exists to deliver
 - The turn is torn down only when the continuation reports nothing left running. One that still has work in flight leaves the turn addressable, because more events are coming for it
 - A continuation for a request with no settled message appends one. That is a turn whose first result carried nothing to render — not a case to lose the answer over
+
+**The user can send before it ends again.** The composer is released at the first result, background
+work or not. The send parks the lingering turn — its request id and block state move to the tab's
+`backgroundTurns` — and the new turn starts with fresh block state and the tab's streaming slot.
+Events for the parked turn fold into its own blocks and mirror into its subagents' tabs; its
+continuation revises its settled message where it already sits, above the newer prompt. It touches
+nothing that belongs to the running turn: not the streaming flag, not the run timer, not the edit LED,
+not the `user_message_id` stamp (which always goes to the latest user message, and a continuation's
+has long been stamped). The parked turn is dropped once a result reports nothing left running. On
+reconnect, `active_streams` lists such turns first, flagged `background`, and they come back parked.
+
+The engine side is what makes this possible — each message is routed to the turn that owns it rather
+than to the turn currently reading the stream
+([`../3-engine/session.md` § Every message goes to the turn that owns it](../3-engine/session.md#every-message-goes-to-the-turn-that-owns-it)).
+The git controls' streaming gate follows the same model and stays locked while *any* request is
+streaming, so an older turn's late result cannot unlock commits under a newer one.
 
 Without this the closing answer was consumed and rendered nowhere: it reached the turn's blocks, but the
 freeze had already happened and nothing re-froze it. It appeared only if the user reloaded, from the

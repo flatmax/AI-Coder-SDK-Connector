@@ -2148,3 +2148,33 @@ describe('UsageHud capability hiding', () => {
     expect(turnRow(await show(HAS_WINDOW)).textContent).toContain('$');
   });
 });
+
+describe('UsageHud continuations', () => {
+  // A turn whose background subagents outlive its result ends again later,
+  // with a `continuation` result — possibly after the next turn has begun.
+
+  it('a continuation of the latest turn replaces its figures', async () => {
+    publishUsage();
+    const el = mountHud();
+    await settle(el);
+    pushComplete(resultFixture({ turn_cost_usd: 0.01 }), 'req-1');
+    await settle(el);
+    pushComplete(resultFixture({ turn_cost_usd: 0.24, continuation: true }), 'req-1');
+    await settle(el);
+    expect(turnText(el)).toContain('$0.2400');
+  });
+
+  it('an older turn’s continuation does not replace a newer turn’s', async () => {
+    publishUsage();
+    const el = mountHud();
+    await settle(el);
+    pushComplete(resultFixture({ turn_cost_usd: 0.01 }), 'req-1');
+    await settle(el);
+    pushComplete(resultFixture({ turn_cost_usd: 0.0342 }), 'req-2');
+    await settle(el);
+    pushComplete(resultFixture({ turn_cost_usd: 0.24, continuation: true }), 'req-1');
+    await settle(el);
+    expect(turnText(el)).toContain('$0.0342');
+    expect(turnText(el)).not.toContain('$0.2400');
+  });
+});
