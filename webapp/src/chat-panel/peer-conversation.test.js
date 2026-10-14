@@ -143,6 +143,33 @@ describe('the responder', () => {
     expect(q(panel, '.peer-banner')).toBeNull();
   });
 
+  it('shows its own reply to a peer message as it streams', async () => {
+    publishFakeRpc({});
+    const panel = mountPanel({ rpcConnected: true });
+    await settle(panel);
+    await peerState(panel, responder('open'));
+
+    pushEvent('user-message', {
+      content: `${HEADER}\n\nWhat is in your repo?`,
+      request_id: 'peer-1',
+    });
+    pushEvent('stream-chunk', {
+      requestId: 'peer-1',
+      chunk: { block_id: 'b1', seq: 1, content: 'Just hello.cpp.', done: true },
+    });
+    await settle(panel);
+    expect(panel.shadowRoot.querySelector('.message-card.streaming')).not.toBeNull();
+
+    pushEvent('stream-complete', {
+      requestId: 'peer-1',
+      result: { response: 'Just hello.cpp.' },
+    });
+    await settle(panel);
+    expect(panel.messages.map((m) => m.role)).toEqual(['user', 'assistant']);
+    expect(panel.messages[1].content).toBe('Just hello.cpp.');
+    expect(panel._streaming).toBe(false);
+  });
+
   it('labels a peer message from its header, and hides the header', async () => {
     publishFakeRpc({});
     const panel = mountPanel({ rpcConnected: true });

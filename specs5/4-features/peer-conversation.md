@@ -211,7 +211,9 @@ consent, or the peer's turn.
 
 **Responder.** The consent dialog. While open, a banner "Peer conversation with <caller> — End" above
 the transcript, and the composer disabled with that sentence as its placeholder. Peer messages render
-as user messages labelled *from <caller>*. When it ends, the banner changes to say who ended it, with a
+as user messages labelled *from <caller>*, and each reply streams beneath it as an ordinary assistant
+turn: no browser sent the message, so the panel adopts the turn the way a reconnect adopts a running
+one. When it ends, the banner changes to say who ended it, with a
 link back to the previous session, and the composer comes back.
 
 ## Invariants

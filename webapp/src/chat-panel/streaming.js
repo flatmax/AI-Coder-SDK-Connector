@@ -75,6 +75,7 @@ import {
   findTabForRequest,
   loadSubagentFeedIfEmpty,
 } from './tabs.js';
+import { peerHeaderOf } from './peer-conversation.js';
 import { formatResetTime, limitTypeLabel } from '../rate-limit.js';
 
 // ---------------------------------------------------------------
@@ -1427,6 +1428,33 @@ export function onUserMessage(panel, event) {
       ...(data.request_id ? { request_id: data.request_id } : {}),
     },
   ];
+  if (data.request_id && peerHeaderOf(content)) {
+    adoptPeerTurn(panel, data.request_id);
+  }
+}
+
+/**
+ * Take a peer's turn as this panel's own (CC-23).
+ *
+ * No browser sent it — the server started it for the caller — so no tab owns
+ * its request id, and `liveOwner` would drop every chunk and the result with
+ * it: the responder's user saw each question and none of the answers until a
+ * reload read them back from the transcript. Adopted into `main` exactly as a
+ * reconnect adopts a running turn, so the reply streams and settles like any
+ * other.
+ */
+function adoptPeerTurn(panel, requestId) {
+  const tab = panel._tabs.get('main');
+  if (!tab) return;
+  parkBackgroundTurn(tab);
+  resetTurnBlocks(tab.turnBlocks);
+  resumeStreamBlocks(panel, tab, {
+    request_id: requestId,
+    blocks: [],
+    started_at: Date.now() / 1000,
+  });
+  startStreamTimerTick(panel);
+  panel.requestUpdate();
 }
 
 // ---------------------------------------------------------------
