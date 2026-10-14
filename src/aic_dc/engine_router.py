@@ -138,6 +138,9 @@ RPC_SURFACES: dict[str, str] = {
     "list_subagent_transcripts": "subagent_transcripts",
     "stop_task": "subagent_stop",
     "rewind_files": "file_checkpointing",
+    "peer_answer": "peer_conversation",
+    "peer_dismiss": "peer_conversation",
+    "peer_end": "peer_conversation",
 }
 
 
@@ -450,6 +453,12 @@ def _engine_is_busy(adapter: Any) -> bool:
     session = getattr(adapter, "session", None)
     streaming = getattr(session, "streaming_active", None)
     if streaming:
+        return True
+    # A peer conversation holds the session between turns as well as during
+    # them (CC-23), and switching would leave the peer talking to an engine
+    # nobody is looking at. `is True`, so a stand-in adapter whose every
+    # attribute is truthy does not read as permanently locked.
+    if getattr(getattr(adapter, "peer", None), "locked", False) is True:
         return True
     tasks = getattr(adapter, "_turn_tasks", None)
     if tasks is None:

@@ -73,7 +73,7 @@ Specs are numbered in dependency order — bottom-up. Each layer depends only on
 | **1 Foundation** | jrpc-oo, RPC transport, RPC inventory, configuration, repository |
 | **2 Indexing** | Symbol index, document index, keyword enrichment, reference graph |
 | **3 Engine** | Claude Code session, permissions, tool surface and hooks, history and sessions, context visibility, MCP bridge |
-| **4 Features** | Images, code review, collaboration, document convert |
+| **4 Features** | Images, code review, collaboration, document convert, peer conversation |
 | **5 Webapp** | Shell, chat, viewers and HUD, file picker, search, settings, subagent browser, specialised components |
 | **6 Deployment** | Build, startup, packaging |
 | **7 Future** | Speculative designs and the record of what the platform implemented for us — **not for implementation** |

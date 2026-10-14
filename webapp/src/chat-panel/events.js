@@ -44,6 +44,7 @@ import {
   onRoleChanged,
   probeModeAuthority,
 } from './permission-mode.js';
+import { applyPeerSnapshot, onPeerChanged } from './peer-conversation.js';
 import { restoreMessage } from './restore.js';
 import {
   clearSubagentTabs,
@@ -111,6 +112,7 @@ export function bindEventHandlers(panel) {
   panel._onHookEvent = (e) => onHookEvent(panel, e);
   panel._onRateLimit = (e) => onRateLimit(panel, e);
   panel._onEngineHealth = (e) => onEngineHealth(panel, e);
+  panel._onPeerChanged = (e) => onPeerChanged(panel, e);
   panel._onSystemEvent = (e) => onSystemEvent(panel, e);
   panel._onPermissionRequest = (e) => onPermissionRequest(panel, e);
   panel._onPermissionResolved = (e) => onPermissionResolved(panel, e);
@@ -344,6 +346,7 @@ export function attachEventListeners(panel) {
   window.addEventListener('hook-event', panel._onHookEvent);
   window.addEventListener('rate-limit', panel._onRateLimit);
   window.addEventListener('engine-health', panel._onEngineHealth);
+  window.addEventListener('peer-changed', panel._onPeerChanged);
   window.addEventListener('engine-changed', panel._onEngineChangedBound);
   window.addEventListener('system-event', panel._onSystemEvent);
   window.addEventListener('permission-request', panel._onPermissionRequest);
@@ -427,6 +430,7 @@ export function detachEventListeners(panel) {
   window.removeEventListener('hook-event', panel._onHookEvent);
   window.removeEventListener('rate-limit', panel._onRateLimit);
   window.removeEventListener('engine-health', panel._onEngineHealth);
+  window.removeEventListener('peer-changed', panel._onPeerChanged);
   window.removeEventListener('engine-changed', panel._onEngineChangedBound);
   window.removeEventListener('system-event', panel._onSystemEvent);
   window.removeEventListener('permission-request', panel._onPermissionRequest);
@@ -568,6 +572,7 @@ export function onSessionChanged(panel, event) {
  */
 export function onStateLoaded(panel, event) {
   const state = event.detail || {};
+  applyPeerSnapshot(panel, state);
   restoreStateSnapshot(panel, state);
   // Last, and outside the restore, because the restore *replaces*
   // `panel.messages` — a warning appended before it would be thrown away
@@ -952,6 +957,7 @@ export async function loadEngineState(panel) {
   if (state.engine_health && typeof state.engine_health === 'object') {
     panel._engineHealth = state.engine_health;
   }
+  applyPeerSnapshot(panel, state);
   noteDiskWarning(panel, state.disk_warning);
   resumeActiveStreams(panel, state.active_streams);
 }
