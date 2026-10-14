@@ -631,7 +631,7 @@ maps to a real field, so a key cannot again be serialised out of nothing.
 ## C. Found while working — correctness and honesty
 
 **Every item in this section was closed** as of 2026-08-28 — built, fixed, or decided — **and § C12
-reopened and closed it again inside one day on 2026-09-11.** The closed entries stay because each one holds the reasoning for a change,
+reopened and closed it again inside one day on 2026-09-11, as § C13 did on 2026-09-23.** The closed entries stay because each one holds the reasoning for a change,
 and because two of them are the record of an item being blocked by its own framing rather than by any
 work: § C3 on a per-tool table that did not need to exist, § C4 on a three-way display choice the app had
 already made.
@@ -1031,10 +1031,11 @@ with that same sentence. This is a third. **The precedence is what makes it wors
 the route proposed above was the `env` dict, `CLAUDE_CODE_AUTO_COMPACT_WINDOW` sits *above* settings in the
 CLI's own order, and a field left at its default in a file the user rarely opens would then silently
 outrank the value they can see in `~/.claude/settings.json`. The three fields this one wanted to sit
-beside are not the precedent it looked like either: `model`, `effort` and `permission_mode` each have a
-live control request behind them and change a running session, and this one has none — it is read when
-the subprocess starts, exactly like the rest of `engine.json`, which is the case `_pendingFields` exists
-to apologise for.
+beside are not the precedent it looked like either — **two of them, not three; see § C13**: `model` and
+`permission_mode` each have a live control request behind them and change a running session, and this one
+has none — it is read when the subprocess starts, exactly like the rest of `engine.json`, which is the
+case `_pendingFields` exists to apologise for. `effort` is read at subprocess start too, so it is no
+precedent for anything; the decline below never rested on it, only on the precedence argument.
 
 **What happened instead** is the one-line edit the CLI already supports: `"autoCompactWindow": 200000` in
 `~/.claude/settings.json`, made by the user on 2026-09-11 and verified the way the rest of this item was —
@@ -1051,6 +1052,29 @@ Capping at 200K makes the existing bands honest without touching them, so the ba
 now say what is running: the file's header capture describes a 200K payload that is true again, and
 `bandColor` records that the day arrived and was answered by a setting rather than by a band change. The
 band rule remains the item the day the window goes back up.
+
+**C13 — `effort` was named as having a live control request. It has none.** ✅ *Found and corrected
+2026-09-23 — leaves this queue.* § C12 above listed `model`, `effort` and `permission_mode` as the three
+fields that change a running session, and used the contrast to measure `auto_compact_window` against.
+The SDK exposes two such control requests — `ClaudeSDKClient.set_permission_mode` and `set_model` — and
+no `set_effort`; `EngineConfig.LIVE_CONTROLS`, the map that exists precisely so a save can name the
+shortcut, has only ever held those two, and
+[`5-webapp/settings.md`](5-webapp/settings.md) § *The Applies Column Is Load-Bearing* says the same in
+its own words. So one sentence in this file contradicted both the code and the spec, and it is the
+sentence that was doing the arguing.
+
+**What made it plausible is that the fact was right and the mechanism was wrong.** Effort *can* be moved
+on a session that is already up — the CLI's own `/effort` built-in does it, answering *"Set effort level
+to … (this session only)"* — and AIC⚡DC passes that command through untouched, which
+[`service.py`](../src/aic_dc/claude_code/service.py)'s slash-command comment already names as one of the
+built-ins that have been working all along. A live path exists; it is the CLI's, not ours, it is not a
+control request, and it does not write `engine.json`. That is exactly the shape of error that survives a
+reading, because every claim around it is true.
+
+**Found by asking what to set `effort` to** when the session moved to Opus 5.5 — whose CLI registry entry
+carries `default_effort: "medium"`, alone among every model in that registry — **not by auditing
+anything.** The second item in this section to arrive that way, after § C12, and the third thing this
+month found by using the app rather than reading it.
 
 ---
 

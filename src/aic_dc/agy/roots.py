@@ -456,8 +456,14 @@ def ephemeral(
     *,
     prefix: str = "c-",
     source: Path | str | None = None,
+    keep_on_error: bool = False,
 ) -> Iterator[Path]:
     """A private root for the length of one consultation.
+
+    ``keep_on_error`` leaves the root in place when the block raises, so a
+    failed image collection can be inspected rather than reported against
+    a directory that no longer exists. Not leaked: the next process's
+    :func:`sweep_consultations` takes it out like any other leftover.
 
     Removed in a ``finally``, which is safe rather than hopeful: measured
     2026-09-11, no process survives ``agy``'s exit holding the private
@@ -481,13 +487,26 @@ def ephemeral(
     parent = roots_dir(config_dir) / "consultations"
     parent.mkdir(parents=True, exist_ok=True)
     root = Path(tempfile.mkdtemp(prefix=prefix, dir=parent))
+    kept = False
     try:
         yield prepare(root, config_dir, source=source)
+    except Exception:
+        if keep_on_error:
+            kept = True
+            logger.warning(
+                "Keeping the consultation root %s for inspection; it is "
+                "removed at the next startup",
+                root,
+            )
+        raise
     finally:
-        try:
-            shutil.rmtree(root)
-        except OSError as exc:
-            logger.warning("Could not remove the consultation root %s: %s", root, exc)
+        if not kept:
+            try:
+                shutil.rmtree(root)
+            except OSError as exc:
+                logger.warning(
+                    "Could not remove the consultation root %s: %s", root, exc
+                )
 
 
 def sweep_consultations(config_dir: Path | str) -> int:
