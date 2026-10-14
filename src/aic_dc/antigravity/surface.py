@@ -115,9 +115,22 @@ PENDING_CONFIG: dict[str, str] = {
     "this in place of max_budget_usd, which has no Antigravity equivalent "
     "— a better control than a dollar cap for a session whose price is not "
     "observable.",
+    "compaction_config": "CompactionConfig(token_threshold) — 0.1.22's "
+    "home for what CapabilitiesConfig.compaction_threshold set, which is "
+    "now deprecated in its favour. Same argument as that row: a threshold "
+    "we would set, not a window the SDK reports, so it does not bring the "
+    "Context tab's bar back (AG-9). Whoever wires compaction wires this "
+    "one, not the old field.",
     "debug_config": "the SDK's debug sink. logging_setup owns AIC-DC's "
     "logging; worth wiring once there is somewhere to route it, which is "
     "the analogue of the Claude engine's engine-errors.jsonl.",
+    "inline_skills": "InlineSkill(name, description, content, "
+    "allowed_tools, ...) — skills handed over as data rather than as "
+    "directories, new in 0.1.22. This is the bridge skills_paths lacked: "
+    ".claude/skills/*/SKILL.md is frontmatter plus a body, and that "
+    "translates into these fields at session start with no second set of "
+    "files to author. Its allowed_tools must still pass through the gate's "
+    "tables rather than widen them.",
     "mcp_servers":"stdio and streamable-HTTP MCP servers. AG-4 routes "
     "AIC-DC's own indexes through `tools` as plain callables instead, which "
     "became true on 2026-09-15 and was written here as though it already "
@@ -200,10 +213,31 @@ BUILTIN_TOOLS: dict[str, tuple[str, str]] = {
         "capabilities with no home in the current UI: it needs a dialog "
         "Claude never asked for",
     ),
-    "START_SUBAGENT": (
+    "INVOKE_SUBAGENT": (
         PENDING,
         "spawns a subagent on its own trajectory. Same ordering as the "
-        "subagents config field: render one trajectory first",
+        "subagents config field: render one trajectory first. Named "
+        "START_SUBAGENT until 0.1.22, which kept that spelling as a "
+        "deprecated alias of this member — the gate's tables are keyed on "
+        "the value, so they moved with it (sdk-surface.md § second drift)",
+    ),
+    "RUN_WORKFLOW": (
+        PENDING,
+        "new in 0.1.22: runs a multi-agent workflow script, and needs "
+        "enable_subagents. Outside read_only() and not in MUTATING_TOOLS, "
+        "so nothing enables it — and enabling it means adding it to the "
+        "write seam first, since every agent the script starts inherits "
+        "the tool set. After INVOKE_SUBAGENT, not before: a workflow is "
+        "several trajectories, and the chat renders one",
+    ),
+    "SCHEDULE": (
+        DECLINED,
+        "new in 0.1.22, and filed by the SDK under read_only() — it writes "
+        "nothing; it starts turns later, on a timer or a cron, that the "
+        "user did not send, and brings manage_task with it. Borrowing "
+        "read_only() would have enabled it with no edit here, so "
+        "options.UNHOSTED_TOOLS subtracts it (AG-35). Same reason as the "
+        "triggers config field: no surface for work that starts itself",
     ),
     "SEARCH_WEB": (PENDING, "read-only; a tool card, and a source to cite"),
     "READ_URL_CONTENT": (PENDING, "read-only; a tool card, and a source to cite"),
@@ -463,6 +497,20 @@ POLICY_BUILDERS: dict[str, tuple[str, str]] = {
         "predicate. Nothing to adopt once the verdict is ours to make",
     ),
     "Decision": (DECLINED, "APPROVE / DENY / ASK_USER — the DSL's verdict enum"),
+    "AutoPolicy": (
+        DECLINED,
+        "new in 0.1.22: a model reads each call and flags the unsafe ones. "
+        "A model's judgement standing in for the user's is the thing the "
+        "dialog exists not to be, and alongside our hook it is a second "
+        "gate that can disagree with the first (AG-R-11)",
+    ),
+    "auto": (
+        DECLINED,
+        "AutoPolicy's builder. With a handler, a flagged call goes to "
+        "ASK_USER through the bare-bool AskUserHandler — ask_user's trap "
+        "again; without one, flagged calls are denied on a verdict nobody "
+        "sees",
+    ),
 }
 
 #: ``CapabilitiesConfig`` fields. The tool-gating layer *below* the
@@ -479,7 +527,8 @@ CAPABILITY_FIELDS: dict[str, tuple[str, str]] = {
         "when to compact. The nearest thing to a context-window read-back "
         "the SDK offers — it is a threshold we set, not a window it "
         "reports, which is why AG-9 hides the Context tab's bar rather "
-        "than deriving one from this",
+        "than deriving one from this. Deprecated in 0.1.22 for "
+        "compaction_config.token_threshold; whoever wires it wires that",
     ),
     "enable_subagents": (PENDING, "on by default; same ordering as the subagents field"),
     "allowed_subagents": (PENDING, "restricts which subagents may be spawned"),
@@ -493,6 +542,20 @@ CAPABILITY_FIELDS: dict[str, tuple[str, str]] = {
         "enable_daemons and timeout_seconds. Daemons are listed in "
         "sdk-surface.md § Antigravity capabilities with no home in the "
         "current UI; the timeout is worth setting the day run_command runs",
+    ),
+    "tool_output_truncation_config": (
+        PENDING,
+        "new in 0.1.22: caps a tool's output at max_tokens, keeping the "
+        "prefix (0 disables). Would bound the run_command that prints a "
+        "build log into the context. Pending because the cut is silent to "
+        "the user — the tool card would show the whole output while the "
+        "model saw its head, and that difference needs rendering first",
+    ),
+    "mcp_max_output_bytes": (
+        PENDING,
+        "new in 0.1.22: MCP output past this many bytes spills to a file "
+        "the agent reads instead. Inert here — the SDK transport sets no "
+        "mcp_servers (AG-4, AG-34) — so it moves with that field",
     ),
     "finish_tool_schema_json": (
         DECLINED,

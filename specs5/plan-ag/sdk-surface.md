@@ -5,7 +5,7 @@ rather than from documentation, blog posts or recollection. Verified **2026-08-3
 
 | What | Version | Where it was read |
 |---|---|---|
-| `google-antigravity` | **0.1.15** when this was written; **0.1.16** installed since 2026-09-03 — *Development Status :: 3 - Alpha*, Apache-2.0 | `.venv/lib/python3.14/site-packages/google/antigravity/`, `google_antigravity-0.1.15.dist-info/METADATA` |
+| `google-antigravity` | **0.1.15** when this was written; **0.1.16** installed since 2026-09-03; **0.1.22** locked since 2026-10-14 ([§ *The second drift*](#the-second-drift--0122-2026-10-14)) — *Development Status :: 3 - Alpha*, Apache-2.0 | `.venv/lib/python3.14/site-packages/google/antigravity/`, `google_antigravity-0.1.15.dist-info/METADATA` |
 | `agy` CLI | **1.1.22** (`agy --version`; released 2026-08-27), 208,429,312 bytes, stripped ELF. **Re-probed at 1.1.25 on 2026-09-03** for its hook surface — see [§ The `agy` hook surface](#the-agy-hook-surface--measured-2026-09-03). **1.1.26 installed since 2026-09-05**, which is what phase 8's live gate, write and isolation runs were driven against; nothing in this file was contradicted by that bump except as noted under the write-diversion amendment below. **1.2.0 installed 2026-09-10** — 212,304,128 bytes, self-updated at 17:26 local, *after* that day's subagent-transcript and registry work was measured — and **nothing in this file has been re-read against it.** Its flag surface has grown four options and two subcommands this file has never covered: `--sandbox`, `--effort`, `--mode`, `--json-schema`, `mic-serve`, and `remote-control`, which is the flag [§ *Not an entry point*](#not-an-entry-point---remote-control) describes now promoted to a subcommand. [AG-R-2](risks.md#ag-r-2) is written about the wheel and applies to the binary in the same words — an alpha breaks by renaming, not by erroring — and this transport has no `unclassified` bucket to fire when it does | `~/.local/bin/agy` |
 | `claude-agent-sdk` (for comparison) | 0.2.137 | `.venv/lib/python3.14/site-packages/claude_agent_sdk/` |
 
@@ -828,6 +828,13 @@ search_web      read_url_content  finish
 
 `read_only()` = `{list_directory, search_directory, find_file, view_file, read_url_content, finish}`.
 
+> **Superseded at 0.1.22 (2026-10-14).** Fifteen values: `start_subagent` renamed `invoke_subagent`
+> (the old name a deprecated alias), `run_workflow` and `schedule` added. `read_only()` is now
+> `{view_file, read_url_content, schedule, finish}` — the three listing tools moved to a new
+> `deprecated()`, *"disabled by default"*, and `default()` excludes them with `ask_question`. This
+> engine's read set is therefore no longer `read_only()` verbatim; see
+> [AG-35](decisions.md#ag-35) and [§ *The second drift*](#the-second-drift--0122-2026-10-14).
+
 The default `AgentConfig.capabilities` is `read_only()` (`connection.py:52-56`), but
 `BaseLocalAgentConfig` overrides that to all-tools-with-`confirm_run_command`
 (`local_connection_config.py:134-139`). `Agent.__aenter__` **refuses to start** if write tools or MCP
@@ -844,6 +851,12 @@ enabled_tools / disabled_tools         compaction_threshold: int | None
 finish_tool_schema_json                max_subagent_depth / allowed_subagents
 run_command_config: {enable_daemons, timeout_seconds}
 ```
+
+At 0.1.22 `compaction_threshold` is deprecated for `AgentConfig.compaction_config:
+CompactionConfig(token_threshold)`, and two fields are added: `tool_output_truncation_config`
+(`max_tokens`, prefix kept, `0` disables) and `mcp_max_output_bytes` (MCP output past it spills to a
+file; default 4096). `AgentBehavior` also has a `MINIMAL` this section never listed, *"prunes prompt
+overhead for small-context models"*.
 
 `AgentBehavior.INTERACTIVE` is the one to set: it *"enables features like slash commands and planning
 mode"* (`types.py:155-168`). `AUTONOMOUS` is the default and is the wrong posture for a UI with a
@@ -1119,6 +1132,28 @@ inference. It reads *shape*, never semantics — every correction in this file t
 behaviour-wrong case that no reflection would have caught. And nothing runs it on a schedule, so a
 `pip install --upgrade` with no commits after it leaves a window where the report is stale and does
 not say so.
+
+### The second drift — 0.1.22 (2026-10-14)
+
+The lock went from 0.1.18 to 0.1.22 in one step, and the gate went red on nine names in five sections.
+Triage, with each row's argument in `surface.py`:
+
+| Name | Section | Verdict |
+|---|---|---|
+| `INVOKE_SUBAGENT` (was `START_SUBAGENT`) | tools | **Renamed through.** `BuiltinTools("start_subagent")` still resolves, via `_missing_` with a `DeprecationWarning`, so a config naming the old value would have connected. The gate would not have matched: the hook reports `invoke_subagent`, which `TOOL_CLASSES` did not know, so it fell to `exec` and asked — safe, but describing a delegation as a shell command. `MUTATING_TOOLS`, `TOOL_CLASSES`, `TOOL_RESULT_FIELDS` all moved; the proto's `start_subagent` result field is gone and `invoke_subagent` carries none. |
+| `RUN_WORKFLOW` | tools | Pending. A multi-agent workflow script (proto: `script_path`, `description`, `output`, `script`); needs `enable_subagents`. Not enabled: outside `read_only()` and outside `MUTATING_TOOLS`. |
+| `SCHEDULE` | tools | **Declined, and subtracted** — it arrived *inside* `read_only()`. See [AG-35](decisions.md#ag-35). |
+| `compaction_config` | config | Pending; the successor to `compaction_threshold`. |
+| `inline_skills` | config | Pending; `InlineSkill(name, description, content, allowed_tools, dependent_tools, dependent_skills, metadata)` — what a `SKILL.md` translates into. |
+| `AutoPolicy`, `auto` | policy | Declined. A model assessor in place of the user's verdict; with a handler it routes through the bare-bool `AskUserHandler`. |
+| `tool_output_truncation_config`, `mcp_max_output_bytes` | capabilities | Pending; the second inert until `mcp_servers` is. |
+
+**And one change the gate did not report**, which is the one that mattered: `read_only()` lost
+`list_directory`, `search_directory` and `find_file`. Their names, members and proto fields are all
+still there, so nothing went red; the classmethod's answer moved, and this engine borrows that answer.
+A read-only session would have had no tool to find a file with. Found while checking this section
+against `types.py`, not by a test — [AG-R-35](risks.md#ag-r-35) is the gap and what closes it, and
+[AG-35](decisions.md#ag-35) the correction.
 
 ---
 

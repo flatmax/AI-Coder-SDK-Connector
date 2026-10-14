@@ -159,6 +159,18 @@ ungated, by the same early return that ungates them now.
 No dialog, because the user is locked out and the request comes from another agent's text. A dialog
 here would ask the user to approve edits they did not ask for, in their own repository.
 
+**A peer's message is sent verbatim**, and this is the control the two above do not cover. The CLI
+expands an `@/path` in a prompt into that file's contents *itself*, before the model runs and so
+before plan mode or `can_use_tool` is consulted. A message asking about `@~/.ssh/id_ed25519` would put
+the key in the responder's context, and from there into the reply. Measured on 2026-10-14 against the
+consultant's identical path: the file reached the wire with every other control in place. So
+`_peer_turn` marks its turn `verbatim`, which sends it as a single message carrying
+`client_composed: true` — no `@` expansion, no slash-command dispatch, for that message only. Not the
+session-wide `verbatim_prompts`, which would take `@file` and `/command` from the user's own turns
+after the conversation ends. The marker also skips the CLI's turn-start attachments (nested
+`CLAUDE.md`, skill listings) for that turn, which is no loss to a read-only answer. Needs CLI 2.1.248+;
+an older one ignores the field, and the expansion is back.
+
 ### The lock
 
 While a conversation is open, the responder refuses, with reason `peer_conversation`: `chat_streaming`,
@@ -211,6 +223,7 @@ link back to the previous session, and the composer comes back.
 - Ending is always explicit. No socket event, elapsed time or missing heartbeat ends a conversation.
 - The peer label on a message is derived from the stored transcript, never from live state.
 - Nothing binds a non-loopback interface.
+- A peer's message reaches the engine verbatim: the CLI reads no file on its behalf.
 
 ## Not in scope
 

@@ -476,10 +476,10 @@ def _spawn_arguments(record: dict[str, Any]) -> list[dict[str, Any]]:
     """The ``Subagents`` entries of every spawn call in one record.
 
     Matched on the *argument* rather than on the tool's name, and that is
-    a decision the two transports force: this transport spells the tool
-    ``invoke_subagent`` and the SDK's tool inventory spells it
-    ``start_subagent`` (``sdk-surface.md``), so a reader keyed to a name
-    is one rename from listing nothing at all — silently, because a name
+    a decision the two transports forced: this transport spelled the tool
+    ``invoke_subagent`` while the SDK's tool inventory spelled it
+    ``start_subagent`` until 0.1.22 renamed it (``sdk-surface.md``), so a
+    reader keyed to a name is one rename from listing nothing at all — silently, because a name
     that matches nothing is indistinguishable from a turn that delegated
     nothing. The ``Subagents`` list is the shape that carries the fact.
     """

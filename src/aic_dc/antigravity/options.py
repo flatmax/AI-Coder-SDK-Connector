@@ -76,7 +76,7 @@ MAX_HISTORY_SIZE = 0
 #: resolves them against ``BuiltinTools`` at construction, which is also
 #: what makes a name that stops existing fail loudly.
 #:
-#: ``start_subagent`` is here because a subagent inherits the tool set: a
+#: ``invoke_subagent`` is here because a subagent inherits the tool set: a
 #: gate that stopped at the top-level trajectory would be bypassed by
 #: asking a child to do the write. ``generate_image`` is here because it
 #: writes a file. ``ask_question`` is not — it blocks on the user, which is
@@ -87,7 +87,9 @@ MUTATING_TOOLS = frozenset(
         "edit_file",
         "run_command",
         "generate_image",
-        "start_subagent",
+        # `start_subagent` until 0.1.22, which renamed it and kept the
+        # old spelling as a deprecated alias of the same member.
+        "invoke_subagent",
     }
 )
 
@@ -100,6 +102,37 @@ MUTATING_TOOLS = frozenset(
 #: is the point — :data:`MUTATING_TOOLS` is a denylist we own and this is
 #: an allowlist we borrow, and each is the safe direction for its side.
 READ_ONLY_SENTINEL = "read_only"
+
+#: Tools the SDK files under ``read_only()`` that this host cannot carry,
+#: subtracted from the borrowed set rather than left to the gate.
+#:
+#: ``schedule`` arrived in 0.1.22 inside ``read_only()``, and it does write
+#: nothing — what it does is start turns later: a one-shot timer or a cron
+#: whose firing is a new agent turn the user did not send, and enabling it
+#: also enables ``manage_task`` behind it. AIC⚡DC has no surface for a
+#: pending timer, no way to cancel one, and a turn model that assumes the
+#: user started each turn. The permission gate would ask (an unclassified
+#: tool is ``exec``), but approving it would still schedule work nothing
+#: shows. This is the borrowing in :data:`READ_ONLY_SENTINEL` meeting its
+#: first counterexample: the SDK's "read-only" meant "does not touch the
+#: tree", which is narrower than "safe to run unattended" (AG-35).
+UNHOSTED_TOOLS = frozenset({"schedule"})
+
+#: Read tools added to the borrowed set by name, because the SDK took them
+#: out of it.
+#:
+#: 0.1.22 marks these three ``deprecated()`` and drops them from
+#: ``read_only()`` — "disabled by default", enabled only when named in
+#: ``enabled_tools``. Borrowed unchanged, that leaves a read-only session
+#: ``view_file`` and nothing to find a file with, and a gated one reaching
+#: for ``ls`` and ``grep`` through ``run_command``, one dialog per look.
+#: Reading the repository is not what the dialog is for (AG-5), so they
+#: are named here and keep the posture this engine shipped with. The
+#: drift gate could not see this: no name moved, a classmethod's answer
+#: did (AG-35). A release that deletes one is skipped with a warning
+#: rather than refused at connect, and ``surface.BUILTIN_TOOLS`` reports
+#: the row as stale.
+DEPRECATED_READ_TOOLS = ("list_directory", "search_directory", "find_file")
 
 # Config fields AIC-DC must never set, with the reason, so a future reader
 # who is tempted gets the argument rather than a bare prohibition.
@@ -403,6 +436,24 @@ def build_config(**kwargs: Any) -> Any:
     )
 
 
+def _read_only_members(types: Any) -> list[Any]:
+    """What :data:`READ_ONLY_SENTINEL` expands to, sorted by value."""
+    known = {t.value: t for t in types.BuiltinTools}
+    members = {
+        t for t in types.BuiltinTools.read_only() if t.value not in UNHOSTED_TOOLS
+    }
+    for name in DEPRECATED_READ_TOOLS:
+        if name in known:
+            members.add(known[name])
+        else:
+            logger.warning(
+                "Antigravity no longer has a %s tool; read-only sessions "
+                "run without it",
+                name,
+            )
+    return sorted(members, key=lambda t: t.value)
+
+
 def _custom_tool_names(tools: Any) -> list[str]:
     """The names the ``ToolRunner`` will register these callables under.
 
@@ -438,12 +489,16 @@ def _resolve_tools(names: list[str], types: Any) -> list[Any]:
     ``read_only()``, so this is belt-and-braces against a release that
     reclassifies it — an agent with no way to end its turn does not fail,
     it runs until a budget cap stops it.
+
+    :data:`UNHOSTED_TOOLS` are dropped from the expansion only; naming one
+    explicitly still resolves, so the subtraction is a default rather than
+    a second allowlist. :data:`DEPRECATED_READ_TOOLS` are added to it.
     """
     resolved: list[Any] = [types.BuiltinTools.FINISH]
     seen = {types.BuiltinTools.FINISH}
     for name in names:
         members = (
-            sorted(types.BuiltinTools.read_only(), key=lambda t: t.value)
+            _read_only_members(types)
             if name == READ_ONLY_SENTINEL
             else [types.BuiltinTools(name)]
         )

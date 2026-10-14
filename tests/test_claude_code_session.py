@@ -406,6 +406,21 @@ class TestContentBlocks:
         await collect(engine, text_turn("look"))
         assert client_of(engine).queries == ["look"]
 
+    async def test_a_verbatim_turn_is_marked_client_composed(self, engine):
+        """The string path cannot carry the mark, so a verbatim turn takes
+        the dict path even with no images."""
+        await collect(engine, text_turn("see @/etc/passwd", verbatim=True))
+        [message] = client_of(engine).queries[0]
+        assert message["client_composed"] is True
+        assert message["message"]["content"] == [
+            {"type": "text", "text": "see @/etc/passwd"}
+        ]
+
+    async def test_an_image_turn_is_not_marked_client_composed(self, engine):
+        """The user's own turn keeps `@path` and slash commands."""
+        await collect(engine, text_turn("look", images=[PNG]))
+        assert "client_composed" not in client_of(engine).queries[0][0]
+
 
 # ---------------------------------------------------------------------------
 # Connect

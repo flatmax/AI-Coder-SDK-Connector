@@ -42,6 +42,11 @@ dependencies = [
     # `claude` on PATH; engine.json's cli_path overrides both
     # (specs5/6-deployment/build.md § The Engine Is Not Bundleable).
     "claude-agent-sdk>=0.2.136",
+    # Imported directly (claude_code/consult_listener.py, mcp_server.py,
+    # antigravity/bridge.py), so pinned here rather than left to the SDK's
+    # transitive range. Capped below 2: mcp 2.x renamed FastMCP to
+    # MCPServer and changed the low-level APIs the consult listener uses.
+    "mcp>=1.29,<2",
     # `google-antigravity` was here and is now an extra — see
     # [project.optional-dependencies] below and specs5/plan-ag/risks.md
     # AG-R-10. The argument for keeping it was real and lost to a

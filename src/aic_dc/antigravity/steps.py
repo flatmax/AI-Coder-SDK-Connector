@@ -119,7 +119,7 @@ TOOL_RESULT_FIELDS: dict[str, frozenset[str]] = {
     "finish": frozenset({"output_string"}),
     "create_file": frozenset(),
     "edit_file": frozenset(),
-    "start_subagent": frozenset(),
+    "invoke_subagent": frozenset(),
 }
 
 #: The tool that ends a turn rather than doing work. Suppressed from the

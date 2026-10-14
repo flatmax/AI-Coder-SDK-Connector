@@ -631,7 +631,7 @@ maps to a real field, so a key cannot again be serialised out of nothing.
 ## C. Found while working — correctness and honesty
 
 **Every item in this section was closed** as of 2026-08-28 — built, fixed, or decided — **and § C12
-reopened and closed it again inside one day on 2026-09-11, as § C13 did on 2026-09-23.** The closed entries stay because each one holds the reasoning for a change,
+reopened and closed it again inside one day on 2026-09-11, as § C13 did on 2026-09-23 and § C14 on 2026-10-14.** The closed entries stay because each one holds the reasoning for a change,
 and because two of them are the record of an item being blocked by its own framing rather than by any
 work: § C3 on a per-tool table that did not need to exist, § C4 on a three-way display choice the app had
 already made.
@@ -1075,6 +1075,35 @@ reading, because every claim around it is true.
 carries `default_effort: "medium"`, alone among every model in that registry — **not by auditing
 anything.** The second item in this section to arrive that way, after § C12, and the third thing this
 month found by using the app rather than reading it.
+
+**C14 — Text another agent wrote could make the CLI read a file.** ✅ *Found and fixed 2026-10-14 —
+leaves this queue.* The Claude CLI expands `@/path` in a prompt into the file's contents before the
+model sees anything, and so before `tools=[]`, plan mode or `can_use_tool` is consulted — it is the
+CLI's own read, not a tool call. Two places hand it text the user did not type:
+
+- **The consultant** (`claude_code/consultant.py`), whose prompt is another engine's question. Measured
+  with a nonce file: `@/tmp/…/secret.txt` in the question put the file on the wire with every other
+  control in place. Now `verbatim_prompts=True` on its options;
+  `test_an_at_mention_in_the_prompt_is_not_expanded` captures the outbound bodies and fails with it off.
+- **A peer's message** (CC-23), which plan mode and the deny-all `can_use_tool` were meant to keep
+  read-only. Same read, same blind spot. Now `Turn.verbatim`, set only by `_peer_turn`, sends that one
+  message with `client_composed: true` — session-wide `verbatim_prompts` would also take `@file` and
+  `/command` from the user's own turns.
+  [`4-features/peer-conversation.md`](4-features/peer-conversation.md) § *Read-only* has the reasoning
+  and a new invariant.
+
+Both need CLI 2.1.248+ (2.1.299 here); an older CLI logs and ignores the field. **Found while upgrading
+the lock, and the upgrade only found half of it.** `test_no_tools_are_declared_to_the_model` went red
+because a claude.ai connector on the account put eight MCP tools on the consultant's
+requests — `setting_sources=[]` does not close that route, the CLI fetches connectors itself — and
+`strict_mcp_config=True` closes it. The `@` route was found by asking what *else* reaches the CLI that
+`tools=[]` does not name, which no failing test prompted.
+
+**Also from that upgrade, and smaller.** `forward_subagent_text=True` on the main session: CLI 2.1.299
+sends a subagent's tool calls but not its text or thinking without it, so the subagent tab
+([`5-webapp/subagent-browser.md`](5-webapp/subagent-browser.md)) would have been cards with no
+narration. The pump already files text by `parent_tool_use_id`. `verbatim_prompts` joins
+`sdk_surface.PENDING_OPTIONS` for the main session, for the reason above.
 
 ---
 

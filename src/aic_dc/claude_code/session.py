@@ -139,6 +139,11 @@ class Turn:
     # Review-mode facts, when review is active. Shaped by
     # specs5/4-features/code-review.md; passed through opaquely here.
     review: dict[str, Any] | None = None
+    # Text the user did not type: delivered as written, with no `@path`
+    # expansion and no slash-command dispatch. The expansion is the CLI's
+    # own file read, made before `can_use_tool` or plan mode is consulted,
+    # so for a peer's message it reaches any file this user can read.
+    verbatim: bool = False
 
 
 @dataclass
@@ -1008,9 +1013,10 @@ class EngineSession:
         client = self._client
         if client is None:
             raise SessionLostError("Not connected.")
-        if turn.images:
+        if turn.images or turn.verbatim:
             # The verbatim dict path: the SDK JSON-encodes each dict as
-            # given, so multimodal content blocks survive untouched.
+            # given, so multimodal content blocks survive untouched — and
+            # it is the only path that can carry `client_composed`.
             await client.query(_single_message_stream(turn))
         else:
             await client.query(compose_prompt(turn))
@@ -1673,11 +1679,17 @@ async def _single_message_stream(turn: Turn) -> Any:
     in ``session_id`` when absent. The wire shape mirrors the string path
     it builds internally, with a content *list* instead of a string.
     """
-    yield {
+    message: dict[str, Any] = {
         "type": "user",
         "message": {"role": "user", "content": build_content_blocks(turn)},
         "parent_tool_use_id": None,
     }
+    if turn.verbatim:
+        # Per message rather than `verbatim_prompts` on the session, which
+        # would take `@path` and slash commands from the user's own turns
+        # too. Ignored by a CLI older than 2.1.248.
+        message["client_composed"] = True
+    yield message
 
 
 def _task_keys(message: Any) -> list[str]:

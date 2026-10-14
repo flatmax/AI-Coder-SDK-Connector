@@ -184,7 +184,7 @@ class TestWhatIsOffered:
     def test_no_rule_is_offered_for_a_delegate_call(self, tmp_path):
         # A standing grant to spawn subagents cannot be described in one
         # line, and the child's calls are not knowable at this point.
-        assert derive_rules(tmp_path, "start_subagent", {}, "delegate") == []
+        assert derive_rules(tmp_path, "invoke_subagent", {}, "delegate") == []
 
     def test_nothing_is_offered_when_there_is_no_command(self, tmp_path):
         assert derive_rules(tmp_path, "run_command", {}, "exec") == []

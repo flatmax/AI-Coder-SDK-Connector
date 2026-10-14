@@ -4779,3 +4779,21 @@ class TestShutdown:
 
 async def _none():
     return None
+
+
+class TestPeerTurnsAreVerbatim:
+    """A peer's message is text the user did not type (CC-23).
+
+    Unmarked, the CLI expands an ``@/path`` in it into the file's contents
+    before plan mode or ``can_use_tool`` is consulted — measured 2026-10-14
+    against CLI 2.1.299 with both in place.
+    """
+
+    async def test_a_peer_message_is_marked_verbatim(self, service):
+        await asyncio.wait_for(service._peer_turn("peer-1", "see @/etc/passwd"), 5)
+        assert [t.verbatim for t in service.session.turns] == [True]
+
+    async def test_the_users_own_message_is_not(self, service):
+        """``@path`` and slash commands are the user's to use."""
+        await send(service, "see @src/a.py")
+        assert [t.verbatim for t in service.session.turns] == [False]

@@ -25,6 +25,12 @@ belt-and-braces. Neither is load-bearing alone, because this directory's
 recurring defect is the one where something quietly stops working and nothing
 says so.
 
+**And two routes ``tools=[]`` does not name**, both measured 2026-10-14 and
+both closed on the options: the account's claude.ai connectors, which the CLI
+fetches itself (``strict_mcp_config``), and an ``@/path`` in the question,
+which the CLI expands into the file before the model runs
+(``verbatim_prompts``). ``specs5/next.md`` § C14.
+
 **What still crosses the boundary**, measured rather than assumed: the
 consultant is told the account's email address and today's date. That is not
 git-derived — it survives a sterile ``cwd`` with ``GIT_CONFIG_GLOBAL`` and
@@ -427,6 +433,22 @@ class ClaudeConsultant:
                 # AG-25: `tools`, never `allowed_tools`. An empty
                 # `allowed_tools` emits no flag and gates nothing.
                 tools=[],
+                # `tools` reaches built-ins only. MCP tools arrive by a
+                # route `setting_sources=[]` does not close: the
+                # account's claude.ai connectors, which the CLI fetches
+                # itself. Measured: connecting one put 8 of its tools on
+                # two of the three requests. Strict with no
+                # `mcp_servers` is no MCP at all, which is the contract.
+                strict_mcp_config=True,
+                # And a third route, which is the CLI's rather than a
+                # tool's: an `@/path` in the prompt is expanded into the
+                # file's contents before the model sees anything. The
+                # prompt is text another agent wrote, so it is exactly
+                # the input this guards. Measured: a question naming
+                # `@/tmp/…/secret.txt` put the file on the wire with
+                # every other control above in place. Needs CLI
+                # 2.1.248+; older ones log a warning and ignore it.
+                verbatim_prompts=True,
                 setting_sources=[],
                 cwd=str(scratch),
                 env=isolation_env(),

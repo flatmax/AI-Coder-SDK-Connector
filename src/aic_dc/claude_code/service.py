@@ -3479,6 +3479,10 @@ class ClaudeCodeService:
             message=text,
             images=[],
             viewer=framing.resolve(None, self._viewer_state),
+            # Another agent wrote this. Unmarked, an `@/path` in it is read
+            # off this machine by the CLI before plan mode or can_use_tool
+            # sees anything — measured 2026-10-14.
+            verbatim=True,
         )
         try:
             self.session.admit(request_id)

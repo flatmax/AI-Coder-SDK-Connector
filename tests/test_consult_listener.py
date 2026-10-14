@@ -429,6 +429,13 @@ async def _wait_until(predicate, timeout: float = 10.0) -> None:
         await asyncio.sleep(0.02)
 
 
+class _Transport:
+    """Just enough transport for the sweep to read."""
+
+    def __init__(self, *, terminated: bool) -> None:
+        self.is_terminated = terminated
+
+
 class TestWhatRoundEightChanged:
     """Each of these guards a defect that review found and measurement confirmed."""
 
@@ -526,29 +533,39 @@ class TestWhatRoundEightChanged:
         assert reply == "the answer"
 
     async def test_terminated_sessions_do_not_accumulate(self):
-        """The tidy path is the one that leaks.
+        """The tidy path must not leak.
 
-        Measured against the SDK: a session closed properly by ``DELETE``
-        is marked terminated and then kept forever, because the only
-        removal the SDK does is on the idle path and its other cleanup is
-        guarded by ``not is_terminated``. Ten spawns left ten dead entries.
+        Measured against mcp 1.2x: a session closed properly by ``DELETE``
+        was marked terminated and then kept forever, because the SDK's only
+        removal was on the idle path. mcp 1.30 discards it on the ``DELETE``
+        itself, so this now holds with or without the sweep — it guards the
+        outcome, and the two tests below guard the sweep.
         """
         async with running() as (listener, url, token):
             for _ in range(3):
                 async with connected(url, token) as session:
                     await session.call_tool("second_opinion", {"question": "a"})
-            assert listener.sessions, "sessions should exist before the sweep"
             await asyncio.sleep(0.2)
             listener.sweep_terminated()
             assert listener.sessions == {}
 
+    async def test_the_sweep_drops_what_the_sdk_marked_but_kept(self):
+        """Planted, because the SDK no longer produces this state on demand.
+
+        An SDK that marks a transport terminated and keeps it is the leak
+        the sweep exists for. Live transports beside it must survive.
+        """
+        async with running() as (listener, _url, _token):
+            table = listener.managers[SERVER_NAME]._server_instances
+            table["dead"] = _Transport(terminated=True)
+            table["live"] = _Transport(terminated=False)
+            assert listener.sweep_terminated() == 1
+            assert set(listener.sessions) == {"live"}
+
     async def test_a_spawn_sweeps_what_the_last_one_left(self):
         """Swept at the spawn boundary, which is where the leak is made."""
-        async with running() as (listener, url, token):
-            for _ in range(3):
-                async with connected(url, token) as session:
-                    await session.call_tool("second_opinion", {"question": "a"})
-            await asyncio.sleep(0.2)
+        async with running() as (listener, _url, _token):
+            listener.managers[SERVER_NAME]._server_instances["dead"] = _Transport(terminated=True)
             listener.mint(repo_root="/tmp/next", session_id="session-next")
             assert listener.sessions == {}
 
