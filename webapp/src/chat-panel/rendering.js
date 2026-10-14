@@ -90,6 +90,13 @@ import {
 import { isEmptyTurn } from './blocks.js';
 import { renderHealthBanner } from './health-banner.js';
 import { renderLedRow } from './led-row.js';
+import {
+  peerBodyOf,
+  peerComposerPlaceholder,
+  peerHeaderOf,
+  peerLocksComposer,
+  renderPeerBanner,
+} from './peer-conversation.js';
 import { renderPermissionModeSelector } from './permission-mode.js';
 import { renderTabStrip } from './tabs.js';
 import { formatRunDuration } from './helpers.js';
@@ -242,6 +249,7 @@ export function render(panel) {
       </div>
       ${fileMode ? renderFileSearchOverlay(panel) : ''}
     </div>
+    ${renderPeerBanner(panel)}
     ${renderEngineNotice(panel)}
     ${renderHealthBanner(panel)}
     ${!panel.rpcConnected
@@ -261,7 +269,8 @@ export function render(panel) {
               <div class="action-group search-collapsible">
                 <button
                   class="action-button new-session-button"
-                  ?disabled=${!panel.rpcConnected || panel._streaming}
+                  ?disabled=${!panel.rpcConnected || panel._streaming
+                    || peerLocksComposer(panel)}
                   @click=${() => onNewSession(panel)}
                   aria-label="Start a new session"
                   title="New session (clears the conversation)"
@@ -308,6 +317,10 @@ export function render(panel) {
  * Absent on a read-only tab — see `render`'s note.
  */
 function renderInputSurface(panel) {
+  // A peer conversation holds the session (CC-23). The server refuses what
+  // the user would send; this says so before they type it, in the sentence
+  // the banner above uses. Stop stays live — it is how the user ends it.
+  const peerLocked = peerLocksComposer(panel);
   return html`
     <aic-input-history
       @history-select=${(e) => onHistorySelect(panel, e)}
@@ -328,9 +341,11 @@ function renderInputSurface(panel) {
     <div class="input-row">
       <textarea
         class="input-textarea"
-        placeholder="Send a message… (Enter to send, Shift+Enter for newline)"
+        placeholder=${peerLocked
+          ? peerComposerPlaceholder(panel)
+          : 'Send a message… (Enter to send, Shift+Enter for newline)'}
         .value=${panel._input}
-        ?disabled=${!panel.rpcConnected}
+        ?disabled=${!panel.rpcConnected || peerLocked}
         @input=${(e) => onInputChange(panel, e)}
         @keydown=${(e) => onInputKeyDown(panel, e)}
         @paste=${(e) => onInputPaste(panel, e)}
@@ -382,7 +397,7 @@ function renderInputSurface(panel) {
             </button>`
           : html`<button
               class="send-button"
-              ?disabled=${!panel.rpcConnected ||
+              ?disabled=${!panel.rpcConnected || peerLocked ||
               (!panel._input.trim() && panel._pendingImages.length === 0)}
               @click=${() => send(panel)}
               aria-label="Send message"
@@ -512,11 +527,19 @@ export function renderMessage(panel, msg, index) {
   const roleClass = msg.system_event
     ? 'role-system'
     : `role-${msg.role}`;
+  // A message another repository's agent sent (CC-23) carries a header line
+  // naming it. The label comes from that line, never from live state, so a
+  // reloaded or historical transcript is labelled the same as the live one.
+  const peer = msg.role === 'user' && !msg.system_event
+    ? peerHeaderOf(msg.content)
+    : null;
   const roleLabel = msg.system_event
     ? 'System'
-    : msg.role === 'user'
-      ? 'You'
-      : 'Assistant';
+    : peer
+      ? `From ${peer.repoName}`
+      : msg.role === 'user'
+        ? 'You'
+        : 'Assistant';
   // Compute whether this message is the current
   // search match. Matches are resolved by index
   // lookup to avoid per-card regex re-evaluation
@@ -544,7 +567,7 @@ export function renderMessage(panel, msg, index) {
   if (msg.role === 'user' && !msg.system_event) {
     bodyHtml = html`
       <div class="md-content">
-        ${unsafeHTML(renderMarkdown(msg.content))}
+        ${unsafeHTML(renderMarkdown(peer ? peerBodyOf(msg.content) : msg.content))}
       </div>
     `;
   } else if (msg.role === 'assistant' && Array.isArray(msg.blocks)) {
@@ -645,11 +668,11 @@ export function renderMessage(panel, msg, index) {
     : '';
   return html`
     <div
-      class="message-card ${roleClass}${highlightClass}${finishFooterClass}"
+      class="message-card ${roleClass}${peer ? ' from-peer' : ''}${highlightClass}${finishFooterClass}"
       data-msg-index=${index}
     >
       <div class="message-toolbar top">${toolbar}</div>
-      <div class="role-label">${roleLabel}${topFinishBadge}${runTimerBadge}</div>
+      <div class="role-label" title=${peer ? peer.repoRoot : ''}>${roleLabel}${topFinishBadge}${runTimerBadge}</div>
       ${bodyHtml}
       ${renderSystemAction(panel, msg)}
       ${images.length > 0 || imageRefs.length > 0

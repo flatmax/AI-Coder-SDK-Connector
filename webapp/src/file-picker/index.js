@@ -56,6 +56,7 @@ import {
   sortChildrenWithMode,
 } from './helpers.js';
 import { FILE_PICKER_STYLES } from './styles.js';
+import { noteStreamChunk, noteStreamComplete } from '../stream-gate.js';
 
 export class FilePicker extends LitElement {
   static properties = {
@@ -149,12 +150,10 @@ export class FilePicker extends LitElement {
     this._committing = false;
     this._reviewActive = false;
     this._streaming = false;
-    this._onStreamChunkGit = () => {
-      if (!this._streaming) this._streaming = true;
-    };
-    this._onStreamCompleteGit = () => {
-      this._streaming = false;
-    };
+    // Per request, for the same reason as the header's gate
+    // (app-shell/git-actions.js § onStreamCompleteHeader).
+    this._onStreamChunkGit = (event) => noteStreamChunk(this, event);
+    this._onStreamCompleteGit = (event) => noteStreamComplete(this, event);
     this._onCommitResultGit = () => {
       this._committing = false;
     };

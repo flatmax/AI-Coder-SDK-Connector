@@ -3639,3 +3639,67 @@ without a measurement.
   wildcard deny to a custom Python tool* is a question about the Go side that only a live turn answers.
   The allow entries are therefore written from the policy source and marked as reasoned rather than
   measured, which is exactly the status AG-4's own claim should have carried.
+
+---
+
+## AG-35 — `read_only()` is borrowed, and 0.1.22 changed what it lends **(decided 2026-10-14)**
+
+[`options.READ_ONLY_SENTINEL`](../../src/aic_dc/antigravity/options.py) expands to the SDK's own
+`BuiltinTools.read_only()` rather than to a copy, on an argument written at phase 3: *a new read-only
+tool in a later release should become available without an edit here, while a new write tool must not.*
+`MUTATING_TOOLS` is a denylist we own and the read set is an allowlist we borrow — each the safe
+direction for its side.
+
+The lock moved `google-antigravity` from 0.1.18 to 0.1.22 on 2026-10-14, and the borrowed set moved
+**both ways at once**, neither of them in the direction the argument anticipated:
+
+| | 0.1.18 `read_only()` | 0.1.22 `read_only()` |
+|---|---|---|
+| `view_file`, `read_url_content`, `finish` | ✓ | ✓ |
+| `list_directory`, `search_directory`, `find_file` | ✓ | — now `deprecated()`, *"disabled by default"*, enabled only when named |
+| `schedule` | — did not exist | ✓ *"Schedule a one-shot timer or recurring cron job"* |
+
+**What it lost.** Borrowed unchanged, a session with no hook can open a file and has no tool to find
+one; a gated session reaches for `ls` and `grep` through `run_command`, which is `exec` and asks — one
+dialog per look at the tree. Reading the repository is not what the dialog is for ([AG-5](#ag-5)).
+**Decision: name the three in `options.DEPRECATED_READ_TOOLS`** and add them to the expansion. They are
+still reads, the SDK still serves them when asked, and the posture stays the one this engine shipped
+with. A release that deletes one is skipped with a warning rather than refused at connect —
+`surface.BUILTIN_TOOLS` reports the row as stale, so the removal is still a red test.
+`test_a_read_only_session_can_still_look_around` pins it, and pins `deprecated()` equal to the table
+so a change to the SDK's list is re-read rather than inherited.
+
+**What it gained.** `schedule` writes nothing, which is the SDK's criterion; it **starts turns later**,
+on a timer or a cron, that the user did not send, and enabling it brings `manage_task` with it. This
+host has no surface for a pending timer, no way to cancel one, and a turn model that assumes the user
+started each turn. The gate would have asked — an unclassified tool falls to `exec` — but approving it
+would still schedule work nothing shows. **Decision: `options.UNHOSTED_TOOLS` subtracts it from the
+expansion** (explicitly naming it still resolves, so it is a default and not a second allowlist), and
+`surface.BUILTIN_TOOLS["SCHEDULE"]` is declined on the same ground as the `triggers` config field.
+`test_the_borrowed_set_does_not_bring_schedule` asserts the subtraction, mutation-checked, and fails
+the day the SDK stops filing `schedule` as read-only so the table is re-read rather than kept by habit.
+
+**The borrowing stays.** Both changes are corrections *to* the borrowed set rather than a copy of it,
+so the next read tool still arrives with no edit. What changes is the claim: the SDK's *"read-only"*
+means *"does not touch the tree"*, which is narrower than *"safe to run unattended in this host"*, and
+the gap between them is now written down in two named tables rather than assumed away.
+[AG-R-35](risks.md#ag-r-35) records why the drift gate could not have found either.
+
+### The rest of the 0.1.22 drift, triaged
+
+The gate went red on nine names. Recorded in full in
+[`sdk-surface.md` § *The second drift*](sdk-surface.md#the-second-drift--0122-2026-10-14); in brief:
+
+- **`START_SUBAGENT` → `INVOKE_SUBAGENT`.** A rename with a deprecated alias of the same member, so
+  nothing broke at connect — but `MUTATING_TOOLS`, `permissions.TOOL_CLASSES` and
+  `steps.TOOL_RESULT_FIELDS` were keyed on the old *value*, and the hook reports the new one. The gate
+  would have treated an `invoke_subagent` call as unclassified `exec`, which asks, so it failed safe;
+  the dialog would have described a delegation as a shell command. All three moved.
+  `test_a_subagent_still_asks` keeps the old spelling asking too.
+- **`RUN_WORKFLOW`**: pending, not enabled — outside `read_only()` and outside the write seam. It
+  goes into `MUTATING_TOOLS` before it is enabled, after `INVOKE_SUBAGENT` is rendered.
+- **`AutoPolicy` / `auto`**: declined. A model standing in for the user's verdict, and alongside the
+  hook a second gate that can disagree with the first.
+- **`compaction_config`, `inline_skills`, `tool_output_truncation_config`, `mcp_max_output_bytes`**:
+  pending, each with what it would buy in `surface.py`. `inline_skills` is the notable one: it is the
+  bridge `skills_paths` lacked, since a `.claude/skills/*/SKILL.md` translates into its fields.

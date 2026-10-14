@@ -243,7 +243,7 @@ same request, and the subagent's tokens are spent *after* the first one. Differe
 put most of a delegated turn's cost into an intermediate footer, and the footer the browser ends up
 rendering is the *last* result's. Anchoring at admission instead (`CostLedger.start_turn`) makes each
 result the turn's running total, so the last one priced is the one the footer should carry — see
-[`session.md` § Every result the drain reads is emitted](session.md#every-result-the-drain-reads-is-emitted-flagged-continuation).
+[`session.md` § Every result after a turn's first is emitted](session.md#every-result-after-a-turns-first-is-emitted-flagged-continuation).
 
 The baseline outlives the turn, so it lives in `EngineSession` (`aic_dc/claude_code/cost.py`), folded into
 `streamComplete` by the pump exactly as `engineHealth` already is — a `TurnTranslator` is one turn's

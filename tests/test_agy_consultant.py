@@ -1288,6 +1288,48 @@ class TestAnImage:
         assert "could not be found" in str(caught.value)
         assert "generated no image file" not in str(caught.value)
 
+    def test_a_failed_call_is_reported_as_failed_with_its_reason(
+        self, gated, tmp_path
+    ):
+        """The live report: an ERROR step was collected as a success.
+
+        ``generate_image`` came back failed, the consultant went looking
+        for a file anyway, and told the caller *"the generation itself
+        succeeded"* about an image named ``''``. The vendor's reason has to
+        be the error, and the collector must not be blamed for it.
+        """
+        build, repo, cfg = gated
+        consultant = build(
+            denied="generate_image", denied_error="aspect ratio 4:1 is not supported"
+        )
+        with pytest.raises(ConsultationError) as caught:
+            asyncio.run(consultant.generate_image("a blue square", aspect_ratio="4:1"))
+        message = str(caught.value)
+        assert "generate_image call failed" in message
+        assert "aspect ratio 4:1 is not supported" in message
+        assert "succeeded" not in message
+        assert not any(repo.rglob("*.png"))
+        # Kept for inspection rather than tidied away with the evidence.
+        assert any((cfg / "agy-roots" / "consultations").iterdir())
+
+    def test_a_settling_frame_without_parameters_keeps_the_name(self):
+        """One call, several frames — the last need not repeat ``ImageName``."""
+        from aic_dc.agy.consultant import _image_call
+
+        def step(state, info):
+            return {"event": "step_update", "step_update": {
+                "step_index": 2, "state": state, "step_type": "tool",
+                "tool_name": "generate_image", "tool_info": info}}
+
+        call = _image_call([
+            step("RUNNING", {"name": "generate_image",
+                             "parameters": {"ImageName": "hero"}}),
+            step("DONE", {"name": "generate_image", "output": "done"}),
+        ])
+        assert call["state"] == "DONE"
+        assert call["tool_info"]["parameters"] == {"ImageName": "hero"}
+        assert call["tool_info"]["output"] == "done"
+
     def test_it_does_not_ask_the_model_to_place_the_file(self, gated, tmp_path):
         """The instruction that caused the denied ``run_command``, removed.
 

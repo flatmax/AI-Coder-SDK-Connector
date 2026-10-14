@@ -84,10 +84,12 @@ Unchanged in shape from the native engine, which is why the transport and reconn
 3. Server broadcasts `userMessage` to all clients. Persistence is not a step here — the CLI writes the
    user entry and mirrors it to our store during step 4 ([CC-19](../plan/decisions.md#cc-19)).
 4. Server sends the turn to the engine via `query()` and starts a message pump.
-5. Pump translates SDK messages into server-push events, all carrying the request ID.
-6. Pump runs to `ResultMessage`, then finalises.
-7. If that result arrived with background tasks still running, a **drain** keeps consuming the stream
-   past it — see below.
+5. Pump translates SDK messages into server-push events, each carrying the request ID of the turn
+   that *owns* the message — which is not always this one (§ Every message goes to the turn that owns
+   it).
+6. Pump runs to this turn's `ResultMessage`, then finalises.
+7. Between turns a **drain** keeps consuming the stream, so work that outlives its turn — a
+   background subagent, main's reply to it — is read as it happens. See below.
 
 ### A result message ends a turn, not the run
 
@@ -97,9 +99,9 @@ SDK is explicit about it: a result frame arriving with tasks in flight leaves st
 own reply once a task notification wakes it.
 
 `receive_response()` stops at the result regardless, so step 6 must not be where consumption ends.
-Instead the session keeps a **background drain**: a task that consumes `receive_messages()` with the
-same `TurnTranslator`, and ends on a result message that arrives with nothing left in flight — the
-SDK's own definition of the run ending.
+The session reads `receive_messages()` only — the pump and a **background drain** that runs between
+turns — and both hand every message to the same router (§ Every message goes to the turn that owns
+it). `receive_response()` is declined in the SDK surface for that reason.
 
 Stopping at the turn's result instead left a background subagent's entire life unread, which showed
 up as four unrelated-looking bugs: an empty subagent tab, an activity LED stuck on "status unknown at
@@ -122,10 +124,58 @@ LEDs).
 
 A cancelled turn is not followed. Stop is the user saying they are done with this work.
 
-#### Every result the drain reads is emitted, flagged `continuation`
+#### Every message goes to the turn that owns it
+
+The composer is free once a turn's result lands, so the user can send while that turn's background
+subagents are still working — which is what background agents are for. Delivering the stream to
+"the current turn" then mis-attributes it: the new turn's pump reads the older subagents' output and
+translates it against the new request, and the browser, having moved on, drops their tabs.
+(The first version did exactly this and documented it as a known gap.)
+
+So the session keeps an **owner registry** and routes each message before translating it
+(`_route` in `session.py`):
+
+- **Subagent speech** carries `parent_tool_use_id` — the spawning `Task` call's id — and goes to the
+  turn that made that call. Every `ToolUseBlock` id a turn's `AssistantMessage` carries is registered
+  to it as it is read, so a subagent's own tool calls are claimed too, and a task nested inside a
+  subagent (its `tool_use_id` is the subagent's inner call) follows the subagent.
+- **Task messages** route on `task_id`, `tool_use_id` or `data.agent_id`, whichever is already known;
+  `TaskUpdated` carries only the task id, which `TaskStarted` registered.
+- **A `UserMessage` of tool results** routes on its result blocks' ids.
+- **Main speech** — `init`, assistant and user messages with no parent, stream events — goes to
+  whoever holds main. A new turn takes main at `query()`. Between turns, main's next unprompted
+  reply goes to the turn whose task notification woke it; failing that, to the last turn.
+- **A result always closes main.** The first result a turn receives is its own footer; every later
+  one carries `continuation`.
+
+What the CLI does with overlapping turns decides the rest, and was established by probing it rather
+than assumed:
+
+- A notification arriving while a newer turn is running is answered *inside that turn*, and the
+  older turn gets no result of its own. When its tasks are all done, the engine closes it with a
+  **synthetic** result — its last footer, with the session's current totals, `continuation` and
+  `background_finished` set, `background_tasks` empty. That happens when the next turn takes main,
+  and at every main result.
+- A prompt sent while main is mid-way through a wake-up reply is merged into that reply by the CLI.
+  The reply's result goes to the newer turn, which holds main.
+
+A turn whose results are all in and whose tasks are done is **retired**: its keys become
+tombstones, and a late message carrying one is dropped and logged rather than re-routed to whoever
+holds main — the same rule the interrupt drain follows. `active_streams()` lists a turn still
+following background work ahead of the running one, flagged `background`, so a reconnecting browser
+can rebuild both. A permission request from a subagent is attributed through the registry, by the
+request's `agent_id`.
+
+Cost cannot follow a turn into the overlap. The ledger's anchor is per turn and belongs to the newest
+(§ below), so a result read for an older turn after a newer one started would be differenced against
+the wrong point: the older turn keeps the cost its own last result was priced at, and spend in the
+overlap is charged to the newer turn. The session totals stay current either way.
+
+#### Every result after a turn's first is emitted, flagged `continuation`
 
 Main's reply to a task notification is a *further* turn on the same request, and it ends in a result
-of its own. The drain emits those too, with `continuation: true` added.
+of its own. The engine emits those too, with `continuation: true` added — and so does the synthetic
+result that closes a turn overlapped by a newer one.
 
 Swallowing them looked defensible — the browser has already rendered this turn's footer, and a second
 one would finish a finished turn — and it cost main's closing answer, which was the fourth symptom
@@ -618,14 +668,17 @@ beside the live health it explains — see [`../5-webapp/viewers-hud.md`](../5-w
   assumes a singleton turn.
 - The message pump runs to `ResultMessage` for every turn, including cancelled and errored turns,
   and never exits the iterator via `break`.
-- Consumption of the message stream outlives the turn whenever the turn's result arrives with
-  background tasks in flight, and ends on a result that arrives with none. A background subagent's
-  events are never first read by a later turn.
+- Consumption of the message stream outlives the turn: between turns the drain reads it. A
+  background subagent's events are delivered to the turn that spawned it, whichever turn is reading
+  the stream when they arrive.
+- Every message is routed to the turn that owns it — by parent tool id, task id, or tool result id,
+  and otherwise to the holder of main. A message for a retired turn is dropped, never re-routed.
 - Every result message for a request reaches the browser. All but the first carry `continuation`, and
   every one of them reports the *turn's* figures rather than the step since the previous result — the
   cost differenced from one per-turn anchor, the duration and engine-turn counters summed. The browser
-  renders the last result it receives, and a background subagent's work all lands after the first.
-- Exactly one consumer of the message stream at a time. A background drain is stopped and awaited
+  renders the last result it receives, and a background subagent's work all lands after the first. A
+  turn overlapped by a newer one keeps its last cost (§ Every message goes to the turn that owns it).
+- Exactly one consumer of the message stream at a time. The background drain is stopped and awaited
   before the next turn's pump starts, and on disconnect.
 - A result message reports which background tasks it did not end.
 - After `interrupt()`, the interrupted turn's messages are fully drained before any later turn's
@@ -637,8 +690,8 @@ beside the live health it explains — see [`../5-webapp/viewers-hud.md`](../5-w
   gated by that guard.
 - Turn framing never contains file content — only paths, ranges, and mode facts.
 - `streamComplete` always precedes `postResponseComplete` for the same turn. Housekeeping runs after the
-  turn's first result, and **again when background work ends** — the drain flags its last continuation
-  `background_finished`, and the service repeats the housekeeping on it. So a turn with no background
+  turn's first result, and **again when background work ends** — the turn's last continuation, real or
+  synthetic, is flagged `background_finished`, and the service repeats the housekeeping on it. So a turn with no background
   work fires one `postResponseComplete`, and one that outlived itself fires two. Before the second, the
   derived views kept describing the session as it was before the background work and only picked the
   change up on the next turn.

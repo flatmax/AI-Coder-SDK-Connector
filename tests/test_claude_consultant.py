@@ -468,6 +468,22 @@ class TestOutboundPayload:
         await self._consult(tmp_path)
         assert self._tool_counts(capture_server) == [0] * len(capture_server.bodies)
 
+    async def test_an_at_mention_in_the_prompt_is_not_expanded(
+        self, tmp_path, planted_repo, capture_server
+    ):
+        """The CLI's own file read, which no tool setting reaches.
+
+        Outside the repository on purpose: the sterile ``cwd`` is no defence
+        against an absolute path, so this isolates ``verbatim_prompts``.
+        """
+        secret = tmp_path / "elsewhere.txt"
+        secret.write_text("NONCE-AT-MENTION-5c19\n")
+        consultant = ClaudeConsultant(tmp_path / "config", timeout=120)
+        with contextlib_suppress():
+            await consultant.second_opinion(f"Review this: @{secret}")
+        assert capture_server.bodies, "the CLI never called the capture server"
+        assert b"NONCE-AT-MENTION-5c19" not in b"".join(capture_server.bodies)
+
     async def test_the_scratch_directory_does_not_survive_the_call(
         self, tmp_path, planted_repo, capture_server
     ):

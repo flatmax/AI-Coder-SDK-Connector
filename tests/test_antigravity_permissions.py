@@ -422,7 +422,7 @@ class TestNothingMutatingIsUngated:
 
     @pytest.mark.parametrize("tool", sorted(MUTATING_TOOLS))
     def test_every_mutating_tool_is_gated_by_default(self, tmp_path, tool):
-        """Including ``start_subagent``, whose class says otherwise.
+        """Including ``invoke_subagent``, whose class says otherwise.
 
         ``delegate`` is ungated by default — Claude's ``Task`` is, because
         the child's own calls are gated as they happen. That reasoning
@@ -442,7 +442,7 @@ class TestNothingMutatingIsUngated:
     def test_delegate_would_otherwise_have_been_ungated(self):
         """Pins the fact the override exists for."""
         assert GATED_BY_DEFAULT["delegate"] is False
-        assert TOOL_CLASSES["start_subagent"] == "delegate"
+        assert TOOL_CLASSES["invoke_subagent"] == "delegate"
 
     def test_an_unknown_tool_gets_the_most_cautious_dialog(self, tmp_path):
         """The direction that survives an SDK release adding a tool."""
@@ -498,7 +498,7 @@ class TestReadsAreAllowedWithoutADialog:
     def test_the_narrowing_does_not_reach_a_mutating_tool(self, tmp_path, tool):
         """``ALWAYS_ASK`` is checked before the class, not after.
 
-        ``start_subagent`` is the one that would slip: its class is
+        ``invoke_subagent`` is the one that would slip: its class is
         ``delegate``, which is ungated by default, so a narrowing that
         consulted only the class would ungate the tool that spawns a child
         with the same write access.
@@ -847,8 +847,10 @@ class TestAcceptEditsStopsAtTheShell:
         """A gate that stopped at the top trajectory is bypassed by asking
         a child to do the write — the same hole one level down."""
         gate = self.gate(tmp_path)
-        assert gate.pre_verdict("start_subagent", {"prompt": "edit it"}) is None
         assert gate.pre_verdict("invoke_subagent", {"prompt": "edit it"}) is None
+        # The pre-0.1.22 spelling, now unclassified: it must fall to the
+        # cautious side rather than through the narrowing.
+        assert gate.pre_verdict("start_subagent", {"prompt": "edit it"}) is None
 
     def test_a_write_outside_the_repository_still_asks(self, tmp_path):
         """They accepted edits to their project, not to their home directory."""

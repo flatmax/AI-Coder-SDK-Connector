@@ -602,10 +602,22 @@ export class UsageHud extends RpcMixin(LitElement) {
    *
    * (The engine's flag is `is_error` — a `streamComplete` payload has no
    * `error` key. `error` is checked too, for any caller that sends one.)
+   *
+   * A `continuation` result revises an earlier turn — its background
+   * subagents finished, or main answered them. Shown when that turn is still
+   * the latest one; once a newer turn has started, the HUD is about the newer
+   * turn, and an older one's late footer would replace it with a figure the
+   * user did not just spend.
    */
   _onStreamComplete(event) {
+    const requestId = event.detail?.requestId;
     const result = event.detail?.result;
     if (!result) return;
+    if (!result.continuation) {
+      this._latestRequestId = requestId ?? null;
+    } else if (requestId && this._latestRequestId && requestId !== this._latestRequestId) {
+      return;
+    }
     const failed = !!(result.error || result.is_error);
     if (failed && !reportsUsage(result)) return;
 

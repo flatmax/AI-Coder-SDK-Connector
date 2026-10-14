@@ -734,7 +734,10 @@ class ConsultationListener:
         sends on every clean exit — is marked terminated and then kept
         forever, while the abandoned ones the timeout was written for are
         the ones that do get collected. Ten spawns left ten dead entries
-        that no timeout will ever reach.
+        that no timeout will ever reach. mcp 1.30 discards a session on its
+        ``DELETE``, so there this collects nothing; it stays because the
+        pin admits releases that do not, and it costs one pass over a
+        table that is now empty.
 
         Swept at the spawn boundaries rather than on a timer, because that
         is where the leak is generated, so the table stays flat across a

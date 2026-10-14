@@ -247,6 +247,12 @@ def build_option_kwargs(
         "include_partial_messages": True,
         # Makes hook activity inspectable rather than invisible.
         "include_hook_events": True,
+        # A subagent's text and thinking, scoped by `parent_tool_use_id` so
+        # the pump files them under its tab (subagent-browser.md). Without
+        # it the CLI sends a subagent's tool calls only: 2.1.299's own
+        # schema says its text "stays unsent unless forwardSubagentText is
+        # set", and the tab reads as a list of cards with no narration.
+        "forward_subagent_text": True,
         "setting_sources": list(SETTING_SOURCES),
         # Turns on the per-option previews the question dialog renders.
         # Copied, not shared: the SDK holds the dict for the session's

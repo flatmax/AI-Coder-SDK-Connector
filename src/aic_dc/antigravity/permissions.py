@@ -105,7 +105,7 @@ logger = logging.getLogger(__name__)
 #: names on the left are new.
 #:
 #: ``generate_image`` is ``write``: it lands bytes in the working tree, and
-#: the dialog should say which file. ``start_subagent`` is ``delegate``,
+#: the dialog should say which file. ``invoke_subagent`` is ``delegate``,
 #: matching Claude's ``Task`` — the child's own calls are gated
 #: individually as they happen, which is the only reading that works, since
 #: a subagent's tool list is not knowable at the moment it is spawned.
@@ -121,7 +121,7 @@ TOOL_CLASSES: dict[str, str] = {
     "edit_file": "write",
     "generate_image": "write",
     "run_command": "exec",
-    "start_subagent": "delegate",
+    "invoke_subagent": "delegate",
     "ask_question": "interact",
 }
 
@@ -715,7 +715,7 @@ class AntigravityPermissionGate:
         - A **read** is allowed without asking, as the Claude CLI does
           before the shared broker ever sees one. ``ALWAYS_ASK`` is checked
           first, so a mutating tool cannot slip through on a class that
-          happens to be ungated — ``start_subagent`` is ``delegate``, which
+          happens to be ungated — ``invoke_subagent`` is ``delegate``, which
           is.
         - A read of a **denied** path is refused outright. That is the
           user's own shift-click on the file tree, and it must not be
@@ -798,7 +798,7 @@ class AntigravityPermissionGate:
         # measured the agent, refused an edit, reaching for `sed -i`, then
         # inline `python3`, then `list_dir` — three routes to one write,
         # all through the shell. So the dialog stays mandatory for
-        # `run_command` and for `start_subagent`/`invoke_subagent`, which
+        # `run_command` and for `invoke_subagent` (both transports' name), which
         # is the same line `agy`'s own accept-edits draws, and the same one
         # Claude's draws. What this lets through is a file write, to a file
         # inside the repository, which the diff viewer will show and git

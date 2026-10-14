@@ -77,7 +77,7 @@ class TestNoWriteToolWithoutAGate:
 
     def test_subagents_are_gated_too(self):
         """A gate that stopped at the top trajectory is bypassed by delegating."""
-        assert "start_subagent" in options.MUTATING_TOOLS
+        assert "invoke_subagent" in options.MUTATING_TOOLS
 
     def test_a_hook_enables_the_write_tools(self):
         enabled = kwargs(decide_hook=object())["capabilities"]["enabled_tools"]
@@ -128,6 +128,23 @@ class TestNondestructiveIsNotOurWriteBoundary:
             "A tool is in both the SDK's read_only() set and our mutating "
             "set. READ_ONLY_SENTINEL expands to read_only(), so this would "
             "enable a write tool on a session with no hook."
+        )
+
+    def test_the_borrowed_set_does_not_bring_schedule(self):
+        """AG-35: 0.1.22 put a timer inside read_only().
+
+        It writes nothing, and it starts turns nobody sent, which this host
+        has no surface for. Checked on the built config, with and without a
+        hook, because the subtraction has to survive both postures.
+        """
+        types = pytest.importorskip("google.antigravity").types
+        for kw in (kwargs(), kwargs(decide_hook=object())):
+            names = kw["capabilities"]["enabled_tools"]
+            enabled = options._resolve_tools(names, types)
+            assert not {t.value for t in enabled} & options.UNHOSTED_TOOLS
+        assert "schedule" in {t.value for t in types.BuiltinTools.read_only()}, (
+            "The SDK no longer files schedule as read-only. UNHOSTED_TOOLS "
+            "may now be subtracting nothing — re-read it before keeping it."
         )
 
 
@@ -254,7 +271,25 @@ class TestConstruction:
         """
         types = pytest.importorskip("google.antigravity").types
         enabled = options.build_config(**kwargs()).capabilities.enabled_tools
-        assert set(enabled) <= set(types.BuiltinTools.read_only())
+        reads = {*types.BuiltinTools.read_only(), *types.BuiltinTools.deprecated()}
+        assert set(enabled) <= reads
+        assert not {t.value for t in enabled} & options.MUTATING_TOOLS
+
+    def test_a_read_only_session_can_still_look_around(self):
+        """AG-35: 0.1.22 took list/search/find out of read_only().
+
+        Borrowed as-is, a session could open a file it could not find, and
+        a gated one would ask the user for every ``ls``.
+        """
+        types = pytest.importorskip("google.antigravity").types
+        enabled = options.build_config(**kwargs()).capabilities.enabled_tools
+        assert set(options.DEPRECATED_READ_TOOLS) <= {t.value for t in enabled}
+        assert {t.value for t in types.BuiltinTools.deprecated()} == set(
+            options.DEPRECATED_READ_TOOLS
+        ), (
+            "The SDK's deprecated() set moved. Re-read which of these are "
+            "still reads before keeping the table as it is."
+        )
 
 
 # ----------------------------------------------------------------------

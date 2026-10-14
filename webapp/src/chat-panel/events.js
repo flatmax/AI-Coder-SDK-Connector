@@ -44,13 +44,18 @@ import {
   onRoleChanged,
   probeModeAuthority,
 } from './permission-mode.js';
+import { applyPeerSnapshot, onPeerChanged } from './peer-conversation.js';
 import { restoreMessage } from './restore.js';
 import {
   clearSubagentTabs,
   mirrorSubagentBlocks,
   rehydrateSubagentTabs,
 } from './subagent-tabs.js';
-import { clearHistoricalTabs, onChatTabShortcut } from './tabs.js';
+import {
+  clearHistoricalTabs,
+  findBackgroundTurn,
+  onChatTabShortcut,
+} from './tabs.js';
 import {
   onEngineHealth,
   onHookEvent,
@@ -107,6 +112,7 @@ export function bindEventHandlers(panel) {
   panel._onHookEvent = (e) => onHookEvent(panel, e);
   panel._onRateLimit = (e) => onRateLimit(panel, e);
   panel._onEngineHealth = (e) => onEngineHealth(panel, e);
+  panel._onPeerChanged = (e) => onPeerChanged(panel, e);
   panel._onSystemEvent = (e) => onSystemEvent(panel, e);
   panel._onPermissionRequest = (e) => onPermissionRequest(panel, e);
   panel._onPermissionResolved = (e) => onPermissionResolved(panel, e);
@@ -183,12 +189,14 @@ export function onSpeechPlayerState(panel, event) {
  * log would mean re-applying supersessions in order and hoping none were
  * dropped, for the same end result.
  *
- * There is never more than one entry: the engine runs one CLI session with one
- * turn in flight, so the resumed turn is always the main tab's. Subagent work
- * inside that turn is part of the same stream — its blocks carry their parent
- * ``Task`` call's id — so it replays with the rest and then fans out to the
- * tabs the entry's ``subagents`` list rebuilds. Those tabs are a frontend
- * grouping of one stream, not concurrent streams: nothing here claims a
+ * There is at most one *running* entry: the engine runs one CLI session with
+ * one turn in flight, so the resumed turn is always the main tab's. Entries
+ * flagged ``background`` come first — older turns whose results are settled
+ * but whose background subagents are still running — and resume parked rather
+ * than streaming. Subagent work inside a turn is part of the same stream — its
+ * blocks carry their parent ``Task`` call's id — so it replays with the rest
+ * and then fans out to the tabs the entry's ``subagents`` list rebuilds. Those
+ * tabs are a frontend grouping of their turn's stream: nothing here claims a
  * request id of its own.
  *
  * The engine keeps broadcasting to every connected websocket for the
@@ -208,19 +216,22 @@ export function resumeActiveStreams(panel, activeStreams) {
   if (!tab) return;
   let resumed = false;
   for (const entry of activeStreams) {
-    if (!resumeStreamBlocks(panel, tab, entry)) continue;
+    const source = resumeStreamBlocks(panel, tab, entry);
+    if (!source) continue;
     resumed = true;
     // The strip a refreshed browser has to find the way it left it: a subagent
     // running when the page reloaded is invisible until the turn ends
     // otherwise. Creation is idempotent, and the replayed blocks mirror across
     // on the pass below — no transcript is read until the user opens a tab
     // (specs5/5-webapp/subagent-browser.md § Refresh and Reconnect).
-    rehydrateSubagentTabs(panel, entry.request_id, entry.subagents, tab);
-    mirrorSubagentBlocks(panel, tab);
+    rehydrateSubagentTabs(panel, entry.request_id, entry.subagents, source);
+    mirrorSubagentBlocks(panel, source);
   }
   if (!resumed) return;
   if (panel._activeTabId === 'main') panel.requestUpdate();
-  // Kick the ticker — `resumeStreamBlocks` armed the run timer.
+  // Kick the ticker — `resumeStreamBlocks` armed the run timer, and the
+  // rehydrated subagent tabs have timers of their own. It stops itself once
+  // no tab is running.
   startStreamTimerTick(panel);
 }
 
@@ -335,6 +346,7 @@ export function attachEventListeners(panel) {
   window.addEventListener('hook-event', panel._onHookEvent);
   window.addEventListener('rate-limit', panel._onRateLimit);
   window.addEventListener('engine-health', panel._onEngineHealth);
+  window.addEventListener('peer-changed', panel._onPeerChanged);
   window.addEventListener('engine-changed', panel._onEngineChangedBound);
   window.addEventListener('system-event', panel._onSystemEvent);
   window.addEventListener('permission-request', panel._onPermissionRequest);
@@ -418,6 +430,7 @@ export function detachEventListeners(panel) {
   window.removeEventListener('hook-event', panel._onHookEvent);
   window.removeEventListener('rate-limit', panel._onRateLimit);
   window.removeEventListener('engine-health', panel._onEngineHealth);
+  window.removeEventListener('peer-changed', panel._onPeerChanged);
   window.removeEventListener('engine-changed', panel._onEngineChangedBound);
   window.removeEventListener('system-event', panel._onSystemEvent);
   window.removeEventListener('permission-request', panel._onPermissionRequest);
@@ -515,6 +528,7 @@ export function onSessionChanged(panel, event) {
   // the moment the user switched to it.
   for (const tab of panel._tabs.values()) {
     resetTurnBlocks(tab.turnBlocks);
+    tab.backgroundTurns?.clear();
   }
   // Subagent transcripts belong to the session that was on screen. Keeping
   // them across a resume would leave a tab labelled with one session's task
@@ -558,6 +572,7 @@ export function onSessionChanged(panel, event) {
  */
 export function onStateLoaded(panel, event) {
   const state = event.detail || {};
+  applyPeerSnapshot(panel, state);
   restoreStateSnapshot(panel, state);
   // Last, and outside the restore, because the restore *replaces*
   // `panel.messages` — a warning appended before it would be thrown away
@@ -778,14 +793,15 @@ export function onCompactionEvent(panel, event) {
   if (!payload || typeof payload !== 'object') return;
   const stage = payload.stage;
   if (!stage) return;
-  // Request ID filter — accept current and
-  // most-recent, drop anything else. Missing
-  // requestId is accepted too (some progress
-  // events may not carry one).
+  // Request ID filter — accept current,
+  // most-recent and parked, drop anything else.
+  // Missing requestId is accepted too (some
+  // progress events may not carry one).
   if (
     requestId &&
     requestId !== panel._currentRequestId &&
-    requestId !== panel._lastRequestId
+    requestId !== panel._lastRequestId &&
+    !findBackgroundTurn(panel, requestId)
   ) {
     return;
   }
@@ -941,6 +957,7 @@ export async function loadEngineState(panel) {
   if (state.engine_health && typeof state.engine_health === 'object') {
     panel._engineHealth = state.engine_health;
   }
+  applyPeerSnapshot(panel, state);
   noteDiskWarning(panel, state.disk_warning);
   resumeActiveStreams(panel, state.active_streams);
 }

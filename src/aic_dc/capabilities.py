@@ -380,6 +380,16 @@ SURFACES: tuple[Surface, ...] = (
         "zero. Still 'supported' either way; the descriptor answers what "
         "the engine can feed, never which account is paying.",
     ),
+    Surface(
+        key="peer_conversation",
+        title="Peer conversations with another repository's agent",
+        claude=SUPPORTED,
+        antigravity=ABSENT,
+        note="CC-23. Absent rather than unbuilt: no phase plans it. The caller's tools are in-process SDK MCP tools with no "
+        "client deadline; under agy the same call would meet the 180s MCP "
+        "wall (AG-24), and nothing in the design survives it. The responder "
+        "runs peer turns through the Claude service's own pump.",
+    ),
 )
 
 _BY_KEY = {surface.key: surface for surface in SURFACES}

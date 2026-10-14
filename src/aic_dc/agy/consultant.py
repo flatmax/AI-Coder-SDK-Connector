@@ -111,7 +111,9 @@ from aic_dc.agy.session import (
     PromptNotSentError,
 )
 from aic_dc.agy.steps import (
+    TERMINAL_STATES,
     AgyTranslator,
+    _error_message,
     locate_generated_image,
     unwrap,
 )
@@ -670,8 +672,10 @@ class AgyConsultant:
         # The root has to outlive the turn by exactly one step: the image
         # is *collected* rather than requested, so it is still inside this
         # root when `agy` exits. Collecting after the `with` would tidy the
-        # picture away before copying it.
-        with roots.ephemeral(self._config_dir) as config_root:
+        # picture away before copying it. Kept when anything here raises,
+        # because those errors name a directory inside it and a reader who
+        # goes to look should find something there.
+        with roots.ephemeral(self._config_dir, keep_on_error=True) as config_root:
             translator, frames = await self._run(
                 " ".join(instruction),
                 policy=IMAGE_POLICY,
@@ -687,6 +691,13 @@ class AgyConsultant:
                 # claimed a picture nobody generated, which is what this
                 # wording says.
                 return verify_image_write("", self._repo_root, summary)
+            failure = _image_failure(call)
+            if failure:
+                # The call was made and did not produce a picture, which
+                # is neither "nothing was called" nor "generated and lost":
+                # collecting here would blame the collector for a refusal.
+                said = f" Antigravity said: {summary}" if summary else ""
+                raise ConsultationError(f"{failure}{said}")
             collected = self._collect(call, frames, output_name, config_root)
         return verify_image_write(collected, self._repo_root, summary)
 
@@ -722,10 +733,12 @@ class AgyConsultant:
         )
         if source is None:
             raise ConsultationError(
-                f"Antigravity generated an image named {image_name!r} and it "
-                f"could not be found under {brain / (conversation_id or '?')}. "
-                "The generation itself succeeded, so this is where the image "
-                "is collected from rather than the generation being at fault."
+                f"Antigravity reported generating an image named "
+                f"{image_name!r} and it could not be found under "
+                f"{brain / (conversation_id or '?')} (kept for inspection). "
+                "Its generate_image call completed without an error, so "
+                "either the image was never written or it was written "
+                "somewhere this app does not look."
             )
 
         relative = Path(output_name.strip() or source.name)
@@ -1193,17 +1206,60 @@ def _image_call(frames: list[dict[str, Any]]) -> dict[str, Any] | None:
     The last one wins because a turn may generate more than once and the
     caller asked for an image, singular — the most recent is the one the
     prose is about.
+
+    **Folded across the step's frames**, because one call arrives as
+    several ``step_update`` frames sharing a ``step_index`` and the last of
+    them need not repeat what the first said: a settling frame that omits
+    ``parameters`` left this reading ``ImageName`` as ``''``. The latest
+    state, error and output win; parameters are kept from whichever frame
+    carried them.
     """
-    found = None
+    found: dict[str, Any] | None = None
+    found_index: Any = object()
     for frame in frames:
         step = unwrap(frame, "step_update")
         if step is None or step.get("step_type") != "tool":
             continue
         info = step.get("tool_info")
         info = info if isinstance(info, dict) else {}
-        if str(step.get("tool_name") or info.get("name") or "") == "generate_image":
-            found = step
+        if str(step.get("tool_name") or info.get("name") or "") != "generate_image":
+            continue
+        index = step.get("step_index")
+        earlier = found if found is not None and index == found_index else None
+        found_index = index
+        if earlier is None:
+            found = {**step, "tool_info": dict(info)}
+            continue
+        merged = {**earlier["tool_info"], **info}
+        params = info.get("parameters")
+        if not isinstance(params, dict) or not params:
+            merged["parameters"] = earlier["tool_info"].get("parameters")
+        found = {**earlier, **step, "tool_info": merged}
     return found
+
+
+def _image_failure(call: dict[str, Any]) -> str:
+    """Why a ``generate_image`` call produced no picture, or ``""``.
+
+    Read before anything is collected, so that a call ``agy`` reported as
+    failed — a rejected aspect ratio, a refused prompt, a quota — is told
+    as that, with the vendor's reason, rather than as an image that went
+    missing after a successful generation.
+    """
+    info = call.get("tool_info")
+    info = info if isinstance(info, dict) else {}
+    state = str(call.get("state") or "")
+    if state == "ERROR" or "error" in info:
+        reason = _error_message(info) or "no reason was given"
+        return f"Antigravity's generate_image call failed: {reason}."
+    if state == "CANCELED":
+        return "Antigravity's generate_image call was cancelled."
+    if state and state not in TERMINAL_STATES:
+        return (
+            f"Antigravity's generate_image call never finished (its last "
+            f"reported state was {state})."
+        )
+    return ""
 
 
 def _conversation_id(frames: list[dict[str, Any]]) -> str:

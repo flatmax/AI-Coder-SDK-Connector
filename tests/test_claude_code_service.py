@@ -1949,6 +1949,9 @@ class TestState:
             "engine_health",
             "doc_convert_available",
             "disk_warning",
+            # The open or just-ended peer conversation (CC-23), so a reload
+            # during the consent dialog still shows the dialog.
+            "peer",
         }
 
     async def test_the_snapshot_carries_the_rate_limit_record(self, service):
@@ -2505,6 +2508,12 @@ GATED_METHODS: dict[str, tuple] = {
     "reset_to_head": (),
     "start_review": ("feature", "abc123"),
     "end_review": (),
+    # Accepting hands this session to another agent (CC-23), for the reason
+    # CC-15 gates a permission dialog; ending and dismissing are the host's
+    # session state for every client.
+    "peer_answer": (True,),
+    "peer_end": (),
+    "peer_dismiss": (),
 }
 
 # Deliberately reachable by a participant, with arguments good enough to
@@ -2697,8 +2706,9 @@ class TestBridgeWiring:
         """`mcp__aic-dc__symbol_map` is the name the CLI and the permission
         classifier both spell out, so the key is interface."""
         from aic_dc.claude_code.mcp_server import SERVER_NAME
+        from aic_dc.claude_code.peer import SERVER_NAME as PEER_SERVER_NAME
 
-        assert list(wired.session._mcp_servers) == [SERVER_NAME]
+        assert list(wired.session._mcp_servers) == [SERVER_NAME, PEER_SERVER_NAME]
         assert SERVER_NAME == "aic-dc"
 
     def test_the_two_observational_hooks_are_the_whole_subscription(self, wired):
@@ -2728,7 +2738,8 @@ class TestBridgeWiring:
                 engine_config=EngineConfig(),
             )
         assert svc.session is not None
-        assert svc.session._mcp_servers is None
+        # The peer tools are their own server and do not go down with it.
+        assert list(svc.session._mcp_servers) == ["aic-dc-peer"]
         # And the hook half is unaffected: one failure is not the other's.
         assert sorted(svc.session._hooks) == ["PostToolUse", "PreCompact"]
         assert "fall back to Glob/Grep/Read" in caplog.text
@@ -4768,3 +4779,21 @@ class TestShutdown:
 
 async def _none():
     return None
+
+
+class TestPeerTurnsAreVerbatim:
+    """A peer's message is text the user did not type (CC-23).
+
+    Unmarked, the CLI expands an ``@/path`` in it into the file's contents
+    before plan mode or ``can_use_tool`` is consulted — measured 2026-10-14
+    against CLI 2.1.299 with both in place.
+    """
+
+    async def test_a_peer_message_is_marked_verbatim(self, service):
+        await asyncio.wait_for(service._peer_turn("peer-1", "see @/etc/passwd"), 5)
+        assert [t.verbatim for t in service.session.turns] == [True]
+
+    async def test_the_users_own_message_is_not(self, service):
+        """``@path`` and slash commands are the user's to use."""
+        await send(service, "see @src/a.py")
+        assert [t.verbatim for t in service.session.turns] == [False]

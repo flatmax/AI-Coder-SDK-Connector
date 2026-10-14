@@ -86,6 +86,13 @@ PENDING_OPTIONS: dict[str, str] = {
     "plugins": "SdkPluginConfig loads CLI plugins. The repo's own "
     ".claude/ is already honoured via setting_sources; this is for "
     "plugins we would ship, and we ship none.",
+    "verbatim_prompts": "session-wide, it stops the CLI expanding `@path` "
+    "and dispatching slash commands in every prompt. The expansion is the "
+    "CLI's own file read, made before can_use_tool or plan mode, so it "
+    "matters for text the user did not type: the consultant sets it on its "
+    "own options, and a peer's turn carries the per-message form "
+    "(`client_composed`, session.Turn.verbatim). Setting it here would also "
+    "take `@file` and `/command` from the user's own turns.",
     "skills": "list[str] | 'all' selects which skills load. Omitted "
     "today, which takes the CLI's default. Only worth setting if a user "
     "asks to restrict them; the repo's .claude/skills/ already applies.",
@@ -233,8 +240,10 @@ KNOWN_BETAS: dict[str, str] = {
 #: Client methods that exist for hosts we are not. Checked so the client
 #: surface has the same three buckets as the rest.
 DECLINED_CLIENT_METHODS: dict[str, str] = {
-    "receive_messages": "receive_response() is the same stream bounded by "
-    "ResultMessage, which is what a turn is",
+    "receive_response": "returns at the first ResultMessage of any turn, and "
+    "with a background turn still being followed the stream carries more than "
+    "one — so the session reads receive_messages() and ends a pump on its own "
+    "turn's result (EngineSession._pump)",
 }
 
 

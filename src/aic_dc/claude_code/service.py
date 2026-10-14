@@ -71,6 +71,9 @@ from aic_dc.claude_code.health import (
 )
 from aic_dc.claude_code.hooks import Reindexer, build_hook_matchers
 from aic_dc.claude_code.mcp_server import SERVER_NAME, McpBridge
+from aic_dc.claude_code.peer import DENY_REASON as PEER_DENY_REASON
+from aic_dc.claude_code.peer import SERVER_NAME as PEER_SERVER_NAME
+from aic_dc.claude_code.peer import PeerConversations
 from aic_dc.claude_code.messages import Event
 from aic_dc.claude_code.permissions import (
     DENY_CANCELLED_REASON,
@@ -483,6 +486,25 @@ class ClaudeCodeService:
         # Filled by the call below, drained onto the health record once the
         # session that owns it exists.
         self._degradations: list[str] = []
+        # Peer conversations (CC-23). Built ahead of the wiring because its
+        # tools are one of the servers the session is built with; it needs
+        # nothing from the session until a conversation is open.
+        self.peer = PeerConversations(
+            host=self,
+            config_dir=getattr(config, "config_dir", None)
+            or Path.home() / ".config" / "aic-dc",
+            repo_root=self._repo_root,
+            broadcast=self._broadcast,
+        )
+        # Whether this adapter is the master. Set by main.py, which owns the
+        # router: a peer request answered by a cold alternate engine would
+        # run where no browser is looking.
+        self.peer_is_master: Callable[[], bool] = lambda: True
+        # request_id → the future a peer turn's `streamComplete` resolves.
+        self._peer_waiters: dict[str, asyncio.Future[dict[str, Any]]] = {}
+        # Every tool request is denied while a peer conversation is open, on
+        # top of plan mode — the second of the two mechanisms.
+        self.permissions.lockdown = lambda: PEER_DENY_REASON if self.peer.locked else None
         hooks, mcp_servers = self._build_bridge_wiring()
 
         self.session = EngineSession(
@@ -544,19 +566,20 @@ class ClaudeCodeService:
 
         # The turn footer the terminal HUD prints, held between the
         # `streamComplete` that carries it and the `_post_response` that has
-        # the context figure to print beside it. One slot rather than a map
-        # keyed by request: turns are sequential, and a map would grow for
-        # every turn whose post-response never ran. The request ID travels
-        # with it so a stale footer cannot be printed under a later turn's
-        # context usage.
-        self._turn_footer: tuple[str, dict[str, Any]] | None = None
+        # the context figure to print beside it. Keyed by request, because a
+        # background turn's continuation can land between a later turn's
+        # result and that turn's post-response, and one slot would print the
+        # wrong footer or none. Bounded by the turns still live: every entry
+        # is popped by its turn's post-response, and a continuation that does
+        # not end the run overwrites its own entry rather than adding one.
+        self._turn_footers: dict[str, dict[str, Any]] = {}
 
         self.review = ReviewMode(
             repo=repo,
             broadcast=self._broadcast,
             set_permission_mode=self._set_review_permission_mode,
             current_permission_mode=lambda: self.session.permission_mode,
-            restricted=self._check_localhost_only,
+            restricted=self._check_restricted,
         )
         self.review.doc_builder = self.doc_builder
 
@@ -825,6 +848,7 @@ class ClaudeCodeService:
         # is only known after this line. Its own failure is already
         # contained: `_add_consultant` never raises, it degrades.
         mcp_servers = self._add_consultant(mcp_servers)
+        mcp_servers = self._add_peer_tools(mcp_servers)
         try:
             hooks = build_hook_matchers(
                 self.reindexer,
@@ -960,6 +984,16 @@ class ClaudeCodeService:
                 "no second opinion and no image generation: %s",
                 exc,
             )
+            return mcp_servers
+
+    def _add_peer_tools(self, mcp_servers: Any) -> Any:
+        """Mount the caller's three peer tools. Never raises, never fatal."""
+        try:
+            servers = dict(mcp_servers or {})
+            servers[PEER_SERVER_NAME] = self.peer.build_server()
+            return servers
+        except Exception as exc:
+            logger.warning("The peer conversation tools did not mount: %s", exc)
             return mcp_servers
 
     def _live_symbol_index(self) -> Any:
@@ -1157,6 +1191,9 @@ class ClaudeCodeService:
         if restricted is not None:
             logger.warning("Rejected a non-localhost attempt to shut the engine down")
             return restricted
+        # First, while the engine is still up: ending tells the other side,
+        # and a responder's close restores the posture it changed.
+        await self.peer.aclose()
         await self.permissions.cancel_all()
         for task in list(self._turn_tasks):
             task.cancel()
@@ -1273,6 +1310,7 @@ class ClaudeCodeService:
             "permission_modes": list(PERMISSION_MODES),
             "model": self.session.model,
             "pending_permissions": self.permissions.pending(),
+            "peer": self.peer.state(),
             **self.doc_builder.status(),
             "review_state": self.review.state(),
             "engine_health": self.get_engine_health(),
@@ -1356,6 +1394,9 @@ class ClaudeCodeService:
         restricted = self._check_localhost_only()
         if restricted is not None:
             return restricted
+        locked = self._check_peer_lock()
+        if locked is not None:
+            return locked
 
         slash = self._slash_response(message)
         if slash is not None:
@@ -1437,6 +1478,13 @@ class ClaudeCodeService:
         restricted = self._check_localhost_only()
         if restricted is not None:
             return restricted
+        if self.peer.calling_in_flight:
+            # Stopping the turn that is waiting on `ask_peer` ends the
+            # conversation, rather than leaving the peer locked behind a
+            # caller that has stopped listening. Done here and not only on
+            # the tool's cancellation, because whether the CLI cancels an
+            # in-process tool on interrupt is not ours to rely on.
+            await self.peer.end_calling("caller")
         try:
             await self.permissions.cancel_for_turn(
                 request_id, reason=DENY_CANCELLED_REASON
@@ -1541,10 +1589,9 @@ class ClaudeCodeService:
         # turn's footer and the context figure fetched above. Popped, so a
         # second `_post_response` for the same turn — the background-subagent
         # path below — prints only if a revised footer arrived with it.
-        footer = self._turn_footer
-        if footer is not None and footer[0] == request_id:
-            self._turn_footer = None
-            log_turn_hud(footer[1], context_usage, self._repo_root)
+        footer = self._turn_footers.pop(request_id, None)
+        if footer is not None:
+            log_turn_hud(footer, context_usage, self._repo_root)
 
         await self._dispatch(
             Event(
@@ -1661,11 +1708,19 @@ class ClaudeCodeService:
             "takes_effect": "on the CLI's next read of its settings sources",
         }
 
-    def _note_permission_prompt(self, tool_use_id: str | None) -> str | None:
-        """Bridge from the broker to the turn in flight."""
+    def _note_permission_prompt(
+        self, tool_use_id: str | None, agent_id: str | None = None
+    ) -> str | None:
+        """Bridge from the broker to the turn that owns the call.
+
+        A background subagent's call belongs to the turn that spawned it,
+        which the session can name even after a later turn has started.
+        """
         note = getattr(self.session, "note_permission_prompt", None)
         if note is None:
             return None
+        if agent_id:
+            return note(tool_use_id, agent_id=agent_id)
         return note(tool_use_id)
 
     async def _note_permission_mode(self, mode: str) -> None:
@@ -1762,6 +1817,22 @@ class ClaudeCodeService:
             "reason": "Participants cannot perform this action",
         }
 
+    def _check_peer_lock(self) -> dict[str, Any] | None:
+        """The refusal while a peer conversation holds this session (CC-23).
+
+        Stop and End are never behind this: they are how the user gets out.
+        """
+        if not self.peer.locked:
+            return None
+        return {
+            "error": "A peer conversation is using this session. End it first.",
+            "reason": "peer_conversation",
+        }
+
+    def _check_restricted(self) -> dict[str, Any] | None:
+        """Both gates, for a caller that takes one callable."""
+        return self._check_localhost_only() or self._check_peer_lock()
+
     # ------------------------------------------------------------------
     # Live controls
     # ------------------------------------------------------------------
@@ -1786,6 +1857,9 @@ class ClaudeCodeService:
                 mode,
             )
             return restricted
+        locked = self._check_peer_lock()
+        if locked is not None:
+            return locked
         # Read before the switch: the record says what the posture moved
         # *from*, and afterwards the session only knows where it landed.
         previous = self.session.permission_mode
@@ -1874,6 +1948,9 @@ class ClaudeCodeService:
         restricted = self._check_localhost_only()
         if restricted is not None:
             return restricted
+        locked = self._check_peer_lock()
+        if locked is not None:
+            return locked
         try:
             applied = await self.session.set_model(model)
         except (EngineNotReadyError, SessionLostError) as exc:
@@ -1909,6 +1986,9 @@ class ClaudeCodeService:
         restricted = self._check_localhost_only()
         if restricted is not None:
             return restricted
+        locked = self._check_peer_lock()
+        if locked is not None:
+            return locked
         if not self.session.file_checkpointing:
             return {
                 "error": "File checkpoints are unavailable in this session, "
@@ -2408,6 +2488,9 @@ class ClaudeCodeService:
         restricted = self._check_localhost_only()
         if restricted is not None:
             return restricted
+        locked = self._check_peer_lock()
+        if locked is not None:
+            return locked
         if self.session.streaming_active:
             return {
                 "error": "A turn is still running",
@@ -2454,6 +2537,9 @@ class ClaudeCodeService:
         restricted = self._check_localhost_only()
         if restricted is not None:
             return restricted
+        locked = self._check_peer_lock()
+        if locked is not None:
+            return locked
         if not session_id:
             return {"error": "A session ID is required", "reason": "no_session_id"}
         if self.session.streaming_active:
@@ -2552,6 +2638,9 @@ class ClaudeCodeService:
         restricted = self._check_localhost_only()
         if restricted is not None:
             return restricted
+        locked = self._check_peer_lock()
+        if locked is not None:
+            return locked
         if self.session.streaming_active:
             return {
                 "error": "A turn is still running",
@@ -3029,6 +3118,9 @@ class ClaudeCodeService:
         **Localhost only.**"""
         from aic_dc.claude_code.commit import commit_all
 
+        locked = self._check_peer_lock()
+        if locked is not None:
+            return locked
         return await commit_all(self)
 
     async def reset_to_head(self) -> dict[str, Any]:
@@ -3039,6 +3131,9 @@ class ClaudeCodeService:
         """
         from aic_dc.claude_code.commit import reset_to_head
 
+        locked = self._check_peer_lock()
+        if locked is not None:
+            return locked
         return await reset_to_head(self)
 
     def check_review_ready(self) -> dict[str, Any]:
@@ -3111,7 +3206,9 @@ class ClaudeCodeService:
     # Internals
     # ------------------------------------------------------------------
 
-    async def _set_review_permission_mode(self, mode: str) -> str | None:
+    async def _set_review_permission_mode(
+        self, mode: str, *, by: str = "review mode"
+    ) -> str | None:
         """Apply a posture on review entry or exit, connected or not.
 
         Returns the mode now in force, or ``None`` when it could not be
@@ -3146,7 +3243,7 @@ class ClaudeCodeService:
         await self._broadcast(
             Event(
                 "permissionModeChanged",
-                {"mode": applied, "by": "review mode"},
+                {"mode": applied, "by": by},
                 turn_scoped=False,
             )
         )
@@ -3290,6 +3387,140 @@ class ClaudeCodeService:
             }
         return None
 
+    # ------------------------------------------------------------------
+    # Peer conversations (CC-23)
+    # ------------------------------------------------------------------
+
+    async def peer_answer(self, allow: bool) -> dict[str, Any]:
+        """Allow or Deny on the peer request dialog. **Localhost only.**
+
+        Gated for the reason CC-15 gates a permission dialog: accepting hands
+        this session to another agent.
+        """
+        restricted = self._check_localhost_only()
+        if restricted is not None:
+            return restricted
+        return await self.peer.answer_request(bool(allow))
+
+    async def peer_end(self) -> dict[str, Any]:
+        """The banner's End, in whichever role is open. **Localhost only.**"""
+        restricted = self._check_localhost_only()
+        if restricted is not None:
+            return restricted
+        await self.peer.end_responding("responder")
+        await self.peer.end_calling("caller")
+        return {"status": "ended"}
+
+    def peer_dismiss(self) -> dict[str, Any]:
+        """Forget the ended-conversation banner. **Localhost only**, because
+        it clears the banner for every client."""
+        restricted = self._check_localhost_only()
+        if restricted is not None:
+            return restricted
+        self.peer.dismiss()
+        return {"status": "dismissed"}
+
+    def _peer_available(self) -> bool:
+        try:
+            return bool(self.peer_is_master())
+        except Exception:
+            return False
+
+    def _peer_busy(self) -> bool:
+        if self.session.streaming_active or self._committing:
+            return True
+        if any(not task.done() for task in self._turn_tasks):
+            return True
+        return bool(self.review.active)
+
+    async def _peer_begin(self) -> dict[str, Any]:
+        """A fresh session in plan mode. Returns what :meth:`_peer_finish` restores.
+
+        ``new_session``'s steps rather than a call to it, because that method
+        is gated and its gate reads the *current* RPC caller — which, from a
+        request that arrived on the peer listener, is whoever spoke last.
+        """
+        previous = {
+            "session_id": await self._visible_session_id(),
+            "permission_mode": self.session.permission_mode,
+        }
+        await self.permissions.cancel_all()
+        await self.session.reset()
+        self._resume_request = None
+        self._auto_resume = False
+        await self._broadcast(
+            Event(
+                "sessionChanged",
+                {"session_id": None, "messages": [], "action": "new"},
+                turn_scoped=False,
+            )
+        )
+        await self._set_review_permission_mode("plan", by="peer conversation")
+        return previous
+
+    async def _peer_finish(self, previous: dict[str, Any]) -> None:
+        mode = previous.get("permission_mode")
+        if mode and mode != self.session.permission_mode:
+            await self._set_review_permission_mode(mode, by="peer conversation")
+
+    async def _peer_turn(self, request_id: str, text: str) -> dict[str, Any]:
+        """One peer message as one turn; resolves with its ``streamComplete``.
+
+        The same admission and pump as ``chat_streaming``, minus the two
+        gates — localhost, because the caller is not a browser, and the peer
+        lock, because this *is* the peer.
+        """
+        if not self.session.ready:
+            outcome = await self.connect_engine()
+            if "error" in outcome:
+                return {"is_error": True, "error": str(outcome["error"])}
+        turn = Turn(
+            request_id=request_id,
+            message=text,
+            images=[],
+            viewer=framing.resolve(None, self._viewer_state),
+            # Another agent wrote this. Unmarked, an `@/path` in it is read
+            # off this machine by the CLI before plan mode or can_use_tool
+            # sees anything — measured 2026-10-14.
+            verbatim=True,
+        )
+        try:
+            self.session.admit(request_id)
+        except (TurnInProgressError, EngineNotReadyError, SessionLostError, ValueError) as exc:
+            return {"is_error": True, "error": str(exc)}
+
+        waiter: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
+        self._peer_waiters[request_id] = waiter
+        try:
+            await self._broadcast(
+                Event(
+                    "userMessage",
+                    {"content": text, "request_id": request_id, "image_refs": []},
+                    turn_scoped=False,
+                )
+            )
+            task = asyncio.create_task(self._run_turn(turn), name=f"cc-peer-{request_id}")
+            self._turn_tasks.add(task)
+            task.add_done_callback(self._turn_tasks.discard)
+
+            def settle(_task: asyncio.Task[Any]) -> None:
+                # `_run_turn` emits a synthetic `streamComplete` on every
+                # failure it catches, so this only fires for one it did not —
+                # a cancelled task — and keeps the peer from waiting forever.
+                if not waiter.done():
+                    waiter.set_result(
+                        {"is_error": True, "error": "the turn ended without a result"}
+                    )
+
+            task.add_done_callback(settle)
+            return await waiter
+        finally:
+            self._peer_waiters.pop(request_id, None)
+
+    async def _peer_cancel_turn(self, request_id: str) -> None:
+        await self.permissions.cancel_for_turn(request_id, reason=DENY_CANCELLED_REASON)
+        await self.session.interrupt(request_id)
+
     def _emitter(self, request_id: str) -> Callable[[Event], Awaitable[None]]:
         """A per-turn emit callback bound to ``request_id``.
 
@@ -3328,6 +3559,10 @@ class ClaudeCodeService:
         # the callback check because it is engine state, not display: a
         # subagent that ends with a dialog still open produces two events,
         # and the terminal status is what explains the denial that follows.
+        if event.name == "streamComplete" and request_id in self._peer_waiters:
+            waiter = self._peer_waiters[request_id]
+            if not waiter.done():
+                waiter.set_result(dict(event.payload or {}))
         if event.name == "subagentEvent":
             await self._sweep_ended_subagent(event.payload)
         elif event.name == "streamComplete" and request_id:
@@ -3335,7 +3570,7 @@ class ClaudeCodeService:
             # `_post_response` synchronously from here and the footer has to
             # be there when it does.
             if isinstance(event.payload, dict):
-                self._turn_footer = (request_id, event.payload)
+                self._turn_footers[request_id] = event.payload
             await self._post_response_for_background(event.payload, request_id)
 
     async def _post_response_for_background(
@@ -3346,7 +3581,7 @@ class ClaudeCodeService:
         ``_post_response`` runs in ``_run_turn``'s ``finally``, which is
         reached at the turn's *first* result. A background subagent outlives
         that: the drain follows the stream past it (``session.py`` §
-        ``_drain_background``) and only the last of its continuations reports
+        ``_complete``) and only the last of its continuations reports
         the run as over. Until this, the Context tab and the file tree kept
         describing the session as it was before the background work — the
         turn's own footer revised itself, but the derived state around it did

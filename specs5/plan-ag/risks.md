@@ -3204,3 +3204,24 @@ from the day it was written, so the pinning that made AG-34's extraction provabl
 it. `TestUiStateDescribesTheAnswerItSends` asserts in both directions instead — every snapshot key is
 named in the prose, and four spellings of a selection are absent, because the fault was the idea rather
 than the word. Five failures against the shipped description, 40 passing.
+
+---
+
+## AG-R-35 — The drift gate reads names, and the 0.1.22 change that mattered moved no name **(open 2026-10-14)**
+
+Left by [AG-35](decisions.md#ag-35). The upgrade to 0.1.22 turned `tests/test_antigravity_surface.py`
+red on nine names, and all nine were triaged. **The change with the largest effect on a session was not
+among them.** `list_directory`, `search_directory` and `find_file` kept their enum members, their proto
+fields and their rows in `surface.BUILTIN_TOOLS`; what moved was the *answer* of
+`BuiltinTools.read_only()`, a classmethod the gate does not call. A read-only session lost the ability
+to find a file, and a gated one would have asked the user for every `ls`, with the suite green on that
+point. It was found by reading `types.py` to verify a sentence for `sdk-surface.md`, not by a test.
+
+`sdk-surface.md` § *The first drift it caught* already says the probe *"reads shape, never
+semantics"*; this is the first time that limit cost something, and the classmethods are the cheap half
+of it to close. **What would close it:** the surface report snapshots the value sets of
+`read_only()`, `nondestructive()`, `deprecated()` and `default()` and fails on any change, the same
+way it fails on a new name — they are the SDK's judgements, and `options.py` borrows one of them. Until
+then, `test_a_read_only_session_can_still_look_around` and
+`test_the_borrowed_set_does_not_bring_schedule` each pin one fact about `read_only()` and
+`deprecated()`, which catches a repeat of these two changes and not the next one.

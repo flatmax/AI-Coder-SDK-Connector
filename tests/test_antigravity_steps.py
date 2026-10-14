@@ -242,7 +242,7 @@ class TestResultFieldsMatchTheProto:
             "read_url_content": {"url"},
             "generate_image": {"prompt", "image_name", "aspect_ratio"},
             "finish": set(),
-            "start_subagent": set(),
+            "invoke_subagent": set(),
         }
         by_tool = {t.value: f for t, f in BUILTIN_TOOL_PROTO_FIELDS.items()}
         for tool, results in ag_steps.TOOL_RESULT_FIELDS.items():

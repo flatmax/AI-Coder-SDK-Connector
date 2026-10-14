@@ -631,7 +631,7 @@ maps to a real field, so a key cannot again be serialised out of nothing.
 ## C. Found while working — correctness and honesty
 
 **Every item in this section was closed** as of 2026-08-28 — built, fixed, or decided — **and § C12
-reopened and closed it again inside one day on 2026-09-11.** The closed entries stay because each one holds the reasoning for a change,
+reopened and closed it again inside one day on 2026-09-11, as § C13 did on 2026-09-23 and § C14 on 2026-10-14.** The closed entries stay because each one holds the reasoning for a change,
 and because two of them are the record of an item being blocked by its own framing rather than by any
 work: § C3 on a per-tool table that did not need to exist, § C4 on a three-way display choice the app had
 already made.
@@ -1031,10 +1031,11 @@ with that same sentence. This is a third. **The precedence is what makes it wors
 the route proposed above was the `env` dict, `CLAUDE_CODE_AUTO_COMPACT_WINDOW` sits *above* settings in the
 CLI's own order, and a field left at its default in a file the user rarely opens would then silently
 outrank the value they can see in `~/.claude/settings.json`. The three fields this one wanted to sit
-beside are not the precedent it looked like either: `model`, `effort` and `permission_mode` each have a
-live control request behind them and change a running session, and this one has none — it is read when
-the subprocess starts, exactly like the rest of `engine.json`, which is the case `_pendingFields` exists
-to apologise for.
+beside are not the precedent it looked like either — **two of them, not three; see § C13**: `model` and
+`permission_mode` each have a live control request behind them and change a running session, and this one
+has none — it is read when the subprocess starts, exactly like the rest of `engine.json`, which is the
+case `_pendingFields` exists to apologise for. `effort` is read at subprocess start too, so it is no
+precedent for anything; the decline below never rested on it, only on the precedence argument.
 
 **What happened instead** is the one-line edit the CLI already supports: `"autoCompactWindow": 200000` in
 `~/.claude/settings.json`, made by the user on 2026-09-11 and verified the way the rest of this item was —
@@ -1052,6 +1053,58 @@ now say what is running: the file's header capture describes a 200K payload that
 `bandColor` records that the day arrived and was answered by a setting rather than by a band change. The
 band rule remains the item the day the window goes back up.
 
+**C13 — `effort` was named as having a live control request. It has none.** ✅ *Found and corrected
+2026-09-23 — leaves this queue.* § C12 above listed `model`, `effort` and `permission_mode` as the three
+fields that change a running session, and used the contrast to measure `auto_compact_window` against.
+The SDK exposes two such control requests — `ClaudeSDKClient.set_permission_mode` and `set_model` — and
+no `set_effort`; `EngineConfig.LIVE_CONTROLS`, the map that exists precisely so a save can name the
+shortcut, has only ever held those two, and
+[`5-webapp/settings.md`](5-webapp/settings.md) § *The Applies Column Is Load-Bearing* says the same in
+its own words. So one sentence in this file contradicted both the code and the spec, and it is the
+sentence that was doing the arguing.
+
+**What made it plausible is that the fact was right and the mechanism was wrong.** Effort *can* be moved
+on a session that is already up — the CLI's own `/effort` built-in does it, answering *"Set effort level
+to … (this session only)"* — and AIC⚡DC passes that command through untouched, which
+[`service.py`](../src/aic_dc/claude_code/service.py)'s slash-command comment already names as one of the
+built-ins that have been working all along. A live path exists; it is the CLI's, not ours, it is not a
+control request, and it does not write `engine.json`. That is exactly the shape of error that survives a
+reading, because every claim around it is true.
+
+**Found by asking what to set `effort` to** when the session moved to Opus 5.5 — whose CLI registry entry
+carries `default_effort: "medium"`, alone among every model in that registry — **not by auditing
+anything.** The second item in this section to arrive that way, after § C12, and the third thing this
+month found by using the app rather than reading it.
+
+**C14 — Text another agent wrote could make the CLI read a file.** ✅ *Found and fixed 2026-10-14 —
+leaves this queue.* The Claude CLI expands `@/path` in a prompt into the file's contents before the
+model sees anything, and so before `tools=[]`, plan mode or `can_use_tool` is consulted — it is the
+CLI's own read, not a tool call. Two places hand it text the user did not type:
+
+- **The consultant** (`claude_code/consultant.py`), whose prompt is another engine's question. Measured
+  with a nonce file: `@/tmp/…/secret.txt` in the question put the file on the wire with every other
+  control in place. Now `verbatim_prompts=True` on its options;
+  `test_an_at_mention_in_the_prompt_is_not_expanded` captures the outbound bodies and fails with it off.
+- **A peer's message** (CC-23), which plan mode and the deny-all `can_use_tool` were meant to keep
+  read-only. Same read, same blind spot. Now `Turn.verbatim`, set only by `_peer_turn`, sends that one
+  message with `client_composed: true` — session-wide `verbatim_prompts` would also take `@file` and
+  `/command` from the user's own turns.
+  [`4-features/peer-conversation.md`](4-features/peer-conversation.md) § *Read-only* has the reasoning
+  and a new invariant.
+
+Both need CLI 2.1.248+ (2.1.299 here); an older CLI logs and ignores the field. **Found while upgrading
+the lock, and the upgrade only found half of it.** `test_no_tools_are_declared_to_the_model` went red
+because a claude.ai connector on the account put eight MCP tools on the consultant's
+requests — `setting_sources=[]` does not close that route, the CLI fetches connectors itself — and
+`strict_mcp_config=True` closes it. The `@` route was found by asking what *else* reaches the CLI that
+`tools=[]` does not name, which no failing test prompted.
+
+**Also from that upgrade, and smaller.** `forward_subagent_text=True` on the main session: CLI 2.1.299
+sends a subagent's tool calls but not its text or thinking without it, so the subagent tab
+([`5-webapp/subagent-browser.md`](5-webapp/subagent-browser.md)) would have been cards with no
+narration. The pump already files text by `parent_tool_use_id`. `verbatim_prompts` joins
+`sdk_surface.PENDING_OPTIONS` for the main session, for the reason above.
+
 ---
 
 ## D. Verification debt
@@ -1062,7 +1115,7 @@ numbers have met a live CLI and lost — the argument for this section is
 [`0-overview/implementation-guide.md`](0-overview/implementation-guide.md) § *Verifying UI Work Against
 a Running Engine*.
 
-**This section is empty as of 2026-09-09.** All four items closed — D2 and D3 on 2026-09-08, D1 and D4 on
+**This section was empty from 2026-09-09 until D5 opened on 2026-10-14.** All four earlier items closed — D2 and D3 on 2026-09-08, D1 and D4 on
 2026-09-09 — and the entries stay below with what each one found, because **the record of what a
 verification cost and what it turned up is the only durable part of it**. The section itself stays too: it
 is not a list that got finished, it is where the next unwatched claim goes. Two harnesses now sit under it
@@ -1185,7 +1238,7 @@ expected `/help` to return `total_cost_usd: 0` and trip `reset`, on the strength
 been spent yet. **A zero read from a single-turn session is not evidence about what that turn did**, which
 is the same shape as the two-turns rule the item already carried, arriving from the other direction.
 
-**§ D is empty. Every item in it was closed by driving the app, and all four turned up something their own
+**D1–D4 closed by driving the app, and all four turned up something their own
 entry had not predicted** — D2 that a source comment's justification was weaker than the ceiling it
 defends, D3 that the check it asked for was a static scan and needed no run at all, D1 that the engine
 answers a stop twice, and D4 that phase 6's guess at how to provoke both renderings ("an immediate Stop")
@@ -1196,6 +1249,32 @@ Running Engine* and *Measuring Layout in a Real Browser*, and the launch cost is
 than a per-item project: `scripts/_live_app_probe.py` for a live engine,
 `webapp/src/layout-harness.js` for pixels. **The next entry in a section like this one is cheap to check,
 which is the point of having spent the four.**
+
+**D5 — Peer conversations have never run between two real instances.** Opened 2026-10-14 with the feature
+([`4-features/peer-conversation.md`](4-features/peer-conversation.md), CC-23). Built and green: 34 tests in
+`tests/test_peer.py` run two `PeerConversations` against each other over real loopback HTTP with a fake
+engine host, and 11 in `webapp/src/chat-panel/peer-conversation.test.js` drive the panel from fake
+`peerChanged` payloads. **Nothing has had a real CLI turn on the responder, or a real model choosing to call
+`ask_peer`.** To close it, start `aic-dc` in two repositories with a browser on each and watch, in order:
+
+1. Ask repo1's agent to "ask repo2 how it does X". Expect `list_peers`/`ask_peer` tool cards on repo1 with
+   no permission dialog, and the banner *Talking to repo2 — waiting for its user to allow*.
+2. Repo2 shows the consent card with the first message. **Allow** should start a new session, set `plan`
+   mode, lock the composer, and show the peer message labelled *From repo1* with the header line hidden.
+3. Repo2's reply comes back as repo1's tool result, ending in a "Questions for you:" section and the
+   open footer. Repo1's agent answers in a second `ask_peer`; the framing paragraph must not repeat.
+4. Ending, one run each: End on repo2's banner mid-turn (the posture must not be restored until the
+   cancelled turn has finished — `_run` does the close); Stop on repo2; Stop on repo1 while `ask_peer` is
+   in flight (`cancel_streaming` → `end_calling`); `end_peer_conversation` from repo1's agent; Deny.
+   After each, repo2's mode is the one recorded at Allow and "Back to previous session" resumes it.
+5. Kill repo1 with `kill -9` mid-conversation. Repo2 must stay locked until its user clicks End — that is
+   the designed cost of no timeouts, not a bug.
+
+**What to suspect first**, from the review that built it: whether the model's turn really blocks on the
+in-process tool with no client-side deadline (the design rests on it, and `agy` is excluded because it does
+not); whether `streamComplete.response` is the reply text the caller should see when the turn ends on tool
+use; and, in collab mode, that `_peer_turn`'s `connect_engine()` reads the *current* RPC caller, which
+could be a remote participant. The last one is a known edge left open.
 
 ---
 

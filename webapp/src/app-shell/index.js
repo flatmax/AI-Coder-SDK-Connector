@@ -1314,6 +1314,18 @@ export class AppShell extends JRPCClient {
   }
 
   /**
+   * A peer conversation opened, changed status or ended (CC-23).
+   *
+   * Session-wide: the consent card must reach whichever browser is open, and
+   * the lock must show in every window, not just the one that clicked Allow.
+   * Carries `{state}`, the same record `get_current_state` reports as `peer`.
+   */
+  peerChanged(data) {
+    window.dispatchEvent(new CustomEvent('peer-changed', { detail: data }));
+    return true;
+  }
+
+  /**
    * Anything the engine reports that is not a transcript block: a
    * conversation reset, an unrecognised message type, an assistant-side
    * error. Surfaced rather than swallowed, because a silently dropped
@@ -1602,12 +1614,12 @@ export class AppShell extends JRPCClient {
     return onReviewStateChanged(this, event);
   }
 
-  _onStreamChunkHeader() {
-    return onStreamChunkHeader(this);
+  _onStreamChunkHeader(event) {
+    return onStreamChunkHeader(this, event);
   }
 
-  _onStreamCompleteHeader() {
-    return onStreamCompleteHeader(this);
+  _onStreamCompleteHeader(event) {
+    return onStreamCompleteHeader(this, event);
   }
 
   async _onCopyDiff() {

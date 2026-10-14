@@ -55,7 +55,7 @@ the money out of both turns.
 The baseline moves **once per turn**, not once per result. A result message ends
 a turn, not the run: with a background task in flight the engine goes on to send
 further results for the same request
-(:meth:`~aic_dc.claude_code.session.EngineSession._drain_background`), and a
+(:meth:`~aic_dc.claude_code.session.EngineSession._complete`), and a
 per-result baseline would price each of them against the last, so the figure the
 turn's footer carries would be the final result's share alone. For a background
 subagent that is most of the money — its tokens are spent after the first result

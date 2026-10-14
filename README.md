@@ -112,6 +112,7 @@ The plan of record, phase by phase, is [`specs5/plan-ag/`](specs5/plan-ag/) — 
 - **KaTeX math** in chat (`$$…$$` and `$…$`), and live TeX preview for `.tex` files via make4ht with bidirectional scroll sync.
 - **Images** — paste a screenshot into chat and it goes into the transcript.
 - **Collaboration mode** — multiple browsers on one backend over LAN. The host is auto-admitted; later clients need explicit approval within 120 s. Non-localhost participants get a read-only view and cannot answer permission prompts.
+- **Inter-repo discussions.** Two AIC⚡DC instances on the same machine, each in its own repository, can let their agents talk. The agent in one repo calls `ask_peer` to put a question to the agent in another; the other instance's user sees a consent card naming the caller and its first message, and nothing reaches their engine until they click Allow. The answering side runs in a fresh session, read-only twice over — plan mode, and every tool denied except the six index tools — with its composer locked while you watch both the questions and its replies stream in. Its own questions ride back inside each reply, so the caller always asks and the responder never calls back. Discovery is a `0600` record per process under `~/.config/aic-dc/peers/` and the transport is a token-authenticated loopback listener; nothing binds a non-loopback interface. Claude engine on both sides, and no timeouts: a conversation ends when either user clicks End, or the caller's agent ends it. See [Inter-repo discussions](#inter-repo-discussions).
 - **Symmetric bidirectional JSON-RPC** over WebSocket via [jrpc-oo](https://github.com/flatmax/jrpc-oo) — terminal and browser are peers, and either side calls the other.
 
 ---
@@ -355,6 +356,14 @@ Full field reference: [specs5/1-foundation/configuration.md](specs5/1-foundation
 3. Work through it with reverse diffs in the viewer. The agent can read the review state through `review_state`, so it knows what is under review without being told.
 4. Re-commit when done.
 
+### Inter-repo discussions
+
+1. Run `aic-dc` in each repository — say `~/src/app` and `~/src/lib`. Both must be on the Claude engine.
+2. In `app`, ask the agent something that needs the other repo: *"ask the agent in lib how its config loader resolves paths"*. It finds `lib` with `list_peers` and sends the question with `ask_peer`. Its tool card shows the message and, while it waits, whether it is waiting for consent or for the reply.
+3. `lib`'s browser shows a consent card with the question in full. **Allow** starts a new, read-only session there; **Deny** tells the caller no. The session it replaces stays in the history browser.
+4. Each message arrives in `lib` labelled *From app*, and the answer streams in beneath it. The answer ends with a "Questions for you:" section, which `app`'s agent answers in its next message.
+5. End it from either banner's **End**, or let `app`'s agent call `end_peer_conversation`. `lib`'s banner then offers **Back to previous session**, and its composer comes back.
+
 ---
 ## CLI Options
 
@@ -546,6 +555,7 @@ AI-Coder-SDK-Connector/
 │   │   ├── permissions.py          #   can_use_tool, mode rules, deny-read
 │   │   ├── hooks.py                #   PreToolUse / PostToolUse (re-index)
 │   │   ├── mcp_server.py           #   in-process "aic-dc" MCP server (6 tools)
+│   │   ├── peer.py                 #   inter-repo discussions: discovery, listener, "aic-dc-peer" tools
 │   │   ├── messages.py             #   SDK message → UI payload taxonomy
 │   │   ├── cost.py                 #   per-turn cost differencing
 │   │   ├── history.py              #   transcript mirror + reads
@@ -642,7 +652,7 @@ The behaviour of every feature above is specified in [`specs5/`](specs5/), which
 | [`1-foundation/`](specs5/1-foundation/) | Configuration, repository layer, RPC transport and inventory |
 | [`2-indexing/`](specs5/2-indexing/) | Symbol index, document index, reference graph, keyword enrichment |
 | [`3-engine/`](specs5/3-engine/) | Session, permissions, MCP bridge, tool surface, history, context visibility |
-| [`4-features/`](specs5/4-features/) | Code review, collaboration, document conversion, images |
+| [`4-features/`](specs5/4-features/) | Code review, collaboration, inter-repo discussions, document conversion, images |
 | [`5-webapp/`](specs5/5-webapp/) | Every panel, viewer, dialog, and overlay |
 | [`6-deployment/`](specs5/6-deployment/) | Startup, build, packaging |
 | [`plan/`](specs5/plan/) | Conversion decisions, risks, delivery, SDK surface |

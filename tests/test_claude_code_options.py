@@ -72,6 +72,11 @@ class TestAlwaysSet:
     def test_hook_events_are_on(self, kwargs):
         assert kwargs["include_hook_events"] is True
 
+    def test_subagent_text_is_forwarded(self, kwargs):
+        """CLI 2.1.299 sends a subagent's tool calls but not its prose
+        without it, and the subagent tab narrates nothing."""
+        assert kwargs["forward_subagent_text"] is True
+
     def test_setting_sources_are_user_project_local(self, kwargs):
         """CC-11: a session here behaves like a CLI session in the repo."""
         assert kwargs["setting_sources"] == ["user", "project", "local"]

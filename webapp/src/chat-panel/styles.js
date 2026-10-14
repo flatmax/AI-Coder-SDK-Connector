@@ -1535,6 +1535,83 @@ export const STYLES = css`
     opacity: 1;
   }
 
+  /* Peer conversation (CC-23) — the consent card, the banner for
+   * either role, and the ended notice. Blue rather than the health
+   * banner's amber: nothing is wrong, the session is just held by
+   * another repository's agent. The consent card is the one that asks
+   * for something, so it gets the stronger border. */
+  .peer-banner {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.75rem;
+    padding: 0.5rem 1rem;
+    background: rgba(56, 139, 253, 0.1);
+    color: var(--text-primary, #c9d1d9);
+    font-size: 0.8125rem;
+    line-height: 1.4;
+    border-top: 1px solid rgba(56, 139, 253, 0.3);
+  }
+  .peer-banner.peer-consent {
+    border: 1px solid rgba(56, 139, 253, 0.6);
+  }
+  .peer-banner.peer-ended {
+    background: rgba(139, 148, 158, 0.1);
+    border-top-color: rgba(139, 148, 158, 0.25);
+  }
+  .peer-lines {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 0.375rem;
+    min-width: 0;
+  }
+  .peer-label {
+    font-weight: 600;
+  }
+  .peer-root {
+    color: var(--text-secondary, #8b949e);
+    font-family: var(--font-mono, ui-monospace, SFMono-Regular, monospace);
+    font-size: 0.75rem;
+    overflow-wrap: anywhere;
+  }
+  /* The first message, in full: it is what the user is consenting to
+   * send to their own agent. Scrolls rather than grows. */
+  .peer-first-message {
+    max-height: 12rem;
+    overflow: auto;
+    padding: 0.375rem 0.5rem;
+    border-left: 2px solid rgba(56, 139, 253, 0.5);
+    background: rgba(0, 0, 0, 0.15);
+  }
+  .peer-actions {
+    flex: 0 0 auto;
+    display: flex;
+    gap: 0.375rem;
+  }
+  .peer-actions button {
+    background: none;
+    border: 1px solid rgba(139, 148, 158, 0.4);
+    border-radius: 4px;
+    color: inherit;
+    cursor: pointer;
+    padding: 0.125rem 0.625rem;
+    font-size: 0.75rem;
+  }
+  .peer-actions button:hover {
+    border-color: rgba(56, 139, 253, 0.8);
+  }
+  .peer-actions .peer-allow {
+    background: rgba(56, 139, 253, 0.25);
+    border-color: rgba(56, 139, 253, 0.8);
+  }
+  .peer-actions .peer-dismiss {
+    border: none;
+    opacity: 0.7;
+  }
+  .message-card.from-peer .role-label {
+    color: #58a6ff;
+  }
+
   /* Engine chip — which engine is answering, in the action bar.
    * Only rendered when more than one engine is mountable, so its
    * presence is already the signal that there is a question to

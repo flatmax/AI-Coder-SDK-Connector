@@ -339,6 +339,12 @@ export const PROPERTIES = {
    */
   _engineHealth: { type: Object, state: true },
   /**
+   * The peer conversation this session is in, either role, or null. From
+   * `get_current_state.peer` and the `peerChanged` push; drives the consent
+   * card, both banners and the composer lock (peer-conversation.js).
+   */
+  _peer: { type: Object, state: true },
+  /**
    * The `healthKey` of the problem set the user dismissed, or null. Keyed by
    * problem rather than by session so the banner stays quiet about what has
    * been read and speaks up about what has not — see `health-banner.js`.

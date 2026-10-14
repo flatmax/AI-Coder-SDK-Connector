@@ -462,7 +462,7 @@ def derive_rules(
             )
     # Nothing for `delegate` or `interact`: a standing grant to spawn
     # subagents or answer the agent's questions is not a grant the dialog
-    # can describe in one line, and `start_subagent` is in the write seam
+    # can describe in one line, and `invoke_subagent` is in the write seam
     # precisely because its child's calls are not knowable here.
     return rules
 

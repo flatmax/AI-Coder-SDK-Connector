@@ -215,7 +215,7 @@ rendered message, not on the entry: the transcript is a mirror and takes nothing
 - **Live and replay are structurally different, and that is correct.** Live, the wake-up produces no row
   at all: it lands inside a turn the browser has already settled, and the answer arrives as a
   continuation that revises that one message in place
-  ([session.md § Every result the drain reads](session.md#every-result-the-drain-reads-is-emitted-flagged-continuation)).
+  ([session.md § Every result after a turn's first](session.md#every-result-after-a-turns-first-is-emitted-flagged-continuation)).
   On replay the same work reads as two turns with a seam row between them. The replay shows the seam
   because the transcript records one — that is where the turn on disk actually breaks — and reconciling
   the two views would mean editing the transcript's own turn boundaries to match a live rendering

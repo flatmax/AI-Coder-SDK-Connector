@@ -122,6 +122,12 @@ RESOLUTION_MEMORY = 64
 # register.
 AIC_DC_MCP_SERVER = index_tools.SERVER_NAME
 
+#: The caller's peer-conversation tools (``peer.py``). Allowed without a
+#: dialog: the gate is the *responder's* consent, and every call shows as a
+#: tool card the caller's user can stop. Must match ``peer.SERVER_NAME``;
+#: ``tests/test_peer.py`` pins the two together.
+PEER_MCP_SERVER = "aic-dc-peer"
+
 _READ_TOOLS = frozenset(
     {"Read", "Glob", "Grep", "WebFetch", "WebSearch", "NotebookRead", "TodoWrite"}
 )
@@ -1218,10 +1224,13 @@ def write_denied_read_files(repo_root: Path | str, paths: list[str]) -> list[str
 # ---------------------------------------------------------------------------
 
 Broadcast = Callable[[Event], Awaitable[None]]
-# Records a prompt against the turn in flight and returns its request ID,
+# Records a prompt against the turn that owns it and returns its request ID,
 # so the dialog can be attributed to a turn without this module knowing
-# anything about turns.
-NotePrompt = Callable[[str | None], str | None]
+# anything about turns. Called with the tool call's id, plus `agent_id=` for
+# a subagent's call — keyword and only when there is one, because a
+# subagent's turn need not be the one in flight and only the Claude Code
+# session can tell them apart; the other engines' callbacks take the id alone.
+NotePrompt = Callable[..., str | None]
 # Tells the caller the session's permission mode has changed underneath it,
 # because the CLI applies a mode carried on a permission result without
 # announcing it on the message stream. Without this the mode selector keeps
@@ -1281,6 +1290,10 @@ class PermissionBroker:
         self._no_localhost_timeout = no_localhost_timeout
         self._presence_poll = presence_poll
         self._clock = clock
+        #: Set by the service. Returns a deny reason while every request must
+        #: be refused without a dialog — a peer conversation (CC-23) — and
+        #: ``None`` otherwise. The index tools stay allowed under it.
+        self.lockdown: Callable[[], str | None] | None = None
 
         self._pending: dict[str, PendingPermission] = {}
         # permission_id → who resolved it, for the last RESOLUTION_MEMORY
@@ -1348,6 +1361,23 @@ class PermissionBroker:
             logger.debug("Allowing our own tool %s without a dialog", tool_name)
             return PermissionResultAllow()
 
+        lockdown = None
+        if self.lockdown is not None:
+            try:
+                lockdown = self.lockdown()
+            except Exception:
+                logger.exception("Lockdown check raised; denying")
+                lockdown = "AIC-DC could not check whether this session is locked, so the call was denied."
+        if lockdown:
+            # No dialog: the user is locked out, and the request comes from
+            # another agent's text. Asking them to approve it would be asking
+            # them to approve edits they did not ask for.
+            logger.info("Denied %s during a peer conversation", tool_name)
+            return PermissionResultDeny(message=lockdown, interrupt=False)
+
+        if mcp_server_name(tool_name) == PEER_MCP_SERVER:
+            return PermissionResultAllow()
+
         tool_input = tool_input if isinstance(tool_input, dict) else {}
         tool_use_id = getattr(context, "tool_use_id", None) or ""
         permission_id = self._new_id()
@@ -1355,7 +1385,12 @@ class PermissionBroker:
         request_id: str | None = None
         if self._note_prompt is not None:
             try:
-                request_id = self._note_prompt(tool_use_id or None)
+                agent_id = getattr(context, "agent_id", None) or None
+                request_id = (
+                    self._note_prompt(tool_use_id or None, agent_id=agent_id)
+                    if agent_id
+                    else self._note_prompt(tool_use_id or None)
+                )
             except Exception:
                 logger.exception("Could not record the permission prompt on the turn")
 

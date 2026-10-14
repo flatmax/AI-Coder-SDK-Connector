@@ -2,6 +2,8 @@
 // the header git buttons (copy diff, commit, reset) and the
 // state flags that gate them (committing, streaming, review).
 
+import { noteStreamChunk, noteStreamComplete } from '../stream-gate.js';
+
 /**
  * Git action button dispatch from the file picker
  * header. The picker doesn't know the RPC call proxy,
@@ -84,23 +86,26 @@ export function onReviewStateChanged(host, event) {
 
 /**
  * First chunk of a stream flips the gate. Subsequent
- * chunks are idempotent no-ops. We don't care which
- * request is streaming — the single-stream invariant
- * means "any chunk in flight" is equivalent to
- * "streaming active" for button-gating purposes.
+ * chunks are idempotent no-ops. The gate tracks
+ * *which* requests are streaming, because more than
+ * one can be: a turn whose background subagents
+ * outlive its result keeps streaming their work
+ * after the next turn has started.
  */
-export function onStreamChunkHeader(host) {
-  if (!host._streaming) host._streaming = true;
+export function onStreamChunkHeader(host, event) {
+  noteStreamChunk(host, event);
 }
 
 /**
  * Stream completion — whether natural, cancelled, or
- * errored — clears the gate. The backend fires
+ * errored — releases that request. The backend fires
  * streamComplete on all three paths, so this is the
- * single reliable release point.
+ * single reliable release point. The gate opens when
+ * no request is left streaming: an older turn's late
+ * result must not unlock commits under a newer one.
  */
-export function onStreamCompleteHeader(host) {
-  host._streaming = false;
+export function onStreamCompleteHeader(host, event) {
+  noteStreamComplete(host, event);
 }
 
 /**

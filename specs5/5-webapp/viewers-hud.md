@@ -797,11 +797,13 @@ holding it would lose it on reconnect. Three per-turn fields ship beside the eng
 under names that cannot be confused with them: `turn_cost_usd`, `turn_cost_basis`, `turn_model_usage`.
 
 A turn with a background subagent therefore reaches the HUD twice. The second `streamComplete` arrives
-flagged `continuation` ([`../3-engine/session.md`](../3-engine/session.md#every-result-the-drain-reads-is-emitted-flagged-continuation)),
+flagged `continuation` ([`../3-engine/session.md`](../3-engine/session.md#every-result-after-a-turns-first-is-emitted-flagged-continuation)),
 and the HUD shows again with the turn's figures now that the subagent's spend is in them — it replaces
-the reading, it does not add a second turn's. That it may pop up seconds after the user read the first
-one is not a race with the next turn: the drain is stopped before the next turn's pump starts, so a
-continuation can only ever be about the turn still on screen.
+the reading, it does not add a second turn's. It can also arrive after the next turn has started: the
+engine routes each message to the turn that owns it, so an older turn's subagents keep reporting under
+the older request id. The HUD shows a continuation only for the latest request it has seen settle —
+once a newer turn has reported, the HUD is about that one, and an older turn's late footer would replace
+it with a figure the user did not just spend.
 
 `turn_cost_basis` is what lets the HUD tell apart the two things it used to render identically:
 

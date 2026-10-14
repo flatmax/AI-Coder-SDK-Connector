@@ -269,6 +269,8 @@ export class ChatPanel extends RpcMixin(LitElement) {
     this._canSetPermissionMode = true;
     this._sessionInfo = null;
     this._engineHealth = null;
+    // The peer conversation record (CC-23), or null — see peer-conversation.js.
+    this._peer = null;
     this._healthDismissed = null;
     this._healthForced = false;
 

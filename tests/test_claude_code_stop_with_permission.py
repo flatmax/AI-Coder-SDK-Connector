@@ -103,6 +103,7 @@ class FakeCli:
         self.asked = asyncio.Event()
         self.permission: asyncio.Task | None = None
         self._ended = asyncio.Event()
+        self._queried = asyncio.Event()
         FakeCli.instances.append(self)
 
     async def connect(self):
@@ -111,13 +112,13 @@ class FakeCli:
     async def disconnect(self):
         self.disconnect_calls += 1
         # ``Query.close()`` closes the send side and the read task pushes an
-        # end sentinel, so a consumer parked in ``receive_response()`` sees
+        # end sentinel, so a consumer parked in ``receive_messages()`` sees
         # EndOfStream rather than hanging. Modelled, because the first probe
         # hung instead and made the session look permanently wedged.
         self._ended.set()
 
     async def query(self, prompt, session_id="default"):
-        pass
+        self._queried.set()
 
     async def interrupt(self):
         self.interrupt_calls += 1
@@ -142,7 +143,21 @@ class FakeCli:
         )
         self.asked.set()
 
-    async def receive_response(self):
+    async def receive_messages(self):
+        """One run per query, and idle between them until disconnect.
+
+        The real stream does not end between turns — the session reads it
+        then too — so neither does this one.
+        """
+        while not self._ended.is_set():
+            if not self._queried.is_set():
+                await asyncio.sleep(0.005)
+                continue
+            self._queried.clear()
+            async for message in self._run():
+                yield message
+
+    async def _run(self):
         yield SystemMessage(
             subtype="init", data={"session_id": "sess-1", "model": "m"}
         )
