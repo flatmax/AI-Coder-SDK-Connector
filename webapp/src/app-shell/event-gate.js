@@ -69,6 +69,7 @@ export const GATED_EVENTS = Object.freeze([
   'hookEvent',
   'rateLimit',
   'engineHealth',
+  'peerChanged',
   'systemEvent',
 ]);
 

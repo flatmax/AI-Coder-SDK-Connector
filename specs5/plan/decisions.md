@@ -731,3 +731,44 @@ list that is actually true of the running CLI. See
   twenty defaults were nearly all whole messages already, so the loss is small — but it is real,
   and the answer for anyone who hits it is to type the sentence, which is what they would have done
   before the drawer existed.
+
+---
+
+<a id="cc-23"></a>
+
+## CC-23 — Peer conversations run in a fresh, locked main session, with no timeouts **(user)**
+
+Two AIC⚡DC instances on one machine can hold a conversation between their agents
+([`../4-features/peer-conversation.md`](../4-features/peer-conversation.md)). The responder answers
+in a **new main session**, started when its user accepts, read-only and locked against the user's
+input until either side ends it. Nothing times out.
+
+**Why a main session, not a separate responder session.** A separate session would leave the user
+free to keep working, but it needs its own lifecycle, its own transcript view, its own stop path, and a
+way to tell the user's own agent what was discussed. A main session already has all four. The user asked
+for the simplest version, and accepted being locked out while it runs in exchange.
+
+**Why a new session, not the current one.** The conversation does not fill the context of work in
+progress, and it is kept as a session of its own in the history browser. When it ends it stays
+current, so the user can keep talking to an agent that remembers it.
+
+**Why this is not a consultation.** [AG-16](../plan-ag/decisions.md) makes a consultation one-shot,
+tool-less and blind to the repository, so that it stays independent. A peer exists to read its own
+repository and to keep the thread, so it is the opposite on every point, on purpose. Neither should be
+"fixed" toward the other.
+
+**Why no timeouts** (user). A timeout would end a conversation while someone is still thinking, or
+still reading the consent dialog. Both users can see the conversation and end it, which is the release
+a timeout would otherwise provide.
+
+**Consequences:**
+
+- **A caller killed hard leaves the responder locked** until its user clicks End. Recorded, not
+  mitigated: a liveness poll is a timeout under another name.
+- **The caller's agent blocks for as long as the responder takes**, including the consent dialog.
+  Its user sees why on the tool card and can stop it, and stopping ends the conversation.
+- **Read-only is enforced twice:** `plan` mode, and a `can_use_tool` that denies everything but the
+  index tools, without a dialog. That way a single control quietly not working is not enough to break
+  it ([AG-25](../plan-ag/decisions.md#ag-25)).
+- **The responder never calls the caller.** Its questions ride its replies, so no turn is ever
+  re-entered and no two processes wait on each other.

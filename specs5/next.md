@@ -1086,7 +1086,7 @@ numbers have met a live CLI and lost — the argument for this section is
 [`0-overview/implementation-guide.md`](0-overview/implementation-guide.md) § *Verifying UI Work Against
 a Running Engine*.
 
-**This section is empty as of 2026-09-09.** All four items closed — D2 and D3 on 2026-09-08, D1 and D4 on
+**This section was empty from 2026-09-09 until D5 opened on 2026-10-14.** All four earlier items closed — D2 and D3 on 2026-09-08, D1 and D4 on
 2026-09-09 — and the entries stay below with what each one found, because **the record of what a
 verification cost and what it turned up is the only durable part of it**. The section itself stays too: it
 is not a list that got finished, it is where the next unwatched claim goes. Two harnesses now sit under it
@@ -1209,7 +1209,7 @@ expected `/help` to return `total_cost_usd: 0` and trip `reset`, on the strength
 been spent yet. **A zero read from a single-turn session is not evidence about what that turn did**, which
 is the same shape as the two-turns rule the item already carried, arriving from the other direction.
 
-**§ D is empty. Every item in it was closed by driving the app, and all four turned up something their own
+**D1–D4 closed by driving the app, and all four turned up something their own
 entry had not predicted** — D2 that a source comment's justification was weaker than the ceiling it
 defends, D3 that the check it asked for was a static scan and needed no run at all, D1 that the engine
 answers a stop twice, and D4 that phase 6's guess at how to provoke both renderings ("an immediate Stop")
@@ -1220,6 +1220,32 @@ Running Engine* and *Measuring Layout in a Real Browser*, and the launch cost is
 than a per-item project: `scripts/_live_app_probe.py` for a live engine,
 `webapp/src/layout-harness.js` for pixels. **The next entry in a section like this one is cheap to check,
 which is the point of having spent the four.**
+
+**D5 — Peer conversations have never run between two real instances.** Opened 2026-10-14 with the feature
+([`4-features/peer-conversation.md`](4-features/peer-conversation.md), CC-23). Built and green: 34 tests in
+`tests/test_peer.py` run two `PeerConversations` against each other over real loopback HTTP with a fake
+engine host, and 11 in `webapp/src/chat-panel/peer-conversation.test.js` drive the panel from fake
+`peerChanged` payloads. **Nothing has had a real CLI turn on the responder, or a real model choosing to call
+`ask_peer`.** To close it, start `aic-dc` in two repositories with a browser on each and watch, in order:
+
+1. Ask repo1's agent to "ask repo2 how it does X". Expect `list_peers`/`ask_peer` tool cards on repo1 with
+   no permission dialog, and the banner *Talking to repo2 — waiting for its user to allow*.
+2. Repo2 shows the consent card with the first message. **Allow** should start a new session, set `plan`
+   mode, lock the composer, and show the peer message labelled *From repo1* with the header line hidden.
+3. Repo2's reply comes back as repo1's tool result, ending in a "Questions for you:" section and the
+   open footer. Repo1's agent answers in a second `ask_peer`; the framing paragraph must not repeat.
+4. Ending, one run each: End on repo2's banner mid-turn (the posture must not be restored until the
+   cancelled turn has finished — `_run` does the close); Stop on repo2; Stop on repo1 while `ask_peer` is
+   in flight (`cancel_streaming` → `end_calling`); `end_peer_conversation` from repo1's agent; Deny.
+   After each, repo2's mode is the one recorded at Allow and "Back to previous session" resumes it.
+5. Kill repo1 with `kill -9` mid-conversation. Repo2 must stay locked until its user clicks End — that is
+   the designed cost of no timeouts, not a bug.
+
+**What to suspect first**, from the review that built it: whether the model's turn really blocks on the
+in-process tool with no client-side deadline (the design rests on it, and `agy` is excluded because it does
+not); whether `streamComplete.response` is the reply text the caller should see when the turn ends on tool
+use; and, in collab mode, that `_peer_turn`'s `connect_engine()` reads the *current* RPC caller, which
+could be a remote participant. The last one is a known edge left open.
 
 ---
 

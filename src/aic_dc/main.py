@@ -1332,6 +1332,18 @@ async def run(
     await server.start()
     logger.info("WebSocket server started on ws://%s:%d", bind_host, server_port)
 
+    # Peer conversations (CC-23). Advertised whatever the master, and
+    # answered only while Claude is it: a request taken by a cold alternate
+    # would run where no browser is looking. Never fatal — a machine where
+    # the listener cannot bind loses one feature, not the editor.
+    claude_code_service.peer_is_master = (
+        lambda: getattr(engine_router, "_engine", None) == capabilities.CLAUDE
+    )
+    try:
+        await claude_code_service.peer.start()
+    except Exception as exc:  # noqa: BLE001 - an optional feature
+        logger.warning("Peer conversations are unavailable: %s", exc)
+
     # Wire the event callback now that the server is up.
     #
     # AG-R-19. This used to resolve jrpc-oo's `call` proxy and await
