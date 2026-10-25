@@ -65,7 +65,7 @@ import dataclasses
 import json
 import logging
 import secrets
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -230,9 +230,21 @@ class StaticPolicy:
     #: recognised coming back, which is the safe direction. See
     #: :meth:`stamped` and :meth:`refusal`.
     refusals: Refusals | None = None
+    #: Per-tool argument tests, as ``(name, predicate)`` pairs. A name in
+    #: :attr:`allowed` with a condition runs only when its predicate holds
+    #: for the call's arguments, and is refused with :attr:`reason`
+    #: otherwise — how a second opinion reads public pages without
+    #: reading ``file://`` ones ([AG-36](../../../specs5/plan-ag/decisions.md#ag-36)).
+    #: Pairs rather than a dict so the dataclass stays hashable.
+    conditions: tuple[tuple[str, Callable[[Any], bool]], ...] = ()
 
     @classmethod
-    def of(cls, allowed: Iterable[str], reason: str) -> StaticPolicy:
+    def of(
+        cls,
+        allowed: Iterable[str],
+        reason: str,
+        conditions: Mapping[str, Callable[[Any], bool]] | None = None,
+    ) -> StaticPolicy:
         """Build one from any iterable of names, marked as ours.
 
         The mark is prepended here rather than at each call site so that a
@@ -243,7 +255,35 @@ class StaticPolicy:
         reason = reason.strip()
         if not reason.startswith(cls.MARK):
             reason = f"{cls.MARK} {reason}"
-        return cls(allowed=frozenset(allowed), reason=reason)
+        allowed = frozenset(allowed)
+        conditions = dict(conditions or {})
+        stray = set(conditions) - allowed
+        if stray:
+            raise ValueError(
+                f"Conditions name tools the policy does not allow: {sorted(stray)}"
+            )
+        return cls(
+            allowed=allowed,
+            reason=reason,
+            conditions=tuple(sorted(conditions.items())),
+        )
+
+    def admits(self, tool: str, args: Any) -> bool:
+        """Whether this call runs: allowed by name, and by its condition.
+
+        A predicate that raises refuses, for the reason an unparsable URL
+        does — a refusal costs one call, a wrong admission the posture.
+        """
+        if tool not in self.allowed:
+            return False
+        for name, predicate in self.conditions:
+            if name == tool:
+                try:
+                    return bool(predicate(args))
+                except Exception:  # noqa: BLE001 - see the docstring
+                    logger.exception("Consultation condition on %s raised", tool)
+                    return False
+        return True
 
     def stamped(self) -> StaticPolicy:
         """This policy with an issuer of its own for refusal tokens.
@@ -736,11 +776,10 @@ class AgyGateServer:
             # A consultation (AG-16). Terminal on purpose: this does not
             # fall through to `pre_verdict`, because that path exists to
             # decide *which* calls reach the dialog and there is no dialog
-            # here. A read is denied as firmly as a write — the SDK
-            # consultant enables no tools at all for a second opinion, and
-            # this is the nearest posture `agy` allows, since its tool set
-            # is the binary's rather than ours to restrict.
-            if tool_name in self._policy.allowed:
+            # here. A repository read is denied as firmly as a write; the
+            # web lookups a second opinion may make (AG-36) are admitted by
+            # name and, for a page read, by its URL.
+            if self._policy.admits(tool_name, args):
                 return {"decision": "allow"}
             logger.debug("Consultation gate refused %s", tool_name)
             # `refusal()` rather than `reason`: each denial carries a

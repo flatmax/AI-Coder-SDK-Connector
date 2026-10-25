@@ -42,6 +42,7 @@ from aic_dc.agy.consultant import (
     CONTROL_TOOLS,
     IMAGE_POLICY,
     SECOND_OPINION_POLICY,
+    WEB_TOOLS,
     AgyConsultant,
     choose_consultant,
 )
@@ -59,7 +60,7 @@ CONV = "0d9d1f3a-6c1e-4a51-9b0e-3f5f0f1b2c34"
 #: describe a binary AG-R-22 is *about* rather than the one users have —
 #: and every consultation run against it would carry the renamed-tool note
 #: as though it were normal.
-ADVERTISED = ("finish", "generate_image", "view_file", "read_url_content")
+ADVERTISED = ("finish", "generate_image", "view_file", "grep_search")
 
 
 def _fake_agy(
@@ -808,11 +809,11 @@ class TestARefusalIsNotAFailure:
 
     def test_a_refused_tool_is_named_as_soon_as_it_is_refused(self, gated):
         build, _repo, _cfg = gated
-        consultant = build(denied="read_url_content")
+        consultant = build(denied="grep_search")
         recorder = Recorder(consultant.make_translator("r1", "consultation-1"))
         asyncio.run(consultant.second_opinion("what is on kernel.org?", "", recorder))
 
-        assert recorder.translator.ungrounded_tools == ("read_url_content",)
+        assert recorder.translator.ungrounded_tools == ("grep_search",)
         names = [e.name for e in recorder.events]
         notices = [
             e for e in recorder.events
@@ -820,7 +821,7 @@ class TestARefusalIsNotAFailure:
             and e.payload.get("subtype") == "consultation_ungrounded"
         ]
         assert len(notices) == 1, "the reader was told nothing"
-        assert notices[0].payload["data"]["tool"] == "read_url_content"
+        assert notices[0].payload["data"]["tool"] == "grep_search"
         # The nonce, on the wire, in a string nothing in this file wrote.
         # The fake asked the installed hook for this reason rather than
         # quoting a constant, so the tag below was minted inside `_run`,
@@ -843,7 +844,7 @@ class TestARefusalIsNotAFailure:
     def test_the_card_carries_the_reason_the_gate_gave(self, gated):
         """Not merely that it failed. The gate wrote a sentence; show it."""
         build, _repo, _cfg = gated
-        consultant = build(denied="read_url_content")
+        consultant = build(denied="grep_search")
         recorder = Recorder(consultant.make_translator("r1", "consultation-1"))
         asyncio.run(consultant.second_opinion("what is on kernel.org?", "", recorder))
 
@@ -867,7 +868,7 @@ class TestARefusalIsNotAFailure:
         """
         build, _repo, _cfg = gated
         consultant = build(
-            denied="read_url_content",
+            denied="grep_search",
             denied_error=(
                 "invalid arguments:\n- missing properties 'Url', "
                 "'toolSummary', 'toolAction'\n- additional properties "
@@ -877,7 +878,7 @@ class TestARefusalIsNotAFailure:
         recorder = Recorder(consultant.make_translator("r1", "consultation-1"))
         asyncio.run(consultant.second_opinion("well?", "", recorder))
 
-        assert recorder.translator.unverified_tools == ("read_url_content",)
+        assert recorder.translator.unverified_tools == ("grep_search",)
         assert recorder.translator.ungrounded_tools == ()
         assert [
             e for e in recorder.events
@@ -936,7 +937,7 @@ class TestARefusalIsNotAFailure:
     def test_the_refusal_does_not_cost_the_answer(self, gated):
         """A denied tool is the design working, not the consultation dying."""
         build, _repo, _cfg = gated
-        consultant = build(denied="read_url_content", answer="I would not merge this.")
+        consultant = build(denied="grep_search", answer="I would not merge this.")
         assert asyncio.run(consultant.second_opinion("well?")) == (
             "I would not merge this."
         )
@@ -964,7 +965,7 @@ class TestAnEmptyAnswerStillReportsWhatHappened:
         build, _repo, _cfg = gated
         consultant = build(
             answer="",
-            denied="read_url_content",
+            denied="grep_search",
             denied_error=(
                 "invalid arguments:\n- additional properties 'url' not allowed"
             ),
@@ -972,7 +973,7 @@ class TestAnEmptyAnswerStillReportsWhatHappened:
         with pytest.raises(ConsultationError) as raised:
             asyncio.run(consultant.second_opinion("well?"))
         said = str(raised.value)
-        assert "read_url_content" in said, (
+        assert "grep_search" in said, (
             "the tab knew which call it was; the caller was told nothing"
         )
         assert "cannot account for" in said
@@ -1007,10 +1008,10 @@ class TestAnEmptyAnswerStillReportsWhatHappened:
     def test_two_unverified_calls_are_both_named(self):
         class Twice:
             breached_tools = ()
-            unverified_tools = ("view_file", "read_url_content")
+            unverified_tools = ("view_file", "grep_search")
 
         said = consultant_mod._empty_answer_reason(Twice())
-        assert "view_file and read_url_content" in said
+        assert "view_file and grep_search" in said
 
 
 class TestARenamedControlToolIsNamedRatherThanTimedOut:
@@ -1099,19 +1100,19 @@ class TestARenamedControlToolIsNamedRatherThanTimedOut:
     def test_being_advertised_is_not_being_permitted(self, gated):
         """The half of this that must not have moved.
 
-        The binary advertises ``read_url_content``; the policy does not
+        The binary advertises ``grep_search``; the policy does not
         permit it. Detection reads the inventory — it must not widen
         anything on the strength of what it read, or AG-R-22's cure is
         worse than the disease.
         """
         build, _repo, _cfg = gated
-        consultant = build(denied="read_url_content", advertises=ADVERTISED)
+        consultant = build(denied="grep_search", advertises=ADVERTISED)
         recorder = Recorder(consultant.make_translator("r1", agent_id="a1"))
         answer = asyncio.run(
             consultant.second_opinion("well?", observer=recorder)
         )
         assert answer == "It depends."
-        assert recorder.translator.ungrounded_tools == ("read_url_content",), (
+        assert recorder.translator.ungrounded_tools == ("grep_search",), (
             "an advertised tool the policy does not permit is still refused"
         )
 
@@ -1154,26 +1155,53 @@ class TestARenamedControlToolIsNamedRatherThanTimedOut:
         assert "does not advertise finish" in said
 
 
-class TestTheNoToolsInvariantIsCheckedRatherThanAssumed:
+class TestTheWebOnlyInvariantIsCheckedRatherThanAssumed:
     """A future edit must not be able to make the header false in silence.
 
     The answer goes back under a sentence in this app's own voice saying
-    nothing was read or fetched, which is true of the second-opinion
-    policy only because its one entry, `finish`, retrieves nothing.
-    Adding a read tool "just for consultations" would leave that sentence
-    asserting something false with every test still green: a permitted
-    call raises no refusal and no breach, because there is nothing to
-    notice.
+    nothing came from the repository, which is true of the second-opinion
+    policy only because its entries are `finish` and the two web lookups,
+    and the page read is held to public URLs (AG-36). Adding a read tool
+    "just for consultations", or dropping that condition, would leave the
+    sentence asserting something false with every test still green: a
+    permitted call raises no refusal and no breach, because there is
+    nothing to notice.
     """
+
+    def test_the_web_lookups_are_permitted(self):
+        assert WEB_TOOLS <= SECOND_OPINION_POLICY.allowed
+
+    def test_a_page_read_without_a_url_condition_will_not_launch(self):
+        policy = StaticPolicy.of({*WEB_TOOLS, *CONTROL_TOOLS}, "because")
+        with pytest.raises(ConsultationError, match="no URL condition"):
+            consultant_mod._web_only_or_fail(policy)
+
+    def test_the_page_read_is_held_to_public_urls(self):
+        for url in ("https://www.analog.com/media/ad9144.pdf",):
+            assert SECOND_OPINION_POLICY.admits("read_url_content", {"Url": url})
+        for url in (
+            "file:///etc/passwd",
+            "http://localhost:8765/",
+            "http://127.0.0.1/",
+            "http://192.168.1.10/",
+            "http://[::1]/",
+            "http://router/",
+        ):
+            assert not SECOND_OPINION_POLICY.admits(
+                "read_url_content", {"Url": url}
+            ), url
+        assert not SECOND_OPINION_POLICY.admits("read_url_content", {})
+        assert SECOND_OPINION_POLICY.admits("search_web", {"query": "AD9144"})
+        assert not SECOND_OPINION_POLICY.admits("view_file", {"AbsolutePath": "/"})
 
     def test_a_policy_that_permits_a_read_tool_will_not_launch(self):
         policy = StaticPolicy.of({"view_file", *CONTROL_TOOLS}, "because")
         with pytest.raises(ConsultationError, match="policy permits view_file"):
-            consultant_mod._no_tools_or_fail(policy)
+            consultant_mod._web_only_or_fail(policy)
 
     def test_the_real_policy_passes_and_is_handed_back_unchanged(self):
         assert (
-            consultant_mod._no_tools_or_fail(SECOND_OPINION_POLICY)
+            consultant_mod._web_only_or_fail(SECOND_OPINION_POLICY)
             is SECOND_OPINION_POLICY
         )
 
@@ -1186,7 +1214,7 @@ class TestTheNoToolsInvariantIsCheckedRatherThanAssumed:
         """
         import inspect
 
-        source = inspect.getsource(consultant_mod._no_tools_or_fail)
+        source = inspect.getsource(consultant_mod._web_only_or_fail)
         assert "raise ConsultationError" in source
         assert "assert " not in source
 
@@ -1194,14 +1222,14 @@ class TestTheNoToolsInvariantIsCheckedRatherThanAssumed:
         """The guard is on the launch path, not merely available to it."""
         build, _repo, _cfg = gated
         seen: list = []
-        original = consultant_mod._no_tools_or_fail
-        consultant_mod._no_tools_or_fail = lambda policy: (
+        original = consultant_mod._web_only_or_fail
+        consultant_mod._web_only_or_fail = lambda policy: (
             seen.append(policy) or original(policy)
         )
         try:
             asyncio.run(build(answer="It depends.").second_opinion("well?"))
         finally:
-            consultant_mod._no_tools_or_fail = original
+            consultant_mod._web_only_or_fail = original
         assert seen == [SECOND_OPINION_POLICY]
 
 

@@ -123,6 +123,7 @@ from aic_dc.antigravity.consultant import (
     verify_image_write,
 )
 from aic_dc.antigravity.credentials import Credentials, agy_credentials
+from aic_dc.antigravity.web import public_url_call
 
 logger = logging.getLogger(__name__)
 
@@ -233,15 +234,31 @@ DEFAULT_MODEL = "gemini-3.8-flash-high"
 #: costs the consultation.
 CONTROL_TOOLS = frozenset({"finish"})
 
+#: What a second opinion may look things up with
+#: ([AG-36](../../../specs5/plan-ag/decisions.md#ag-36)): a web search, and
+#: a read of a public page. Both retrieve from outside this machine, which
+#: is the line the policy draws — the repository and the local network
+#: stay out of reach, and ``read_url_content`` is held to it by
+#: :func:`~aic_dc.antigravity.web.public_url_call`, since a URL is the one
+#: argument that can point a web read back at this computer.
+#:
+#: Optional, unlike :data:`CONTROL_TOOLS`: a binary that does not offer
+#: them still runs a consultation, it just cannot look anything up. See
+#: :func:`_missing_from_binary`.
+WEB_TOOLS = frozenset({"search_web", "read_url_content"})
+
 #: What the model is told when it reaches for a tool a consultation does
 #: not have. Prose rather than a code, because it is read by a model
 #: deciding what to do next, and the thing we want it to do next is
 #: *answer*.
-_NO_TOOLS_REASON = (
+_WEB_ONLY_REASON = (
     "This is a one-shot consultation inside another agent's session, not "
-    "a session of your own. You have no tools here and no repository "
-    "access. Answer from the question and the context you were given, in "
-    "prose, and do not look for another way to read or change files."
+    "a session of your own. You may search the web and read public web "
+    "pages, and nothing else: you have no repository access and cannot "
+    "read local files, local or private-network addresses, or run "
+    "commands. Answer from the question, the context you were given and "
+    "what you can look up, in prose, and do not look for another way to "
+    "read or change files."
 )
 
 _IMAGE_ONLY_REASON = (
@@ -259,39 +276,51 @@ _IMAGE_ONLY_REASON = (
 #: :func:`~aic_dc.agy.steps.locate_generated_image` — so this module's
 #: tests can redirect the directory without reaching into another one.
 
-#: A second opinion: prose in, prose out, nothing else permitted.
-SECOND_OPINION_POLICY = StaticPolicy.of(CONTROL_TOOLS, _NO_TOOLS_REASON)
+#: A second opinion: prose in, prose out, and web lookups along the way.
+SECOND_OPINION_POLICY = StaticPolicy.of(
+    {*WEB_TOOLS, *CONTROL_TOOLS},
+    _WEB_ONLY_REASON,
+    conditions={"read_url_content": public_url_call},
+)
 
 #: An image: one tool, which is the capability the call exists for.
 IMAGE_POLICY = StaticPolicy.of({"generate_image", *CONTROL_TOOLS}, _IMAGE_ONLY_REASON)
 
 
-def _no_tools_or_fail(policy: StaticPolicy) -> StaticPolicy:
-    """Refuse to launch a second opinion under a policy that permits a tool.
+def _web_only_or_fail(policy: StaticPolicy) -> StaticPolicy:
+    """Refuse to launch a second opinion under a policy that reaches this machine.
 
     The header the asking model receives says, in this app's voice, that
-    the consultation ran with no tools and no repository access — and
-    that sentence is true of :data:`SECOND_OPINION_POLICY` only because
-    its one entry, ``finish``, retrieves nothing. Nothing in the type
-    system says so. A future edit adding a read tool "just for
-    consultations" would leave the header asserting something false, in
-    the app's own voice, with every test still green: there is no
-    refusal to notice and no breach to raise, because the call would be
-    *permitted*.
+    the consultation could look things up on the web and had no
+    repository access — and that sentence is true of
+    :data:`SECOND_OPINION_POLICY` only because its entries are
+    :data:`CONTROL_TOOLS`, which retrieve nothing, and :data:`WEB_TOOLS`,
+    whose page read is held to public URLs. Nothing in the type system
+    says so. A future edit adding a read tool "just for consultations",
+    or dropping the URL condition, would leave the header asserting
+    something false with every test still green: there is no refusal to
+    notice and no breach to raise, because the call would be *permitted*.
 
     A raise rather than an ``assert``, which is not pedantry: ``assert``
     is stripped from the bytecode under ``python -O``, so an invariant
     written that way is absent from exactly the builds that run
     unattended.
     """
-    extra = set(policy.allowed) - set(CONTROL_TOOLS)
+    extra = set(policy.allowed) - set(CONTROL_TOOLS) - set(WEB_TOOLS)
     if extra:
         raise ConsultationError(
             "A second opinion cannot be launched: its policy permits "
             + ", ".join(sorted(extra))
             + ". The answer is handed back under a header saying nothing "
-            "was read or fetched, and that sentence is only true while "
-            "the allowlist holds no tool that can retrieve anything."
+            "was read from this machine, and that sentence is only true "
+            "while the allowlist holds nothing beyond web lookups."
+        )
+    conditioned = {name for name, _ in policy.conditions}
+    if "read_url_content" in policy.allowed and "read_url_content" not in conditioned:
+        raise ConsultationError(
+            "A second opinion cannot be launched: its policy permits "
+            "read_url_content with no URL condition, so a file:// or "
+            "localhost URL would read this machine."
         )
     return policy
 
@@ -325,7 +354,10 @@ def _missing_from_binary(
     names = frozenset(advertised)
     if not names:
         return ()
-    return tuple(sorted(frozenset(policy.allowed) - names))
+    # The web tools are a capability rather than a need: a binary without
+    # them still ends its turn, and calling them missing would attach the
+    # "no way to end its turn" sentence to a consultation that had one.
+    return tuple(sorted(frozenset(policy.allowed) - WEB_TOOLS - names))
 
 
 def _renamed_tool_note(names: Iterable[str]) -> str:
@@ -383,9 +415,9 @@ def _empty_answer_reason(translator: Any) -> str:
     if escaped:
         return (
             f"{opening} It is not only that: {_listed(escaped)} ran despite "
-            f"the policy that permits no tools, so this consultation had a "
-            f"containment failure as well as an empty answer. Tell the "
-            f"user.{note}"
+            f"the policy that permits nothing beyond web lookups, so this "
+            f"consultation had a containment failure as well as an empty "
+            f"answer. Tell the user.{note}"
         )
     if unknown:
         return (
@@ -727,10 +759,11 @@ class AgyConsultant:
     ) -> str:
         """Ask Antigravity one question and return its answer as text.
 
-        No tools and no repository access — ``context`` is how the caller
-        supplies what it already read. Two independent agents disagreeing
-        about a diff is information; one agent given a second chance to
-        browse the repository is not.
+        Web lookups and no repository access (AG-36) — ``context`` is how
+        the caller supplies what it already read. Two independent agents
+        disagreeing about a diff is information; one agent given a second
+        chance to browse the repository is not. A datasheet or a changelog
+        is another matter, and that is what the web tools are for.
 
         ``consultation_id`` is what :meth:`cancel` will be given for this
         call, and omitting it means "nothing will ask for this one by
@@ -750,7 +783,7 @@ class AgyConsultant:
         with roots.ephemeral(self._config_dir) as config_root:
             translator, _ = await self._run(
                 prompt,
-                policy=_no_tools_or_fail(SECOND_OPINION_POLICY),
+                policy=_web_only_or_fail(SECOND_OPINION_POLICY),
                 observer=observer,
                 model=model,
                 timeout=self._resolve_timeout(model),
@@ -1033,7 +1066,7 @@ class AgyConsultant:
         # here. Two reasons, and either would be enough: a consultation is
         # offered no MCP server, so it has no schema to read; and a read
         # granted around the static policy would falsify the header the
-        # asking model is handed — see `_no_tools_or_fail`.
+        # asking model is handed — see `_web_only_or_fail`.
         gate = AgyGateServer(
             self._socket_path(), policy=policy, config_dir=self._config_dir
         )

@@ -3703,3 +3703,48 @@ The gate went red on nine names. Recorded in full in
 - **`compaction_config`, `inline_skills`, `tool_output_truncation_config`, `mcp_max_output_bytes`**:
   pending, each with what it would buy in `surface.py`. `inline_skills` is the notable one: it is the
   bridge `skills_paths` lacked, since a `.claude/skills/*/SKILL.md` translates into its fields.
+
+## AG-36 — A second opinion may look things up on the web **(user, 2026-10-25)**
+
+A consultation asked about the AD9144, HMC7044 and AD4080 reached for `search_web` three times and
+was refused each time, so it answered datasheet questions — lane rates, SYNC retiming, conversion
+latency — from its weights. The user's call: **second opinions should be able to look things up.**
+
+**What is allowed.** `search_web` and `read_url_content`, beside `finish`, on both transports:
+`agy.consultant.WEB_TOOLS` in `SECOND_OPINION_POLICY`, and `SEARCH_WEB` / `READ_URL_CONTENT` in the
+SDK consultant's `builtin_tools`. Nothing else moves: no repository read, no command, no write.
+
+**The line is this machine, not "tools".** A web search runs on Google's side, but a page read runs
+in the local harness, and its URL is the one argument that can point it back here — `file://`,
+`localhost`, the loopback, private and link-local ranges, and dotless intranet names. So the page read
+is allowed only when [`antigravity.web.public_url`](../../src/aic_dc/antigravity/web.py) holds for its
+URL: on `agy` through a new `StaticPolicy.conditions` field checked by `StaticPolicy.admits`, on the
+SDK through `policy.allow(..., when=public_url_call)`. The URL key is matched case-insensitively,
+because the SDK spells it `url` and `agy` spells it `Url` (measured in P24 arm C's schema error).
+
+**The invariant guard moved with it.** `_no_tools_or_fail` became `_web_only_or_fail`: it still
+refuses to launch a policy permitting anything beyond `CONTROL_TOOLS`, now plus `WEB_TOOLS`, and also
+refuses a policy that permits `read_url_content` with no URL condition. `_missing_from_binary`
+ignores the web tools, which are a capability rather than a need — a binary without them still ends
+its turn.
+
+**What the asking model is told changed from "nothing was looked up" to "nothing came from the
+repository".** `_grounding`'s posture now says the consultant may search the web and read public pages
+but cannot read a file on this machine or run a command, and asks the reader to check anything it
+attributes to a web source against that source. A lookup is not a verification. The tab's posture
+notice and the two `agy` pump notices say the same.
+
+**Accepted costs, stated rather than discovered later:**
+
+- **Outbound data.** Whatever the asking agent put in `context` can now leave in a search query or a
+  URL. Before this, it reached Google only as the prompt itself.
+- **DNS rebinding is not caught.** The URL test is syntactic: resolving the host in the gate would
+  block on DNS and would not bind the fetch, which resolves again. A public name pointing at a private
+  address gets through.
+- **A conditionally refused page read is not counted as ungrounded.** The pump's barred-tool
+  accounting is by name, and `read_url_content` is now permitted by name, so a refused `file://` read
+  shows as an errored card carrying the gate's reason rather than raising
+  `consultation_ungrounded`.
+- The `agy` pump tests keep their captured `read_url_content` refusals by running under a no-tools
+  policy of their own (`BARRING_POLICY` in `tests/test_agy_steps.py`); what they defend is how a
+  barred call is read, which does not depend on which names are barred.

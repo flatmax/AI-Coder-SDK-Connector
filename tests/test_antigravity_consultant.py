@@ -424,16 +424,17 @@ class TestTheStreamIsDrainedBeforeTeardown:
 
 class TestSecondOpinionIsContained:
     @pytest.mark.asyncio
-    async def test_no_tools_beyond_finish(self, consultant, fake_agent):
+    async def test_no_tools_beyond_finish_and_the_web(self, consultant, fake_agent):
         """A second opinion has no business reading the tree.
 
         Two independent agents disagreeing about a diff is information;
         one agent given a second chance to browse the repository is not.
+        The web lookups are the exception AG-36 made.
         """
         await consultant.second_opinion("Is this diff safe?")
         config = fake_agent.configs[0]
         enabled = [t.name for t in config.capabilities.enabled_tools]
-        assert enabled == ["FINISH"]
+        assert enabled == ["FINISH", "SEARCH_WEB", "READ_URL_CONTENT"]
 
     @pytest.mark.asyncio
     async def test_the_allowlist_is_set_even_with_no_write_tools(
@@ -453,7 +454,15 @@ class TestSecondOpinionIsContained:
         assert {(p.tool, p.decision.name) for p in policies} == {
             ("*", "DENY"),
             ("finish", "APPROVE"),
+            ("search_web", "APPROVE"),
+            ("read_url_content", "APPROVE"),
         }
+        # The page read is the one allow with a condition on it, and the
+        # condition is what keeps `file://` and `localhost` out.
+        (page,) = [p for p in policies if p.tool == "read_url_content"]
+        assert page.when({"url": "https://www.analog.com/"}) is True
+        assert page.when({"url": "file:///etc/passwd"}) is False
+        assert all(p.when is None for p in policies if p is not page)
 
     def test_the_sdk_default_really_is_approve_all(self):
         """Pins the finding the test above defends against.

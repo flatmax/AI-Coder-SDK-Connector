@@ -297,11 +297,12 @@ def _grounding(observer: Any) -> str:
     if escaped:
         return (
             f"Before the answer, from AIC⚡DC and not from the consultant: "
-            f"a second opinion is launched with no tools and no repository "
-            f"access, and for this one that did not hold — {_named(escaped)} "
-            f"ran. So the usual assurance is withdrawn: "
+            f"a second opinion is launched with no repository access and no "
+            f"tools beyond web lookups, and for this one that did not hold — "
+            f"{_named(escaped)} ran. So the usual assurance is withdrawn: "
             f"the answer below may contain material that was actually read "
-            f"or fetched, by a process that was not supposed to be able to. "
+            f"from this machine, by a process that was not supposed to be "
+            f"able to. "
             f"Treat it as unverified either way, and tell the user.\n\n"
         )
     # Two forms of the same posture, and which one is used is the whole
@@ -315,18 +316,25 @@ def _grounding(observer: Any) -> str:
     # paragraph whose entire job is to be the part that can be trusted. A
     # reader resolves a contradiction by picking a side, and the side
     # with the flatter grammar wins.
+    # AG-36 widened the posture to web lookups, so "nothing was looked
+    # up" is no longer the claim. What still holds is that nothing came
+    # from this machine — and a web lookup is not a verification, so the
+    # asking model is told to check what the consultant attributes to one.
     certain = (
         "Before the answer, from AIC⚡DC and not from the consultant: a "
-        "second opinion runs with no tools and no repository access, so "
-        "nothing below was read, fetched or looked up. Treat any file "
-        "contents, page contents, search results or live values in it as "
-        "the consultant's own rather than a source's."
+        "second opinion runs with no repository access — it may search the "
+        "web and read public pages, but cannot read a file on this machine "
+        "or run a command, so nothing below came from the repository. "
+        "Treat any file contents or local values in it as the consultant's "
+        "own, and check anything it attributes to a web source against "
+        "that source before relying on it."
     )
     qualified = (
         "Before the answer, from AIC⚡DC and not from the consultant: a "
-        "second opinion is launched with no tools and no repository "
-        "access — it is given no way to read a file, fetch a page or run "
-        "a command, and that is how this one was started."
+        "second opinion is launched with no repository access — it may "
+        "search the web and read public pages, but is given no way to read "
+        "a file on this machine or run a command, and that is how this one "
+        "was started."
     )
     if not reached and not unknown:
         return f"{certain}\n\n"
@@ -718,13 +726,13 @@ class ConsultantBridge:
                 "data": {
                     "agent_id": agent_id,
                     "message": (
-                        "A second opinion runs with no tools and no "
-                        "repository access: it answers from the question "
-                        "and the context it was given, and cannot read a "
-                        "file, fetch a page or run a command. Anything "
-                        "below about file contents, page contents, search "
-                        "results or live values is this model's own rather "
-                        "than a source's."
+                        "A second opinion may search the web and read "
+                        "public pages, and nothing else: it has no "
+                        "repository access and cannot read a file, reach a "
+                        "local address or run a command. Anything below "
+                        "about file contents is this model's own rather "
+                        "than a source's; each web lookup it makes is shown "
+                        "on its own card."
                     ),
                 },
             },
@@ -1381,8 +1389,9 @@ class ConsultantBridge:
             "plainly. It keeps no memory between calls, so carry the exchange "
             "forward in `context`, attributing earlier answers to an earlier "
             "reviewer rather than to it — a model shown its own words defends "
-            "them. It has no repository access either, so pass the code it "
-            "needs. Costs a call on a separate Google account.",
+            "them. It can search the web and read public pages, but has no "
+            "repository access, so pass the code it needs. Costs a call on "
+            "a separate Google account.",
             {
                 "type": "object",
                 "properties": {
