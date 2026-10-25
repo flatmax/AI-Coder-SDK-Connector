@@ -1574,3 +1574,73 @@ class TestTimeoutResolution:
 
         consultant = AgyConsultant(tmp_path, config=_Angry())
         assert consultant._resolve_timeout("gemini-4-argon-high") == 1200.0
+
+
+class TestFrameTiming:
+    """Whether a slow consultation was still sending, or had gone silent.
+
+    An Argon-high consultation ran to its 1200s bound on 2026-10-25 and
+    nothing recorded whether frames kept arriving, so "still thinking" and
+    a hung backend (antigravity-cli #594) read the same. The timeout now
+    says which.
+    """
+
+    class _Time:
+        def __init__(self):
+            self.now = 0.0
+
+        def __call__(self):
+            return self.now
+
+    def test_no_frame_at_all_says_so(self):
+        t = self._Time()
+        clock = consultant_mod._FrameClock(t)
+        t.now = 1200.0
+        assert clock.summary() == (
+            "No frame arrived in 1200s after the prompt was sent."
+        )
+
+    def test_it_reports_first_last_and_longest_silence(self):
+        t = self._Time()
+        clock = consultant_mod._FrameClock(t)
+        t.now = 45.0
+        clock.note({"event": "step"})
+        t.now = 50.0
+        clock.note({"event": "step"})
+        t.now = 400.0
+        clock.note({"event": "usage"})
+        t.now = 450.0
+        said = clock.summary()
+        assert "3 frames (step ×2, usage ×1)" in said
+        assert "the first after 45s" in said
+        assert "the last 50s ago" in said
+        assert "the longest silence 350s" in said
+
+    def test_a_silence_still_running_counts_as_the_longest(self):
+        """A backend that went quiet and stayed quiet is the hang case, so
+        the open gap at the end must count, not only the closed ones."""
+        t = self._Time()
+        clock = consultant_mod._FrameClock(t)
+        t.now = 10.0
+        clock.note({"event": "step"})
+        t.now = 1200.0
+        assert "the longest silence 1190s" in clock.summary()
+
+    def test_a_long_silence_is_logged_when_it_ends(self, caplog):
+        t = self._Time()
+        clock = consultant_mod._FrameClock(t)
+        t.now = consultant_mod.SILENCE_LOG_SECONDS + 5
+        with caplog.at_level("INFO", logger="aic_dc.agy.consultant"):
+            clock.note({"event": "step"})
+        assert "silent for 65s, then sent 'step'" in caplog.text
+
+    def test_the_timeout_message_carries_the_timing(self, gated):
+        build, _repo, _cfg = gated
+        consultant = build(
+            hold_until=str(_cfg / "never-appears"), timeout_seconds=2.0
+        )
+        with pytest.raises(ConsultationError) as raised:
+            asyncio.run(consultant.second_opinion("hold, then answer"))
+        said = str(raised.value)
+        assert "did not answer within 2s" in said
+        assert re.search(r"\d+ frames? \(.*\); the first after|No frame arrived", said), said

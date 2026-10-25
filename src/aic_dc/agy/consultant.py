@@ -407,6 +407,70 @@ def _listed(names: Iterable[str]) -> str:
     return f"{', '.join(items[:-1])} and {items[-1]}"
 
 
+#: A silence at least this long is logged when the frame that ends it
+#: arrives, so a long consultation leaves a record of where it went quiet.
+SILENCE_LOG_SECONDS = 60.0
+
+
+class _FrameClock:
+    """When a consultation's frames arrived, from the prompt onward.
+
+    Exists to answer one question a timeout could not: was the model still
+    sending something, or had it gone silent? On 2026-10-25 an Argon-high
+    consultation ran to its 1200s bound showing only "Antigravity is
+    working", and nothing recorded whether frames kept arriving — so a
+    model still thinking and a hung backend (antigravity-cli #594) read the
+    same. The answer decides whether an inactivity watchdog can replace the
+    wall clock for slow models, which is why this measures before anything
+    is built on it.
+    """
+
+    def __init__(self, clock: Any = None) -> None:
+        self._now = clock or asyncio.get_running_loop().time
+        self._started = self._now()
+        self._last = self._started
+        self._first: float | None = None
+        self._longest = 0.0
+        self.count = 0
+        self.events: dict[str, int] = {}
+
+    def note(self, frame: dict[str, Any]) -> None:
+        now = self._now()
+        gap = now - self._last
+        event = str(frame.get("event") or "?") if isinstance(frame, dict) else "?"
+        if gap >= SILENCE_LOG_SECONDS:
+            logger.info(
+                "agy consultation: silent for %.0fs, then sent %r (frame %d)",
+                gap,
+                event,
+                self.count + 1,
+            )
+        self._longest = max(self._longest, gap)
+        if self._first is None:
+            self._first = now - self._started
+        self._last = now
+        self.count += 1
+        self.events[event] = self.events.get(event, 0) + 1
+
+    def summary(self) -> str:
+        """One sentence, for the log and for the timeout message."""
+        now = self._now()
+        if self._first is None:
+            return (
+                f"No frame arrived in {now - self._started:.0f}s after the "
+                "prompt was sent."
+            )
+        kinds = ", ".join(
+            f"{name} ×{n}" for name, n in sorted(self.events.items())
+        )
+        return (
+            f"{self.count} frame{'' if self.count == 1 else 's'} ({kinds}); "
+            f"the first after "
+            f"{self._first:.0f}s, the last {now - self._last:.0f}s ago, and "
+            f"the longest silence {max(self._longest, now - self._last):.0f}s."
+        )
+
+
 @dataclasses.dataclass
 class _Flight:
     """One consultation in flight, and what stopping it needs.
@@ -1008,6 +1072,7 @@ class AgyConsultant:
         flight = _Flight(session=session)
         self._live[key] = flight
         stream: Any = None
+        clock: _FrameClock | None = None
         try:
             async with asyncio.timeout(timeout):
                 await session.start()
@@ -1035,7 +1100,9 @@ class AgyConsultant:
                     )
                     translator.note_unadvertised(missing)
                 stream = session.stream_frames(prompt)
+                clock = _FrameClock()
                 async for frame in stream:
+                    clock.note(frame)
                     frames.append(frame)
                     # The only pass over the stream. `response_text()`
                     # reads back what this accumulated, so skipping it for
@@ -1053,6 +1120,9 @@ class AgyConsultant:
                 f"Antigravity did not answer within {timeout:.0f}s. The "
                 "consultation was abandoned and its process stopped."
                 + (_renamed_tool_note(missing) if missing else "")
+                # What the stream did while the clock ran, so "still
+                # thinking" and "went silent" stop reading the same.
+                + (f" {clock.summary()}" if clock is not None else "")
             ) from exc
         except AgyNotInstalledError as exc:
             raise ConsultationError(str(exc)) from exc
@@ -1075,6 +1145,8 @@ class AgyConsultant:
             # session that is already closing — and cannot report
             # `stopping` for a consultation that is over.
             self._live.pop(key, None)
+            if clock is not None:
+                logger.info("agy consultation ended: %s", clock.summary())
             if stream is not None:
                 # A timeout abandons the loop mid-frame, and an async
                 # generator left suspended runs its `finally` whenever the
