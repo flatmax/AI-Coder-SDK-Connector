@@ -233,7 +233,7 @@ class TestToolCards:
         events = t.translate(frame(TOOL_DONE))
         assert names(events) == ["toolResult"]
         assert events[0].payload["tool_use_id"] == "agy-tool-2"
-        assert events[0].payload["status"] == "success"
+        assert events[0].payload["status"] == "ok"
         assert events[0].payload["duration_ms"] == 65
 
     def test_a_call_seen_only_once_still_opens_and_closes(self):
@@ -249,7 +249,7 @@ class TestToolCards:
         assert result["preview"] == ""
         assert result["truncated"] is False
         assert result["full_bytes"] == 0
-        assert result["status"] == "success"
+        assert result["status"] == "ok"
 
     def test_an_output_is_carried_when_there_is_one(self):
         t = AgyTranslator("r1")
@@ -1701,7 +1701,7 @@ class TestAGeneratedImageIsCollected:
 
         result = self._result(translator.translate(image_step()))
 
-        assert result.payload["status"] == "success"
+        assert result.payload["status"] == "ok"
         assert result.payload["files_modified"] == []
 
     def test_the_consultants_translator_collects_nothing_here(

@@ -828,6 +828,13 @@ class AgyTranslator:
         # does a card show" would show a user different amounts on
         # different engines for the same reason.
         preview, truncated = truncate_tool_result(content)
+        # `"ok"`, not `"success"`, for the same reason and with the same
+        # symptom one level up: `toolStatus` knows `ok`, `error` and
+        # `interrupted`, and reads anything else as still running. This
+        # sent `"success"` and every finished call on this transport kept
+        # its blue running dot, its elapsed clock still counting, beside
+        # the duration footer that said it had finished.
+        #
         # The refusal notice lands *after* the card that provoked it and
         # before whatever the model writes next, which is the order a
         # reader needs: the call, why it was refused, and then the prose
@@ -838,7 +845,7 @@ class AgyTranslator:
                 {
                     "tool_use_id": call_id,
                     "name": name,
-                    "status": "error" if failed else "success",
+                    "status": "error" if failed else "ok",
                     "preview": preview,
                     "truncated": truncated,
                     "full_bytes": len(content.encode("utf-8")),

@@ -279,10 +279,12 @@ class TestBothPumpsFeedOneObserver:
     Phase 8 made both translators emit ``toolResult``; it did not make
     them emit the same one. ``StepTranslator`` says
     ``{status: "ok", preview: …}`` and ``AgyTranslator`` says
-    ``{status: "success", content: …}``. A reader that knew one spelling
-    would silently mark every successful call on the other transport as an
-    error, and store an empty result body for it — visible only as tool
-    cards that render red with no output.
+    ``{status: "success", content: …}`` — it now says ``"ok"`` too, and
+    the mirror still accepts the old spelling for payloads recorded
+    before. A reader that knew one spelling would silently mark every
+    successful call on the other transport as an error, and store an
+    empty result body for it — visible only as tool cards that render red
+    with no output.
 
     Driven from the **real** translators rather than from hand-written
     payloads, so a pump that changes its field names fails here.
