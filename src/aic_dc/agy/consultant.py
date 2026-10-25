@@ -151,6 +151,49 @@ DEFAULT_TIMEOUT_SECONDS = 180.0
 #: than a figure with evidence behind it.
 DEFAULT_IMAGE_TIMEOUT_SECONDS = 300.0
 
+#: How long a consultation may take on a model that thinks for minutes.
+#:
+#: :data:`DEFAULT_TIMEOUT_SECONDS` was sized for the pinned Flash model,
+#: and became wrong the day the model became a Settings control: the
+#: timeout stayed a constant while the model moved, so choosing Gemini 4
+#: Argon killed every large consultation at three minutes and called it
+#: "did not answer". Argon on high effort is reported to reason silently
+#: for 8–11 minutes on a large prompt and to take 15–20 to finish, and
+#: Google's own guidance is an HTTP timeout of at least 15–20 minutes.
+#: Those figures came from a user's research on 2026-10-25 and have not
+#: been measured on this transport yet — the first real Argon run should
+#: correct this number, as it was meant to correct the image one.
+#:
+#: The cost is the one :data:`DEFAULT_TIMEOUT_SECONDS` names: the asking
+#: Claude turn is blocked for the whole call. Choosing Argon is choosing
+#: that wait, so the bound follows the choice rather than refusing it.
+#: Claude Code's own MCP tool-call bound does not interfere — it defaults
+#: to ~28h (``MCP_TOOL_TIMEOUT``, 2.1.299), and an in-process ``sdk``
+#: server has no idle timeout.
+SLOW_MODEL_TIMEOUT_SECONDS = 1200.0
+
+#: Substrings of a model id that mean :data:`SLOW_MODEL_TIMEOUT_SECONDS`.
+#:
+#: Matched on the name rather than listed exactly, because effort is baked
+#: into the name on this surface and every Argon tier should get the
+#: longer bound. ``-high`` alone is deliberately *not* a marker: the
+#: pinned default is ``gemini-3.8-flash-high``, and 180s is what that
+#: model was measured against.
+SLOW_MODEL_MARKERS = ("argon",)
+
+
+def timeout_for_model(model: str | None) -> float:
+    """The default bound for a consultation on ``model``.
+
+    ``None`` — the account holder's own choice — gets the ordinary bound,
+    because this module cannot see which model that is. A user who
+    inherits an Argon selection sets ``engines.consultant_timeout_seconds``.
+    """
+    name = (model or "").lower()
+    if any(marker in name for marker in SLOW_MODEL_MARKERS):
+        return SLOW_MODEL_TIMEOUT_SECONDS
+    return DEFAULT_TIMEOUT_SECONDS
+
 #: The model a consultation runs on, pinned.
 #:
 #: **This was `None` until 2026-09-09**, meaning "whatever the account
@@ -418,6 +461,11 @@ class AgyConsultant:
         and GPT-OSS entries, so the inherited decision could quietly make
         a *second* opinion a first one (AG-R-15). ``None`` still means
         "agy's own default" for a caller that wants it back.
+    timeout_seconds:
+        ``None`` by default, meaning "follow the model": resolved per
+        consultation by :meth:`_resolve_timeout`, because the model is.
+        A number pins it, ahead of ``app.json``, which is what tests and
+        direct callers want.
     """
 
     def __init__(
@@ -428,7 +476,7 @@ class AgyConsultant:
         model: str | None = DEFAULT_MODEL,
         config: Any = None,
         executable: str = "agy",
-        timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
+        timeout_seconds: float | None = None,
         image_timeout_seconds: float = DEFAULT_IMAGE_TIMEOUT_SECONDS,
     ) -> None:
         self._repo_root = Path(repo_root).resolve()
@@ -486,6 +534,31 @@ class AgyConsultant:
                 "Could not read engines.consultant_model; using %s", self._model
             )
             return self._model
+
+    def _resolve_timeout(self, model: str | None) -> float:
+        """The bound for a consultation about to run on ``model``.
+
+        A construction-time number first, then
+        ``engines.consultant_timeout_seconds``, then the model's own
+        default from :func:`timeout_for_model`. Read per consultation for
+        the reason :meth:`_resolve_model` is: a bound captured at
+        construction is the constant that went stale when the model became
+        a Settings control.
+        """
+        if self._timeout is not None:
+            return float(self._timeout)
+        if self._config is not None:
+            try:
+                chosen = getattr(self._config, "consultant_timeout_seconds", None)
+            except Exception:  # noqa: BLE001 - a bad config must not lose the answer
+                logger.warning(
+                    "Could not read engines.consultant_timeout_seconds; "
+                    "using the model's default"
+                )
+                chosen = None
+            if chosen is not None:
+                return float(chosen)
+        return timeout_for_model(model)
 
     # ------------------------------------------------------------------
     # What the bridge asks before it offers the tools
@@ -609,12 +682,14 @@ class AgyConsultant:
         # second turn, so it has no use for a root that outlives it — and
         # a fresh one means two consultations cannot collide over the one
         # file that decides what their agent may do.
+        model = self._resolve_model()
         with roots.ephemeral(self._config_dir) as config_root:
             translator, _ = await self._run(
                 prompt,
                 policy=_no_tools_or_fail(SECOND_OPINION_POLICY),
                 observer=observer,
-                timeout=self._timeout,
+                model=model,
+                timeout=self._resolve_timeout(model),
                 config_root=config_root,
                 consultation_id=consultation_id,
             )
@@ -675,12 +750,17 @@ class AgyConsultant:
         # picture away before copying it. Kept when anything here raises,
         # because those errors name a directory inside it and a reader who
         # goes to look should find something there.
+        # Never shorter than a text consultation on the same model: the
+        # image loop runs on that model too, so a slow model is slow here.
+        model = self._resolve_model()
+        image_timeout = max(self._image_timeout, self._resolve_timeout(model))
         with roots.ephemeral(self._config_dir, keep_on_error=True) as config_root:
             translator, frames = await self._run(
                 " ".join(instruction),
                 policy=IMAGE_POLICY,
                 observer=observer,
-                timeout=self._image_timeout,
+                model=model,
+                timeout=image_timeout,
                 config_root=config_root,
                 consultation_id=consultation_id,
             )
@@ -827,6 +907,7 @@ class AgyConsultant:
         *,
         policy: StaticPolicy,
         observer: Any,
+        model: str | None,
         timeout: float,
         config_root: Path,
         consultation_id: str | None = None,
@@ -911,7 +992,9 @@ class AgyConsultant:
         session = AgySession(
             self._repo_root,
             gate=gate,
-            model=self._resolve_model(),
+            # Resolved by the caller, once, so the bound and the model it
+            # was chosen for cannot disagree after a mid-call config save.
+            model=model,
             executable=self._executable,
             config_root=config_root,
         )

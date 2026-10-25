@@ -1206,6 +1206,31 @@ had.
   silently downgrading — which is the right direction, and is the reason this is a note rather than
   a fallback.
 
+**The timeout did not follow the model, until 2026-10-25.** Making the model a control left the
+bound a constant: `DEFAULT_TIMEOUT_SECONDS = 180.0` was sized for the Flash pin, so choosing Gemini 4
+Argon in Settings killed every large consultation at three minutes and reported it as *"did not
+answer"*. Argon on high effort is reported to think silently for 8–11 minutes on a large prompt and
+take 15–20 minutes to finish, and Google's own guidance is an HTTP timeout of at least 15–20 minutes.
+Those figures come from the user's research, **not from a measurement on this transport**. The bound
+is now resolved per consultation, next to the model: a constructor number, then
+`engines.consultant_timeout_seconds` in `app.json`, then `timeout_for_model()`, which gives
+`SLOW_MODEL_TIMEOUT_SECONDS = 1200` to any id containing `argon` and 180s otherwise. `-high` alone is
+deliberately not a marker, because the pin is `gemini-3.8-flash-high`. An image consultation gets at
+least the text bound for its model. The Claude side does not cut it short: the bundled CLI (2.1.299)
+defaults `MCP_TOOL_TIMEOUT` to 1e8 ms, and gives an in-process `sdk` server no idle timeout.
+
+What this does **not** do:
+
+- **Measure Argon.** 1200s is from someone else's figures. The first real Argon consultation should
+  confirm or correct it, as the first real image run was meant to correct the image bound.
+- **Know an inherited model.** `"auto"` passes no `--model`, so this code cannot tell that the
+  account's own choice is Argon, and it gets 180s. The `app.json` key is the way out of that.
+- **Offer a Settings control.** The key is only in `app.json`, editable in the Settings editor; there
+  is no picker for it beside the model's.
+- **Unblock the turn.** A 20-minute consultation still holds the asking Claude turn for 20 minutes.
+  Running long consultations in the background was considered and left for later as the bigger
+  change.
+
 ---
 
 <a id="ag-r-16"></a>

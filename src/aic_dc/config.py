@@ -985,6 +985,38 @@ class ConfigManager:
         return chosen
 
     @property
+    def consultant_timeout_seconds(self) -> float | None:
+        """How long a ``second_opinion`` on ``agy`` may take, if pinned.
+
+        ``None`` — the default — means "follow the model":
+        :func:`aic_dc.agy.consultant.timeout_for_model` gives 180s for the
+        pinned Flash model and 20 minutes for an Argon one. A number here
+        overrides both, for a model the markers do not recognise or for an
+        account whose inherited (``"auto"``) choice is a slow model.
+
+        A value that is not a positive number falls back to ``None`` with a
+        warning, for the reason :meth:`consultant_model` does.
+        """
+        section = self.app_config.get("engines", {})
+        if not isinstance(section, dict):
+            section = {}
+        chosen = section.get("consultant_timeout_seconds")
+        if chosen is None:
+            return None
+        if (
+            isinstance(chosen, bool)
+            or not isinstance(chosen, (int, float))
+            or not chosen > 0
+        ):
+            logger.warning(
+                "app.json engines.consultant_timeout_seconds is %r, which is "
+                "not a positive number of seconds. Using the model's default.",
+                chosen,
+            )
+            return None
+        return float(chosen)
+
+    @property
     def agy_model(self) -> str | None:
         """Which model the ``agy`` *engine* runs as master.
 

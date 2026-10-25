@@ -1495,3 +1495,82 @@ class TestModelResolution:
 
         consultant = AgyConsultant(tmp_path, config=_Angry())
         assert consultant._resolve_model() == consultant_mod.DEFAULT_MODEL
+
+
+class TestTimeoutResolution:
+    """The bound follows the model, because the model is a Settings control.
+
+    It used to be a constant: choosing Gemini 4 Argon, which can think for
+    15–20 minutes on a large prompt, killed every such consultation at 180s.
+    """
+
+    class _Config:
+        def __init__(self, model, timeout=None):
+            self.consultant_model = model
+            self.consultant_timeout_seconds = timeout
+
+    def test_the_pinned_model_keeps_its_measured_bound(self, tmp_path):
+        consultant = AgyConsultant(tmp_path)
+        assert consultant._resolve_timeout(consultant_mod.DEFAULT_MODEL) == (
+            consultant_mod.DEFAULT_TIMEOUT_SECONDS
+        )
+
+    @pytest.mark.parametrize(
+        "model", ["gemini-4-argon-high", "Gemini-4-Argon-medium", "gemini-4-argon"]
+    )
+    def test_an_argon_model_gets_the_long_bound(self, tmp_path, model):
+        assert AgyConsultant(tmp_path)._resolve_timeout(model) == (
+            consultant_mod.SLOW_MODEL_TIMEOUT_SECONDS
+        )
+
+    def test_high_effort_alone_is_not_slow(self):
+        """The pin is itself `-high`, and 180s was measured against it."""
+        assert consultant_mod.DEFAULT_MODEL.endswith("-high")
+        assert consultant_mod.timeout_for_model(consultant_mod.DEFAULT_MODEL) == (
+            consultant_mod.DEFAULT_TIMEOUT_SECONDS
+        )
+
+    def test_the_inherited_model_gets_the_ordinary_bound(self, tmp_path):
+        assert AgyConsultant(tmp_path)._resolve_timeout(None) == (
+            consultant_mod.DEFAULT_TIMEOUT_SECONDS
+        )
+
+    def test_config_overrides_the_model_default(self, tmp_path):
+        consultant = AgyConsultant(
+            tmp_path, config=self._Config("gemini-4-argon-high", 600.0)
+        )
+        assert consultant._resolve_timeout("gemini-4-argon-high") == 600.0
+
+    def test_it_is_re_read_rather_than_captured(self, tmp_path):
+        config = self._Config("gemini-3.8-flash-high")
+        consultant = AgyConsultant(tmp_path, config=config)
+        assert consultant._resolve_timeout(config.consultant_model) == 180.0
+        config.consultant_model = "gemini-4-argon-high"
+        assert consultant._resolve_timeout(consultant._resolve_model()) == 1200.0
+
+    def test_a_constructed_bound_wins(self, tmp_path):
+        """Tests and direct callers pass a number and mean it."""
+        consultant = AgyConsultant(
+            tmp_path,
+            config=self._Config("gemini-4-argon-high", 600.0),
+            timeout_seconds=2.0,
+        )
+        assert consultant._resolve_timeout("gemini-4-argon-high") == 2.0
+
+    def test_a_config_without_the_key_falls_back_to_the_model(self, tmp_path):
+        class _Old:
+            consultant_model = "gemini-4-argon-high"
+
+        consultant = AgyConsultant(tmp_path, config=_Old())
+        assert consultant._resolve_timeout("gemini-4-argon-high") == 1200.0
+
+    def test_a_broken_config_falls_back_rather_than_losing_the_answer(self, tmp_path):
+        class _Angry:
+            consultant_model = "gemini-4-argon-high"
+
+            @property
+            def consultant_timeout_seconds(self):
+                raise RuntimeError("no config today")
+
+        consultant = AgyConsultant(tmp_path, config=_Angry())
+        assert consultant._resolve_timeout("gemini-4-argon-high") == 1200.0
