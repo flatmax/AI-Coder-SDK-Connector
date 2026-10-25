@@ -395,6 +395,10 @@ export function applySubagentEvent(turn, payload) {
     // places that would otherwise fetch a transcript by `agent_id`.
     has_transcript: true,
     subagent_type: null,
+    // What the subagent was asked, verbatim. Only a consultation sends it
+    // (`_announce` in src/aic_dc/antigravity/bridge.py); the tab draws it as
+    // the card its feed answers.
+    prompt: null,
     status: null,
     last_tool_name: null,
     usage: null,
@@ -415,6 +419,7 @@ export function applySubagentEvent(turn, payload) {
     patched.has_transcript = payload.has_transcript;
   }
   if (payload.subagent_type) patched.subagent_type = payload.subagent_type;
+  if (payload.prompt && !patched.prompt) patched.prompt = payload.prompt;
   if (payload.status) patched.status = payload.status;
   if (payload.last_tool_name) patched.last_tool_name = payload.last_tool_name;
   if (payload.usage) patched.usage = payload.usage;

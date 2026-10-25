@@ -440,21 +440,50 @@ function seedDescription(tab) {
   const line = `🤖 ${describe(tab.subagent)}`;
   const first = tab.messages[0];
   if (first && first.subagent_seed) {
-    if (first.content === line) return;
+    if (first.content !== line) {
+      tab.messages = [
+        { ...first, content: line },
+        ...tab.messages.slice(1),
+      ];
+    }
+  } else {
     tab.messages = [
-      { ...first, content: line },
-      ...tab.messages.slice(1),
+      {
+        role: 'user',
+        content: line,
+        system_event: true,
+        subagent_seed: true,
+      },
+      ...tab.messages,
     ];
-    return;
   }
+  seedPrompt(tab);
+}
+
+/**
+ * The question itself, as a prompt card under the opening line.
+ *
+ * The opening line names the task ("Antigravity — Second opinion") and says
+ * nothing of what was asked, so a consultation's tab read as a column of
+ * heartbeats with no question to hang them on. A prompt card, not a system
+ * line, because it is what the feed below is answering — but labelled for
+ * who asked, since it was the agent and not the user.
+ *
+ * Only rows that carry a `prompt` get one, and only once: the row latches
+ * its first prompt in `applySubagentEvent`.
+ */
+function seedPrompt(tab) {
+  const prompt = tab.subagent?.prompt;
+  if (!prompt || tab.messages.some((m) => m.subagent_prompt)) return;
   tab.messages = [
+    tab.messages[0],
     {
       role: 'user',
-      content: line,
-      system_event: true,
-      subagent_seed: true,
+      content: prompt,
+      role_label: 'Asked by the agent',
+      subagent_prompt: true,
     },
-    ...tab.messages,
+    ...tab.messages.slice(1),
   ];
 }
 

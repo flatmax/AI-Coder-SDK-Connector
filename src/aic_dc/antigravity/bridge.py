@@ -961,7 +961,9 @@ class ConsultantBridge:
             )
 
     @contextlib.asynccontextmanager
-    async def _tab(self, label: str, *, anchor: str | None = None) -> Any:
+    async def _tab(
+        self, label: str, *, anchor: str | None = None, prompt: str = ""
+    ) -> Any:
         """Open a tab for one consultation, and settle it however it ends.
 
         A context manager because the *settling* is the part that must not
@@ -1044,7 +1046,12 @@ class ConsultantBridge:
             yield observer
             return
 
-        await self._announce(scope, label, task_id=task_id)
+        # The question rides the opening row only: the tab draws it once,
+        # as the card its notices and answer follow, and the terminal row
+        # has nothing to add to it.
+        await self._announce(
+            scope, label, task_id=task_id, **({"prompt": prompt} if prompt else {})
+        )
         await self._push_posture(scope)
         status = "failed"
         heartbeat = asyncio.ensure_future(self._heartbeat(scope, progress))
@@ -1255,7 +1262,9 @@ class ConsultantBridge:
             # The catch is *outside* the tab, so a failure propagates
             # through it and settles the row as failed rather than as a
             # green "completed". See `_tab`.
-            async with self._tab("Second opinion", anchor=anchor) as observer:
+            async with self._tab(
+                "Second opinion", anchor=anchor, prompt=question
+            ) as observer:
                 answer = await self._consultant.second_opinion(
                     question,
                     context,
@@ -1319,7 +1328,9 @@ class ConsultantBridge:
         anchor = self._claim("generate_image", prompt, output_name, aspect_ratio)
         try:
             # Outside the tab, for the same reason as second_opinion.
-            async with self._tab("Generate image", anchor=anchor) as observer:
+            async with self._tab(
+                "Generate image", anchor=anchor, prompt=prompt
+            ) as observer:
                 result = await self._consultant.generate_image(
                     prompt,
                     output_name=output_name,

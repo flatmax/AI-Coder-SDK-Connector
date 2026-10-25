@@ -795,6 +795,16 @@ class TestTheConsultationGetsATab:
         assert rows[0].payload["subagent_type"] == "Antigravity"
 
     @pytest.mark.asyncio
+    async def test_the_opening_row_carries_the_question(self):
+        """The tab draws it as the card its notices follow; without it the
+        tab is a column of heartbeats with nothing to say what for."""
+        bridge, seen = self.bridge_with_emit()
+        await bridge.second_opinion("Is the cache keyed right?")
+        rows = self.events(seen, "subagentEvent")
+        assert rows[0].payload["prompt"] == "Is the cache keyed right?"
+        assert "prompt" not in rows[-1].payload
+
+    @pytest.mark.asyncio
     async def test_the_event_is_turn_scoped_to_the_live_request(self):
         """``onSubagentEvent`` drops anything whose owner tab is not live."""
         bridge, seen = self.bridge_with_emit(request_id="req-42")
