@@ -3149,7 +3149,15 @@ export const STYLES = css`
    * final one would be read as one. */
   .turn-live-usage {
     margin-top: 0.4rem;
-    opacity: 0.7;
+  }
+  /* Dim the chips, not the row: the live run timer leads
+   * the row and keeps its accent so the moving clock reads
+   * as active. */
+  .turn-live-usage > :not(.run-timer) {
+    opacity: 0.6;
+  }
+  .turn-live-usage .run-timer {
+    margin-left: 0;
   }
   .turn-live-label {
     text-transform: uppercase;

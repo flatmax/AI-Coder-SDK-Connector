@@ -61,7 +61,7 @@
 // import cycle. They're pure and tested via the
 // component's own tests.
 
-import { html } from 'lit';
+import { html, nothing } from 'lit';
 import { unsafeHTML } from 'lit/directives/unsafe-html.js';
 
 import {
@@ -1271,7 +1271,9 @@ export function renderAssistantBody(panel, content, editResults, isStreaming) {
  * The blinking cursor sits after the body so it is visible whatever the last
  * block is, and the live token counter sits after the cursor: it is the
  * streaming card's footer, and the same chips land in the same place when the
- * settled card's real footer replaces them.
+ * settled card's real footer replaces them. The live run timer leads that
+ * footer rather than sitting beside the role label, so a long turn's clock is
+ * in view without scrolling back to the card's top.
  */
 export function renderStreamingMessage(panel) {
   // Live run timer — elapsed since the prompt was sent.
@@ -1287,11 +1289,7 @@ export function renderStreamingMessage(panel) {
   const turn = panel._turnBlocks;
   return html`
     <div class="message-card role-assistant streaming">
-      <div class="role-label">
-        Assistant${elapsedMs != null
-          ? renderRunTimer(elapsedMs, true)
-          : ''}
-      </div>
+      <div class="role-label">Assistant</div>
       ${isEmptyTurn(turn)
         ? html`<div class="turn-waiting">Working…</div>`
         : renderTurnBlocks(panel, turn.blocks, {
@@ -1299,7 +1297,10 @@ export function renderStreamingMessage(panel) {
             settled: false,
           })}
       <span class="cursor"></span>
-      ${renderLiveUsage(turn?.usage)}
+      ${renderLiveUsage(
+        turn?.usage,
+        elapsedMs != null ? renderRunTimer(elapsedMs, true) : nothing,
+      )}
     </div>
   `;
 }

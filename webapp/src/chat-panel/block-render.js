@@ -405,13 +405,22 @@ export function usageTitle(line) {
  * No cost. Pricing a turn means differencing the session's running total
  * against itself, which only the result message carries; anything else here
  * would be a guess wearing a dollar sign.
+ *
+ * `timer` is the live run-timer badge, drawn first in the row. It lives here
+ * rather than beside the role label so it stays in view at the bottom of a
+ * long turn, and it shows before any usage has arrived — the row renders for
+ * either.
  */
-export function renderLiveUsage(usage) {
+export function renderLiveUsage(usage, timer = nothing) {
   const lines = modelUsageLines(usage);
-  if (lines.length === 0) return nothing;
+  const hasTimer = timer !== nothing && timer !== '';
+  if (lines.length === 0 && !hasTimer) return nothing;
   return html`
     <div class="turn-stats turn-live-usage">
-      <span class="turn-stat turn-live-label">so far</span>
+      ${timer}
+      ${lines.length > 0
+        ? html`<span class="turn-stat turn-live-label">so far</span>`
+        : nothing}
       ${lines.map((line) => renderUsageChip(line))}
     </div>
   `;

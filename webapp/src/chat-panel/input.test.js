@@ -392,8 +392,28 @@ describe('ChatPanel edit block rendering', () => {
     const cursor = streaming.querySelector('.cursor');
     expect(cursor).toBeTruthy();
     // After the body, whatever the last block turned out to be — the blink is
-    // the "still going" signal and has to be where the eye already is.
-    expect(streaming.lastElementChild).toBe(cursor);
+    // the "still going" signal and has to be where the eye already is. Only
+    // the footer (live timer, then usage) comes after it.
+    expect(cursor.nextElementSibling.classList.contains('turn-live-usage'))
+      .toBe(true);
+    expect(streaming.lastElementChild.classList.contains('turn-live-usage'))
+      .toBe(true);
+  });
+
+  it('streaming card shows the live run timer in its footer, not its header', async () => {
+    const started = vi.fn().mockResolvedValue({ status: 'started' });
+    publishFakeRpc({ 'ClaudeCodeService.chat_streaming': started });
+    const p = mountPanel();
+    await settle(p);
+    p._input = 'hi';
+    await p._send();
+    await settle(p);
+    const streaming = p.shadowRoot.querySelector('.message-card.streaming');
+    expect(streaming.querySelector('.role-label .run-timer')).toBeNull();
+    // Before any usage has arrived: the timer alone, no "so far" label.
+    expect(streaming.querySelector('.turn-live-usage .run-timer-live'))
+      .toBeTruthy();
+    expect(streaming.querySelector('.turn-live-label')).toBeNull();
   });
 
   it('marker bytes in a streamed block stay text', async () => {

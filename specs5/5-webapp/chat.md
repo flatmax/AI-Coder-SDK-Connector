@@ -303,7 +303,10 @@ turn", and the split is what says whether that size was expensive.
 ### Live Token Counter
 
 The footer's chips have a running twin: while a turn is streaming, the same chips render under the
-streaming card, prefixed `SO FAR` and dimmed.
+streaming card, prefixed `SO FAR` and dimmed. The live ⏱ run timer leads the same row, undimmed, and
+shows from the moment the turn starts — before any usage has arrived. It sits at the bottom rather than
+beside the role label so a long turn's clock stays in view without scrolling to the card's top. The
+settled card's frozen ⏱ badge stays beside the role label.
 
 - The source is `turnUsage`, pushed by the engine as each assistant message reports what it used
   ([`../3-engine/session.md`](../3-engine/session.md#message-taxonomy--ui)). Same `turn_model_usage`
