@@ -1749,3 +1749,36 @@ class TestTheWatchdog:
         said = str(raised.value)
         assert said.startswith("The consultation failed: Separator is found")
         assert "3 frames" in said
+
+
+class TestAFailedConsultationKeepsItsRoot:
+    """A text consultation's root is kept when it fails, as an image's is.
+
+    AG-R-36's root was removed with the run that overflowed, so nothing
+    was left to read. The next startup's sweep still takes it out.
+    """
+
+    @staticmethod
+    def _roots(cfg):
+        return list((cfg / "agy-roots" / "consultations").iterdir())
+
+    def test_an_answer_removes_its_root(self, gated):
+        build, _repo, cfg = gated
+        assert "It depends." in asyncio.run(build().second_opinion("go"))
+        assert self._roots(cfg) == []
+
+    def test_a_timeout_keeps_its_root(self, gated):
+        build, _repo, cfg = gated
+        consultant = build(
+            hold_until=str(cfg / "never-appears"), timeout_seconds=1.0
+        )
+        with pytest.raises(ConsultationError) as raised:
+            asyncio.run(consultant.second_opinion("hold, then answer"))
+        (kept,) = self._roots(cfg)
+        assert f"Its working files are kept at {kept}" in str(raised.value)
+
+    def test_an_empty_answer_keeps_its_root(self, gated):
+        build, _repo, cfg = gated
+        with pytest.raises(ConsultationError):
+            asyncio.run(build(answer="").second_opinion("go"))
+        assert len(self._roots(cfg)) == 1

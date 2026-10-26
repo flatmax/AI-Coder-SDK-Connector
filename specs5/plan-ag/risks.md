@@ -3302,7 +3302,8 @@ What this does **not** do:
 
 - **Keep a failed consultation's record.** `roots.ephemeral` deletes a text consultation's root on
   error (images pass `keep_on_error=True`), so `agy`'s copy of a failed reply is gone. The tab is the
-  only copy left, and it is lost on reload. Open, small; see the README table.
+  only copy left, and it is lost on reload. **Closed 2026-10-26, later the same day:** the text path
+  now keeps its root on failure and names it in the message; see the README table.
 - **Handle a reply too large for Claude Code.** That limit is a different one, and the CLI already
   handles it: the 52,772-character reply was saved to a file and the model was told how to read it.
   Nothing is lost, so nothing is built for it here.

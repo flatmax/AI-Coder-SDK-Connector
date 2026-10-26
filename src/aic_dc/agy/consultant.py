@@ -798,21 +798,30 @@ class AgyConsultant:
         # (AG-21). A consultation has no history, no resumption and no
         # second turn, so it has no use for a root that outlives it — and
         # a fresh one means two consultations cannot collide over the one
-        # file that decides what their agent may do.
+        # file that decides what their agent may do. Kept when it fails, as
+        # the image root is: AG-R-36's root went with the nineteen minutes
+        # that ended in an overflow, and an empty answer is checked inside
+        # the block so it counts as a failure here too.
         model = self._resolve_model()
-        with roots.ephemeral(self._config_dir) as config_root:
-            translator, _ = await self._run(
-                prompt,
-                policy=_web_only_or_fail(SECOND_OPINION_POLICY),
-                observer=observer,
-                model=model,
-                timeout=self._resolve_timeout(model),
-                config_root=config_root,
-                consultation_id=consultation_id,
-            )
-        answer = translator.response_text().strip()
-        if not answer:
-            raise ConsultationError(_empty_answer_reason(translator))
+        with roots.ephemeral(self._config_dir, keep_on_error=True) as config_root:
+            try:
+                translator, _ = await self._run(
+                    prompt,
+                    policy=_web_only_or_fail(SECOND_OPINION_POLICY),
+                    observer=observer,
+                    model=model,
+                    timeout=self._resolve_timeout(model),
+                    config_root=config_root,
+                    consultation_id=consultation_id,
+                )
+                answer = translator.response_text().strip()
+                if not answer:
+                    raise ConsultationError(_empty_answer_reason(translator))
+            except ConsultationError as exc:
+                raise ConsultationError(
+                    f"{exc} Its working files are kept at {config_root} "
+                    "until the next start."
+                ) from exc
         return answer
 
     async def generate_image(
