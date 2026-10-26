@@ -70,6 +70,10 @@ const REASON_LABELS = {
   refusal: 'refused',
   engine_error: 'engine error',
   session_lost: 'session lost',
+  // A consultation's statuses, which its answer card reports in this
+  // vocabulary (`subagent-tabs.js` § `consultationOutcome`).
+  failed: 'failed',
+  status_unknown: 'status unknown',
 };
 
 /**
