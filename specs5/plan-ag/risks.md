@@ -1231,6 +1231,21 @@ What this does **not** do:
   Running long consultations in the background was considered and left for later as the bigger
   change.
 
+**The bound became a silence bound, 2026-10-26.** The plan was to measure an Argon run's frames first,
+because a short "no frames for 5 min" bound would kill a model that thinks without sending anything.
+[AG-R-36](#ag-r-36)'s consultation showed the cost of waiting: it was still streaming its answer at
+19 min 3 s, 57 s inside the wall clock. The way round the measurement was to **keep each model's
+figure and change what it measures**. `rearm()` in `AgyConsultant._run` pushes the deadline forward
+on every frame, so 1200 s is now 1200 s *of silence*, which can never stop a consultation the wall
+clock would have let finish. `CONSULTATION_CEILING_SECONDS = 3600` bounds the whole, against a
+backend that keeps sending and never ends (antigravity-cli #594), and is raised to the silence bound
+when a configured one is longer. The message names the bound that fired, every failure carries the
+frame summary, and the bridge heartbeat reports "last activity Ns ago".
+
+What this still does **not** do: **tighten the silence bound.** That needs the measurement this
+replaced as a blocker: a real Argon-high run's frame summary, now in every message and in the log on
+success.
+
 ---
 
 <a id="ag-r-16"></a>

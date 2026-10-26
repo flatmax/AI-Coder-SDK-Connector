@@ -1149,6 +1149,8 @@ class TestTheConsultationGetsATab:
         assert beats, "no heartbeat at all"
         assert not any("queued behind paid traffic" in m for m in beats)
         assert any("Antigravity is working" in m for m in beats)
+        # The consultant stops on silence, so the beat says how quiet it is.
+        assert any(re.search(r"last activity \d+s ago\.$", m) for m in beats), beats
 
 
 class TestTheRowNestsInsideItsToolCard:

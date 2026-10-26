@@ -986,9 +986,11 @@ class ConfigManager:
 
     @property
     def consultant_timeout_seconds(self) -> float | None:
-        """How long a ``second_opinion`` on ``agy`` may take, if pinned.
+        """How long a ``second_opinion`` on ``agy`` may go silent, if pinned.
 
-        ``None`` — the default — means "follow the model":
+        A silence bound, not a total: every frame restarts it, and
+        :data:`aic_dc.agy.consultant.CONSULTATION_CEILING_SECONDS` bounds
+        the whole. ``None`` — the default — means "follow the model":
         :func:`aic_dc.agy.consultant.timeout_for_model` gives 180s for the
         pinned Flash model and 20 minutes for an Argon one. A number here
         overrides both, for a model the markers do not recognise or for an

@@ -821,6 +821,11 @@ class ConsultantBridge:
         def observe(step: Any) -> None:
             if progress is not None:
                 progress["steps"] += 1
+                # For the heartbeat's "last activity": the consultant now
+                # stops on silence rather than on a wall clock, so how long
+                # it has been quiet is the figure that says whether it is
+                # near being stopped.
+                progress["last_at"] = asyncio.get_running_loop().time()
             # **Translate first, and unconditionally.** On this transport
             # the answer exists *because* a frame was absorbed here:
             # ``AgyConsultant._run`` calls ``observer(frame)`` instead of
@@ -1130,8 +1135,14 @@ class ConsultantBridge:
             if self._emit is None or request_id is None:
                 return
             started = bool(progress and progress.get("steps"))
+            last_at = progress.get("last_at") if progress else None
+            quiet = (
+                f", last activity {asyncio.get_running_loop().time() - last_at:.0f}s ago"
+                if last_at is not None
+                else ""
+            )
             message = (
-                f"Antigravity is working — {waited:.0f}s so far."
+                f"Antigravity is working — {waited:.0f}s so far{quiet}."
                 if started
                 else (
                     f"Waiting for Google to start — {waited:.0f}s so far, and "

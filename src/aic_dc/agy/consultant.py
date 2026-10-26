@@ -182,9 +182,29 @@ SLOW_MODEL_TIMEOUT_SECONDS = 1200.0
 #: model was measured against.
 SLOW_MODEL_MARKERS = ("argon",)
 
+#: The most one consultation may run, however steadily it is sending.
+#:
+#: The bounds above are **silence** bounds, not wall clocks, since
+#: 2026-10-26: every frame restarts the clock, so a consultation is only
+#: stopped once ``agy`` has sent nothing for that long. A fixed deadline
+#: killed replies that were visibly streaming — an Argon-high consultation
+#: that day was still sending its answer at 19 minutes, 57 s inside a
+#: 1200 s bound. Keeping each model's old figure as its silence bound makes
+#: this never stricter than before, whether or not ``agy`` emits anything
+#: while a model thinks, which has not been measured.
+#:
+#: This ceiling is what a watchdog alone would lose: a backend that keeps
+#: sending without ever finishing — the silent-retry quota burn reported
+#: in antigravity-cli #594 — would otherwise hold the asking turn forever.
+#: Raised to the silence bound when a configured one exceeds it.
+CONSULTATION_CEILING_SECONDS = 3600.0
+
 
 def timeout_for_model(model: str | None) -> float:
-    """The default bound for a consultation on ``model``.
+    """The default silence bound for a consultation on ``model``.
+
+    How long ``agy`` may send nothing before the consultation is stopped;
+    see :data:`CONSULTATION_CEILING_SECONDS` for the bound on the whole.
 
     ``None`` — the account holder's own choice — gets the ordinary bound,
     because this module cannot see which model that is. A user who
@@ -1106,8 +1126,17 @@ class AgyConsultant:
         self._live[key] = flight
         stream: Any = None
         clock: _FrameClock | None = None
+        loop = asyncio.get_running_loop()
+        ceiling = max(CONSULTATION_CEILING_SECONDS, timeout)
+        hard_deadline = loop.time() + ceiling
+        watchdog: asyncio.Timeout | None = None
+
+        def rearm() -> None:
+            # The silence bound from now, never past the ceiling.
+            watchdog.reschedule(min(loop.time() + timeout, hard_deadline))
+
         try:
-            async with asyncio.timeout(timeout):
+            async with asyncio.timeout(timeout) as watchdog:
                 await session.start()
                 # **The handshake is the only free look at the vendor's
                 # vocabulary** (AG-R-22). `init` has arrived and no prompt
@@ -1134,7 +1163,11 @@ class AgyConsultant:
                     translator.note_unadvertised(missing)
                 stream = session.stream_frames(prompt)
                 clock = _FrameClock()
+                # From the prompt, not from the spawn: `init` has its own
+                # bound, and a slow start should not eat the model's.
+                rearm()
                 async for frame in stream:
+                    rearm()
                     clock.note(frame)
                     frames.append(frame)
                     # The only pass over the stream. `response_text()`
@@ -1149,9 +1182,25 @@ class AgyConsultant:
             # from a slow model. Read off the translator rather than
             # recomputed, so the tab and the answer cannot disagree.
             missing = tuple(getattr(translator, "unadvertised_tools", ()) or ())
+            # Which bound fired, because they mean different things: a
+            # silence is a model that stopped sending, the ceiling is one
+            # that never stopped.
+            when = watchdog.when() if watchdog is not None else None
+            if when is not None and when >= hard_deadline:
+                what = (
+                    f"Antigravity was still working after {ceiling:.0f}s, "
+                    "the most one consultation may run."
+                )
+            elif clock is not None and clock.count:
+                what = (
+                    f"Antigravity went quiet: nothing arrived for "
+                    f"{timeout:.0f}s after its last frame."
+                )
+            else:
+                what = f"Antigravity did not answer within {timeout:.0f}s."
             raise ConsultationError(
-                f"Antigravity did not answer within {timeout:.0f}s. The "
-                "consultation was abandoned and its process stopped."
+                f"{what} The consultation was abandoned and its process "
+                "stopped."
                 + (_renamed_tool_note(missing) if missing else "")
                 # What the stream did while the clock ran, so "still
                 # thinking" and "went silent" stop reading the same.
@@ -1172,6 +1221,10 @@ class AgyConsultant:
                 ) from exc
             raise ConsultationError(
                 f"The consultation failed: {' '.join(str(exc).split())[:400]}"
+                # How far it got, for every failure and not only a timeout:
+                # AG-R-36's overflow came after nineteen minutes of frames,
+                # and the message said nothing of them.
+                + (f" {clock.summary()}" if clock is not None else "")
             ) from exc
         finally:
             # Dropped before the teardown, so ⏹ cannot aim a close at a

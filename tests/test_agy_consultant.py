@@ -73,6 +73,7 @@ def _fake_agy(
     log: str = "",
     hold_until: str = "",
     advertises: tuple[str, ...] | None = ADVERTISED,
+    drip: tuple[int, float] = (0, 0.0),
 ) -> str:
     """A fake ``agy``: init, prose, optionally an image tool call, result.
 
@@ -113,6 +114,11 @@ def _fake_agy(
     nothing about its vocabulary, while ``()`` emits an empty list. Both
     must leave the consultant claiming nothing about what is missing, and
     they are separable here so that a test can prove it of each.
+
+    **``drip`` is a model that keeps sending**: ``(count, interval)`` emits
+    that many text frames, ``interval`` seconds apart, before the result. A
+    test sets it to run longer than the silence bound without ever being
+    silent for that long, which is the case the watchdog exists for.
     """
     tool = ""
     if hold_until:
@@ -248,6 +254,12 @@ def _fake_agy(
             emit({{"event": "step_update", "step_update": {{
                 "step_index": 1, "state": "DONE",
                 "step_type": "agent_response", "text_delta": {answer!r}}}}})
+            import time
+            for _ in range({drip_count!r}):
+                time.sleep({drip_interval!r})
+                emit({{"event": "step_update", "step_update": {{
+                    "step_index": 1, "state": "ACTIVE",
+                    "step_type": "agent_response", "text_delta": "."}}}})
         {tool}
             emit({{"event": "result", "result": {{
                 "conversation_id": conv, "status": "SUCCESS",
@@ -258,6 +270,8 @@ def _fake_agy(
         answer=answer,
         log=log,
         advertises=advertises,
+        drip_count=drip[0],
+        drip_interval=drip[1],
         tool=textwrap.indent(tool, "    ").strip("\n"),
     )
 
@@ -305,6 +319,7 @@ def gated(tmp_path, monkeypatch):
         hold_until: str = "",
         advertises: tuple[str, ...] | None = ADVERTISED,
         timeout_seconds: float | None = None,
+        drip: tuple[int, float] = (0, 0.0),
     ):
         fake = tmp_path / "fake_agy.py"
         fake.write_text(
@@ -317,6 +332,7 @@ def gated(tmp_path, monkeypatch):
                 log=log,
                 hold_until=hold_until,
                 advertises=advertises,
+                drip=drip,
             ),
             "utf-8",
         )
@@ -1050,7 +1066,11 @@ class TestARenamedControlToolIsNamedRatherThanTimedOut:
         with pytest.raises(ConsultationError) as raised:
             asyncio.run(consultant.second_opinion("hold, then answer"))
         said = str(raised.value)
-        assert "did not answer within 2s" in said, "still says what happened"
+        # The fake sends its prose and then holds, so this is a silence
+        # after a frame rather than no answer at all.
+        assert "nothing arrived for 2s after its last frame" in said, (
+            "still says what happened"
+        )
         assert "does not advertise finish" in said, (
             "and now says why: the tool it needed to stop with is not there"
         )
@@ -1670,5 +1690,62 @@ class TestFrameTiming:
         with pytest.raises(ConsultationError) as raised:
             asyncio.run(consultant.second_opinion("hold, then answer"))
         said = str(raised.value)
-        assert "did not answer within 2s" in said
+        assert "nothing arrived for 2s after its last frame" in said
         assert re.search(r"\d+ frames? \(.*\); the first after|No frame arrived", said), said
+
+
+class TestTheWatchdog:
+    """A consultation is stopped by silence, not by the clock on the wall.
+
+    On 2026-10-26 an Argon-high consultation was still streaming its answer
+    at 19 minutes, 57 s inside a fixed 1200 s bound. The bound now restarts
+    on every frame, with a ceiling for a backend that never stops sending.
+    """
+
+    def test_a_consultation_that_keeps_sending_outlives_its_bound(self, gated):
+        build, _repo, _cfg = gated
+        # Six frames 0.4 s apart: about 2.4 s in all, never 1 s silent.
+        consultant = build(timeout_seconds=1.0, drip=(6, 0.4))
+        answer = asyncio.run(consultant.second_opinion("go on, then"))
+        assert "It depends." in answer
+
+    def test_the_ceiling_stops_one_that_never_finishes(
+        self, gated, monkeypatch
+    ):
+        monkeypatch.setattr(consultant_mod, "CONSULTATION_CEILING_SECONDS", 1.5)
+        build, _repo, _cfg = gated
+        consultant = build(timeout_seconds=1.0, drip=(50, 0.2))
+        with pytest.raises(ConsultationError) as raised:
+            asyncio.run(consultant.second_opinion("go on forever"))
+        said = str(raised.value)
+        assert "still working after 2s" in said, said
+        assert "the most one consultation may run" in said
+
+    def test_a_ceiling_below_a_configured_bound_is_raised_to_it(
+        self, gated, monkeypatch
+    ):
+        """A user who sets a 2-hour silence bound has not asked for a
+        1-hour total, so the ceiling never undercuts the bound."""
+        monkeypatch.setattr(consultant_mod, "CONSULTATION_CEILING_SECONDS", 0.5)
+        build, _repo, _cfg = gated
+        consultant = build(timeout_seconds=3.0, drip=(3, 0.3))
+        assert "It depends." in asyncio.run(consultant.second_opinion("go"))
+
+    def test_any_failure_says_how_far_it_got(self, gated, monkeypatch):
+        """AG-R-36's overflow came after nineteen minutes of frames, and the
+        message carried none of that."""
+        build, _repo, _cfg = gated
+        consultant = build(drip=(2, 0.05))
+        real = consultant_mod._FrameClock.note
+
+        def explode(self, frame):
+            real(self, frame)
+            if self.count == 3:
+                raise ValueError("Separator is found, but chunk is longer than limit")
+
+        monkeypatch.setattr(consultant_mod._FrameClock, "note", explode)
+        with pytest.raises(ConsultationError) as raised:
+            asyncio.run(consultant.second_opinion("go"))
+        said = str(raised.value)
+        assert said.startswith("The consultation failed: Separator is found")
+        assert "3 frames" in said
