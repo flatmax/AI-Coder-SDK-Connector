@@ -42,6 +42,7 @@ from aic_dc.agy.consultant import (
     CONTROL_TOOLS,
     IMAGE_POLICY,
     SECOND_OPINION_POLICY,
+    WEB_TOOLS,
     AgyConsultant,
     choose_consultant,
 )
@@ -59,7 +60,7 @@ CONV = "0d9d1f3a-6c1e-4a51-9b0e-3f5f0f1b2c34"
 #: describe a binary AG-R-22 is *about* rather than the one users have —
 #: and every consultation run against it would carry the renamed-tool note
 #: as though it were normal.
-ADVERTISED = ("finish", "generate_image", "view_file", "read_url_content")
+ADVERTISED = ("finish", "generate_image", "view_file", "grep_search")
 
 
 def _fake_agy(
@@ -72,6 +73,7 @@ def _fake_agy(
     log: str = "",
     hold_until: str = "",
     advertises: tuple[str, ...] | None = ADVERTISED,
+    drip: tuple[int, float] = (0, 0.0),
 ) -> str:
     """A fake ``agy``: init, prose, optionally an image tool call, result.
 
@@ -112,6 +114,11 @@ def _fake_agy(
     nothing about its vocabulary, while ``()`` emits an empty list. Both
     must leave the consultant claiming nothing about what is missing, and
     they are separable here so that a test can prove it of each.
+
+    **``drip`` is a model that keeps sending**: ``(count, interval)`` emits
+    that many text frames, ``interval`` seconds apart, before the result. A
+    test sets it to run longer than the silence bound without ever being
+    silent for that long, which is the case the watchdog exists for.
     """
     tool = ""
     if hold_until:
@@ -247,6 +254,12 @@ def _fake_agy(
             emit({{"event": "step_update", "step_update": {{
                 "step_index": 1, "state": "DONE",
                 "step_type": "agent_response", "text_delta": {answer!r}}}}})
+            import time
+            for _ in range({drip_count!r}):
+                time.sleep({drip_interval!r})
+                emit({{"event": "step_update", "step_update": {{
+                    "step_index": 1, "state": "ACTIVE",
+                    "step_type": "agent_response", "text_delta": "."}}}})
         {tool}
             emit({{"event": "result", "result": {{
                 "conversation_id": conv, "status": "SUCCESS",
@@ -257,6 +270,8 @@ def _fake_agy(
         answer=answer,
         log=log,
         advertises=advertises,
+        drip_count=drip[0],
+        drip_interval=drip[1],
         tool=textwrap.indent(tool, "    ").strip("\n"),
     )
 
@@ -304,6 +319,7 @@ def gated(tmp_path, monkeypatch):
         hold_until: str = "",
         advertises: tuple[str, ...] | None = ADVERTISED,
         timeout_seconds: float | None = None,
+        drip: tuple[int, float] = (0, 0.0),
     ):
         fake = tmp_path / "fake_agy.py"
         fake.write_text(
@@ -316,6 +332,7 @@ def gated(tmp_path, monkeypatch):
                 log=log,
                 hold_until=hold_until,
                 advertises=advertises,
+                drip=drip,
             ),
             "utf-8",
         )
@@ -808,11 +825,11 @@ class TestARefusalIsNotAFailure:
 
     def test_a_refused_tool_is_named_as_soon_as_it_is_refused(self, gated):
         build, _repo, _cfg = gated
-        consultant = build(denied="read_url_content")
+        consultant = build(denied="grep_search")
         recorder = Recorder(consultant.make_translator("r1", "consultation-1"))
         asyncio.run(consultant.second_opinion("what is on kernel.org?", "", recorder))
 
-        assert recorder.translator.ungrounded_tools == ("read_url_content",)
+        assert recorder.translator.ungrounded_tools == ("grep_search",)
         names = [e.name for e in recorder.events]
         notices = [
             e for e in recorder.events
@@ -820,7 +837,7 @@ class TestARefusalIsNotAFailure:
             and e.payload.get("subtype") == "consultation_ungrounded"
         ]
         assert len(notices) == 1, "the reader was told nothing"
-        assert notices[0].payload["data"]["tool"] == "read_url_content"
+        assert notices[0].payload["data"]["tool"] == "grep_search"
         # The nonce, on the wire, in a string nothing in this file wrote.
         # The fake asked the installed hook for this reason rather than
         # quoting a constant, so the tag below was minted inside `_run`,
@@ -843,7 +860,7 @@ class TestARefusalIsNotAFailure:
     def test_the_card_carries_the_reason_the_gate_gave(self, gated):
         """Not merely that it failed. The gate wrote a sentence; show it."""
         build, _repo, _cfg = gated
-        consultant = build(denied="read_url_content")
+        consultant = build(denied="grep_search")
         recorder = Recorder(consultant.make_translator("r1", "consultation-1"))
         asyncio.run(consultant.second_opinion("what is on kernel.org?", "", recorder))
 
@@ -867,7 +884,7 @@ class TestARefusalIsNotAFailure:
         """
         build, _repo, _cfg = gated
         consultant = build(
-            denied="read_url_content",
+            denied="grep_search",
             denied_error=(
                 "invalid arguments:\n- missing properties 'Url', "
                 "'toolSummary', 'toolAction'\n- additional properties "
@@ -877,7 +894,7 @@ class TestARefusalIsNotAFailure:
         recorder = Recorder(consultant.make_translator("r1", "consultation-1"))
         asyncio.run(consultant.second_opinion("well?", "", recorder))
 
-        assert recorder.translator.unverified_tools == ("read_url_content",)
+        assert recorder.translator.unverified_tools == ("grep_search",)
         assert recorder.translator.ungrounded_tools == ()
         assert [
             e for e in recorder.events
@@ -936,7 +953,7 @@ class TestARefusalIsNotAFailure:
     def test_the_refusal_does_not_cost_the_answer(self, gated):
         """A denied tool is the design working, not the consultation dying."""
         build, _repo, _cfg = gated
-        consultant = build(denied="read_url_content", answer="I would not merge this.")
+        consultant = build(denied="grep_search", answer="I would not merge this.")
         assert asyncio.run(consultant.second_opinion("well?")) == (
             "I would not merge this."
         )
@@ -964,7 +981,7 @@ class TestAnEmptyAnswerStillReportsWhatHappened:
         build, _repo, _cfg = gated
         consultant = build(
             answer="",
-            denied="read_url_content",
+            denied="grep_search",
             denied_error=(
                 "invalid arguments:\n- additional properties 'url' not allowed"
             ),
@@ -972,7 +989,7 @@ class TestAnEmptyAnswerStillReportsWhatHappened:
         with pytest.raises(ConsultationError) as raised:
             asyncio.run(consultant.second_opinion("well?"))
         said = str(raised.value)
-        assert "read_url_content" in said, (
+        assert "grep_search" in said, (
             "the tab knew which call it was; the caller was told nothing"
         )
         assert "cannot account for" in said
@@ -1007,10 +1024,10 @@ class TestAnEmptyAnswerStillReportsWhatHappened:
     def test_two_unverified_calls_are_both_named(self):
         class Twice:
             breached_tools = ()
-            unverified_tools = ("view_file", "read_url_content")
+            unverified_tools = ("view_file", "grep_search")
 
         said = consultant_mod._empty_answer_reason(Twice())
-        assert "view_file and read_url_content" in said
+        assert "view_file and grep_search" in said
 
 
 class TestARenamedControlToolIsNamedRatherThanTimedOut:
@@ -1049,7 +1066,11 @@ class TestARenamedControlToolIsNamedRatherThanTimedOut:
         with pytest.raises(ConsultationError) as raised:
             asyncio.run(consultant.second_opinion("hold, then answer"))
         said = str(raised.value)
-        assert "did not answer within 2s" in said, "still says what happened"
+        # The fake sends its prose and then holds, so this is a silence
+        # after a frame rather than no answer at all.
+        assert "nothing arrived for 2s after its last frame" in said, (
+            "still says what happened"
+        )
         assert "does not advertise finish" in said, (
             "and now says why: the tool it needed to stop with is not there"
         )
@@ -1099,19 +1120,19 @@ class TestARenamedControlToolIsNamedRatherThanTimedOut:
     def test_being_advertised_is_not_being_permitted(self, gated):
         """The half of this that must not have moved.
 
-        The binary advertises ``read_url_content``; the policy does not
+        The binary advertises ``grep_search``; the policy does not
         permit it. Detection reads the inventory — it must not widen
         anything on the strength of what it read, or AG-R-22's cure is
         worse than the disease.
         """
         build, _repo, _cfg = gated
-        consultant = build(denied="read_url_content", advertises=ADVERTISED)
+        consultant = build(denied="grep_search", advertises=ADVERTISED)
         recorder = Recorder(consultant.make_translator("r1", agent_id="a1"))
         answer = asyncio.run(
             consultant.second_opinion("well?", observer=recorder)
         )
         assert answer == "It depends."
-        assert recorder.translator.ungrounded_tools == ("read_url_content",), (
+        assert recorder.translator.ungrounded_tools == ("grep_search",), (
             "an advertised tool the policy does not permit is still refused"
         )
 
@@ -1154,26 +1175,53 @@ class TestARenamedControlToolIsNamedRatherThanTimedOut:
         assert "does not advertise finish" in said
 
 
-class TestTheNoToolsInvariantIsCheckedRatherThanAssumed:
+class TestTheWebOnlyInvariantIsCheckedRatherThanAssumed:
     """A future edit must not be able to make the header false in silence.
 
     The answer goes back under a sentence in this app's own voice saying
-    nothing was read or fetched, which is true of the second-opinion
-    policy only because its one entry, `finish`, retrieves nothing.
-    Adding a read tool "just for consultations" would leave that sentence
-    asserting something false with every test still green: a permitted
-    call raises no refusal and no breach, because there is nothing to
-    notice.
+    nothing came from the repository, which is true of the second-opinion
+    policy only because its entries are `finish` and the two web lookups,
+    and the page read is held to public URLs (AG-36). Adding a read tool
+    "just for consultations", or dropping that condition, would leave the
+    sentence asserting something false with every test still green: a
+    permitted call raises no refusal and no breach, because there is
+    nothing to notice.
     """
+
+    def test_the_web_lookups_are_permitted(self):
+        assert WEB_TOOLS <= SECOND_OPINION_POLICY.allowed
+
+    def test_a_page_read_without_a_url_condition_will_not_launch(self):
+        policy = StaticPolicy.of({*WEB_TOOLS, *CONTROL_TOOLS}, "because")
+        with pytest.raises(ConsultationError, match="no URL condition"):
+            consultant_mod._web_only_or_fail(policy)
+
+    def test_the_page_read_is_held_to_public_urls(self):
+        for url in ("https://www.analog.com/media/ad9144.pdf",):
+            assert SECOND_OPINION_POLICY.admits("read_url_content", {"Url": url})
+        for url in (
+            "file:///etc/passwd",
+            "http://localhost:8765/",
+            "http://127.0.0.1/",
+            "http://192.168.1.10/",
+            "http://[::1]/",
+            "http://router/",
+        ):
+            assert not SECOND_OPINION_POLICY.admits(
+                "read_url_content", {"Url": url}
+            ), url
+        assert not SECOND_OPINION_POLICY.admits("read_url_content", {})
+        assert SECOND_OPINION_POLICY.admits("search_web", {"query": "AD9144"})
+        assert not SECOND_OPINION_POLICY.admits("view_file", {"AbsolutePath": "/"})
 
     def test_a_policy_that_permits_a_read_tool_will_not_launch(self):
         policy = StaticPolicy.of({"view_file", *CONTROL_TOOLS}, "because")
         with pytest.raises(ConsultationError, match="policy permits view_file"):
-            consultant_mod._no_tools_or_fail(policy)
+            consultant_mod._web_only_or_fail(policy)
 
     def test_the_real_policy_passes_and_is_handed_back_unchanged(self):
         assert (
-            consultant_mod._no_tools_or_fail(SECOND_OPINION_POLICY)
+            consultant_mod._web_only_or_fail(SECOND_OPINION_POLICY)
             is SECOND_OPINION_POLICY
         )
 
@@ -1186,7 +1234,7 @@ class TestTheNoToolsInvariantIsCheckedRatherThanAssumed:
         """
         import inspect
 
-        source = inspect.getsource(consultant_mod._no_tools_or_fail)
+        source = inspect.getsource(consultant_mod._web_only_or_fail)
         assert "raise ConsultationError" in source
         assert "assert " not in source
 
@@ -1194,14 +1242,14 @@ class TestTheNoToolsInvariantIsCheckedRatherThanAssumed:
         """The guard is on the launch path, not merely available to it."""
         build, _repo, _cfg = gated
         seen: list = []
-        original = consultant_mod._no_tools_or_fail
-        consultant_mod._no_tools_or_fail = lambda policy: (
+        original = consultant_mod._web_only_or_fail
+        consultant_mod._web_only_or_fail = lambda policy: (
             seen.append(policy) or original(policy)
         )
         try:
             asyncio.run(build(answer="It depends.").second_opinion("well?"))
         finally:
-            consultant_mod._no_tools_or_fail = original
+            consultant_mod._web_only_or_fail = original
         assert seen == [SECOND_OPINION_POLICY]
 
 
@@ -1495,3 +1543,242 @@ class TestModelResolution:
 
         consultant = AgyConsultant(tmp_path, config=_Angry())
         assert consultant._resolve_model() == consultant_mod.DEFAULT_MODEL
+
+
+class TestTimeoutResolution:
+    """The bound follows the model, because the model is a Settings control.
+
+    It used to be a constant: choosing Gemini 4 Argon, which can think for
+    15–20 minutes on a large prompt, killed every such consultation at 180s.
+    """
+
+    class _Config:
+        def __init__(self, model, timeout=None):
+            self.consultant_model = model
+            self.consultant_timeout_seconds = timeout
+
+    def test_the_pinned_model_keeps_its_measured_bound(self, tmp_path):
+        consultant = AgyConsultant(tmp_path)
+        assert consultant._resolve_timeout(consultant_mod.DEFAULT_MODEL) == (
+            consultant_mod.DEFAULT_TIMEOUT_SECONDS
+        )
+
+    @pytest.mark.parametrize(
+        "model", ["gemini-4-argon-high", "Gemini-4-Argon-medium", "gemini-4-argon"]
+    )
+    def test_an_argon_model_gets_the_long_bound(self, tmp_path, model):
+        assert AgyConsultant(tmp_path)._resolve_timeout(model) == (
+            consultant_mod.SLOW_MODEL_TIMEOUT_SECONDS
+        )
+
+    def test_high_effort_alone_is_not_slow(self):
+        """The pin is itself `-high`, and 180s was measured against it."""
+        assert consultant_mod.DEFAULT_MODEL.endswith("-high")
+        assert consultant_mod.timeout_for_model(consultant_mod.DEFAULT_MODEL) == (
+            consultant_mod.DEFAULT_TIMEOUT_SECONDS
+        )
+
+    def test_the_inherited_model_gets_the_ordinary_bound(self, tmp_path):
+        assert AgyConsultant(tmp_path)._resolve_timeout(None) == (
+            consultant_mod.DEFAULT_TIMEOUT_SECONDS
+        )
+
+    def test_config_overrides_the_model_default(self, tmp_path):
+        consultant = AgyConsultant(
+            tmp_path, config=self._Config("gemini-4-argon-high", 600.0)
+        )
+        assert consultant._resolve_timeout("gemini-4-argon-high") == 600.0
+
+    def test_it_is_re_read_rather_than_captured(self, tmp_path):
+        config = self._Config("gemini-3.8-flash-high")
+        consultant = AgyConsultant(tmp_path, config=config)
+        assert consultant._resolve_timeout(config.consultant_model) == 180.0
+        config.consultant_model = "gemini-4-argon-high"
+        assert consultant._resolve_timeout(consultant._resolve_model()) == 1200.0
+
+    def test_a_constructed_bound_wins(self, tmp_path):
+        """Tests and direct callers pass a number and mean it."""
+        consultant = AgyConsultant(
+            tmp_path,
+            config=self._Config("gemini-4-argon-high", 600.0),
+            timeout_seconds=2.0,
+        )
+        assert consultant._resolve_timeout("gemini-4-argon-high") == 2.0
+
+    def test_a_config_without_the_key_falls_back_to_the_model(self, tmp_path):
+        class _Old:
+            consultant_model = "gemini-4-argon-high"
+
+        consultant = AgyConsultant(tmp_path, config=_Old())
+        assert consultant._resolve_timeout("gemini-4-argon-high") == 1200.0
+
+    def test_a_broken_config_falls_back_rather_than_losing_the_answer(self, tmp_path):
+        class _Angry:
+            consultant_model = "gemini-4-argon-high"
+
+            @property
+            def consultant_timeout_seconds(self):
+                raise RuntimeError("no config today")
+
+        consultant = AgyConsultant(tmp_path, config=_Angry())
+        assert consultant._resolve_timeout("gemini-4-argon-high") == 1200.0
+
+
+class TestFrameTiming:
+    """Whether a slow consultation was still sending, or had gone silent.
+
+    An Argon-high consultation ran to its 1200s bound on 2026-10-25 and
+    nothing recorded whether frames kept arriving, so "still thinking" and
+    a hung backend (antigravity-cli #594) read the same. The timeout now
+    says which.
+    """
+
+    class _Time:
+        def __init__(self):
+            self.now = 0.0
+
+        def __call__(self):
+            return self.now
+
+    def test_no_frame_at_all_says_so(self):
+        t = self._Time()
+        clock = consultant_mod._FrameClock(t)
+        t.now = 1200.0
+        assert clock.summary() == (
+            "No frame arrived in 1200s after the prompt was sent."
+        )
+
+    def test_it_reports_first_last_and_longest_silence(self):
+        t = self._Time()
+        clock = consultant_mod._FrameClock(t)
+        t.now = 45.0
+        clock.note({"event": "step"})
+        t.now = 50.0
+        clock.note({"event": "step"})
+        t.now = 400.0
+        clock.note({"event": "usage"})
+        t.now = 450.0
+        said = clock.summary()
+        assert "3 frames (step ×2, usage ×1)" in said
+        assert "the first after 45s" in said
+        assert "the last 50s ago" in said
+        assert "the longest silence 350s" in said
+
+    def test_a_silence_still_running_counts_as_the_longest(self):
+        """A backend that went quiet and stayed quiet is the hang case, so
+        the open gap at the end must count, not only the closed ones."""
+        t = self._Time()
+        clock = consultant_mod._FrameClock(t)
+        t.now = 10.0
+        clock.note({"event": "step"})
+        t.now = 1200.0
+        assert "the longest silence 1190s" in clock.summary()
+
+    def test_a_long_silence_is_logged_when_it_ends(self, caplog):
+        t = self._Time()
+        clock = consultant_mod._FrameClock(t)
+        t.now = consultant_mod.SILENCE_LOG_SECONDS + 5
+        with caplog.at_level("INFO", logger="aic_dc.agy.consultant"):
+            clock.note({"event": "step"})
+        assert "silent for 65s, then sent 'step'" in caplog.text
+
+    def test_the_timeout_message_carries_the_timing(self, gated):
+        build, _repo, _cfg = gated
+        consultant = build(
+            hold_until=str(_cfg / "never-appears"), timeout_seconds=2.0
+        )
+        with pytest.raises(ConsultationError) as raised:
+            asyncio.run(consultant.second_opinion("hold, then answer"))
+        said = str(raised.value)
+        assert "nothing arrived for 2s after its last frame" in said
+        assert re.search(r"\d+ frames? \(.*\); the first after|No frame arrived", said), said
+
+
+class TestTheWatchdog:
+    """A consultation is stopped by silence, not by the clock on the wall.
+
+    On 2026-10-26 an Argon-high consultation was still streaming its answer
+    at 19 minutes, 57 s inside a fixed 1200 s bound. The bound now restarts
+    on every frame, with a ceiling for a backend that never stops sending.
+    """
+
+    def test_a_consultation_that_keeps_sending_outlives_its_bound(self, gated):
+        build, _repo, _cfg = gated
+        # Six frames 0.4 s apart: about 2.4 s in all, never 1 s silent.
+        consultant = build(timeout_seconds=1.0, drip=(6, 0.4))
+        answer = asyncio.run(consultant.second_opinion("go on, then"))
+        assert "It depends." in answer
+
+    def test_the_ceiling_stops_one_that_never_finishes(
+        self, gated, monkeypatch
+    ):
+        monkeypatch.setattr(consultant_mod, "CONSULTATION_CEILING_SECONDS", 1.5)
+        build, _repo, _cfg = gated
+        consultant = build(timeout_seconds=1.0, drip=(50, 0.2))
+        with pytest.raises(ConsultationError) as raised:
+            asyncio.run(consultant.second_opinion("go on forever"))
+        said = str(raised.value)
+        assert "still working after 2s" in said, said
+        assert "the most one consultation may run" in said
+
+    def test_a_ceiling_below_a_configured_bound_is_raised_to_it(
+        self, gated, monkeypatch
+    ):
+        """A user who sets a 2-hour silence bound has not asked for a
+        1-hour total, so the ceiling never undercuts the bound."""
+        monkeypatch.setattr(consultant_mod, "CONSULTATION_CEILING_SECONDS", 0.5)
+        build, _repo, _cfg = gated
+        consultant = build(timeout_seconds=3.0, drip=(3, 0.3))
+        assert "It depends." in asyncio.run(consultant.second_opinion("go"))
+
+    def test_any_failure_says_how_far_it_got(self, gated, monkeypatch):
+        """AG-R-36's overflow came after nineteen minutes of frames, and the
+        message carried none of that."""
+        build, _repo, _cfg = gated
+        consultant = build(drip=(2, 0.05))
+        real = consultant_mod._FrameClock.note
+
+        def explode(self, frame):
+            real(self, frame)
+            if self.count == 3:
+                raise ValueError("Separator is found, but chunk is longer than limit")
+
+        monkeypatch.setattr(consultant_mod._FrameClock, "note", explode)
+        with pytest.raises(ConsultationError) as raised:
+            asyncio.run(consultant.second_opinion("go"))
+        said = str(raised.value)
+        assert said.startswith("The consultation failed: Separator is found")
+        assert "3 frames" in said
+
+
+class TestAFailedConsultationKeepsItsRoot:
+    """A text consultation's root is kept when it fails, as an image's is.
+
+    AG-R-36's root was removed with the run that overflowed, so nothing
+    was left to read. The next startup's sweep still takes it out.
+    """
+
+    @staticmethod
+    def _roots(cfg):
+        return list((cfg / "agy-roots" / "consultations").iterdir())
+
+    def test_an_answer_removes_its_root(self, gated):
+        build, _repo, cfg = gated
+        assert "It depends." in asyncio.run(build().second_opinion("go"))
+        assert self._roots(cfg) == []
+
+    def test_a_timeout_keeps_its_root(self, gated):
+        build, _repo, cfg = gated
+        consultant = build(
+            hold_until=str(cfg / "never-appears"), timeout_seconds=1.0
+        )
+        with pytest.raises(ConsultationError) as raised:
+            asyncio.run(consultant.second_opinion("hold, then answer"))
+        (kept,) = self._roots(cfg)
+        assert f"Its working files are kept at {kept}" in str(raised.value)
+
+    def test_an_empty_answer_keeps_its_root(self, gated):
+        build, _repo, cfg = gated
+        with pytest.raises(ConsultationError):
+            asyncio.run(build(answer="").second_opinion("go"))
+        assert len(self._roots(cfg)) == 1

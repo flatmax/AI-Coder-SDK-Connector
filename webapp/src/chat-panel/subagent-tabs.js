@@ -440,21 +440,50 @@ function seedDescription(tab) {
   const line = `🤖 ${describe(tab.subagent)}`;
   const first = tab.messages[0];
   if (first && first.subagent_seed) {
-    if (first.content === line) return;
+    if (first.content !== line) {
+      tab.messages = [
+        { ...first, content: line },
+        ...tab.messages.slice(1),
+      ];
+    }
+  } else {
     tab.messages = [
-      { ...first, content: line },
-      ...tab.messages.slice(1),
+      {
+        role: 'user',
+        content: line,
+        system_event: true,
+        subagent_seed: true,
+      },
+      ...tab.messages,
     ];
-    return;
   }
+  seedPrompt(tab);
+}
+
+/**
+ * The question itself, as a prompt card under the opening line.
+ *
+ * The opening line names the task ("Antigravity — Second opinion") and says
+ * nothing of what was asked, so a consultation's tab read as a column of
+ * heartbeats with no question to hang them on. A prompt card, not a system
+ * line, because it is what the feed below is answering — but labelled for
+ * who asked, since it was the agent and not the user.
+ *
+ * Only rows that carry a `prompt` get one, and only once: the row latches
+ * its first prompt in `applySubagentEvent`.
+ */
+function seedPrompt(tab) {
+  const prompt = tab.subagent?.prompt;
+  if (!prompt || tab.messages.some((m) => m.subagent_prompt)) return;
   tab.messages = [
+    tab.messages[0],
     {
       role: 'user',
-      content: line,
-      system_event: true,
-      subagent_seed: true,
+      content: prompt,
+      role_label: 'Asked by the agent',
+      subagent_prompt: true,
     },
-    ...tab.messages,
+    ...tab.messages.slice(1),
   ];
 }
 
@@ -476,7 +505,53 @@ function ensureFeedMessage(tab) {
     ...tab.messages,
     { role: 'assistant', content: '', blocks: tab.turnBlocks.blocks },
   ];
+  stampConsultationOutcome(tab);
   return true;
+}
+
+/**
+ * A consultation's outcome, in the main card's `terminal_reason` vocabulary.
+ *
+ * The LED in the strip already says how it ended, but the answer card did
+ * not, and the card is what gets read. A consultation that failed after its
+ * text streamed in — the reply arrived, the frame that closed it overflowed
+ * the reader — looked exactly like one that finished, with nothing on the
+ * card to tell them apart. So the card carries the same badge Main's does:
+ * `✓ completed` at the foot, anything else beside the role label.
+ *
+ * Null until the tab settles: a live consultation has no outcome to claim.
+ * An unrecognised status is passed through rather than defaulted, so
+ * `terminalBadge` draws it as an error with its own name on it.
+ */
+function consultationOutcome(sub) {
+  if (!sub?.settled) return null;
+  if (sub.unknown) return 'status_unknown';
+  if (sub.status === 'completed') return 'completed';
+  if (sub.status === 'stopped' || sub.status === 'killed') {
+    return 'aborted_streaming';
+  }
+  return sub.status || 'status_unknown';
+}
+
+/**
+ * Write the outcome onto a consultation tab's answer card.
+ *
+ * Replaced rather than mutated so the renderer sees a new message. Every
+ * route to the card calls this — the settle, a block that lands after it, and
+ * the projection of a settled turn's blocks — so whichever came last, the
+ * card ends up saying how the consultation ended.
+ */
+function stampConsultationOutcome(tab) {
+  const sub = tab?.subagent;
+  if (!isConsultation(sub)) return;
+  const reason = consultationOutcome(sub);
+  if (!reason) return;
+  tab.messages = tab.messages.map((msg) => (
+    msg.role === 'assistant' && !msg.system_event && Array.isArray(msg.blocks)
+      && msg.terminalReason !== reason
+      ? { ...msg, terminalReason: reason }
+      : msg
+  ));
 }
 
 /**
@@ -500,6 +575,7 @@ export function settleSubagentTab(panel, tab, options = {}) {
   tab.streaming = false;
   tab.streamStartedAt = null;
   if (tab.turnBlocks.blocks.length > 0) ensureFeedMessage(tab);
+  stampConsultationOutcome(tab);
   return true;
 }
 
@@ -732,6 +808,7 @@ export function openConsultationTab(panel, requestId, row, ownerTab) {
     if (mine.length > 0) {
       synced.tab.messages = [{ role: 'assistant', content: '', blocks: mine }];
       synced.tab.subagent.feedMessage = true;
+      stampConsultationOutcome(synced.tab);
     }
   }
   // Activated unconditionally, including when the tab already existed: the

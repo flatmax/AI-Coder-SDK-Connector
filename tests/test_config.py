@@ -1005,6 +1005,26 @@ class TestEngineModels:
         cfg.set_engine_option("consultant_model", 17)
         assert ConfigManager().consultant_model == DEFAULT_MODEL
 
+    def test_the_consultant_timeout_follows_the_model_by_default(
+        self, isolated_config_dir
+    ):
+        """Unset means "let the model decide", not 180s: a constant here is
+        what killed every Argon consultation at three minutes."""
+        assert ConfigManager().consultant_timeout_seconds is None
+
+    def test_a_consultant_timeout_can_be_pinned(self, isolated_config_dir):
+        cfg = ConfigManager()
+        cfg.set_engine_option("consultant_timeout_seconds", 900)
+        assert ConfigManager().consultant_timeout_seconds == 900.0
+
+    @pytest.mark.parametrize("bad", [0, -5, "600", True])
+    def test_a_nonsense_timeout_falls_back_to_the_model(
+        self, isolated_config_dir, bad
+    ):
+        cfg = ConfigManager()
+        cfg.set_engine_option("consultant_timeout_seconds", bad)
+        assert ConfigManager().consultant_timeout_seconds is None
+
     def test_the_engine_is_not_pinned(self, isolated_config_dir):
         """Deliberately asymmetric with the consultant: a master engine is
         the one the user drives all day, so their own tier choice stands."""

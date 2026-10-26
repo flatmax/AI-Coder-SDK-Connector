@@ -297,11 +297,12 @@ def _grounding(observer: Any) -> str:
     if escaped:
         return (
             f"Before the answer, from AIC⚡DC and not from the consultant: "
-            f"a second opinion is launched with no tools and no repository "
-            f"access, and for this one that did not hold — {_named(escaped)} "
-            f"ran. So the usual assurance is withdrawn: "
+            f"a second opinion is launched with no repository access and no "
+            f"tools beyond web lookups, and for this one that did not hold — "
+            f"{_named(escaped)} ran. So the usual assurance is withdrawn: "
             f"the answer below may contain material that was actually read "
-            f"or fetched, by a process that was not supposed to be able to. "
+            f"from this machine, by a process that was not supposed to be "
+            f"able to. "
             f"Treat it as unverified either way, and tell the user.\n\n"
         )
     # Two forms of the same posture, and which one is used is the whole
@@ -315,18 +316,25 @@ def _grounding(observer: Any) -> str:
     # paragraph whose entire job is to be the part that can be trusted. A
     # reader resolves a contradiction by picking a side, and the side
     # with the flatter grammar wins.
+    # AG-36 widened the posture to web lookups, so "nothing was looked
+    # up" is no longer the claim. What still holds is that nothing came
+    # from this machine — and a web lookup is not a verification, so the
+    # asking model is told to check what the consultant attributes to one.
     certain = (
         "Before the answer, from AIC⚡DC and not from the consultant: a "
-        "second opinion runs with no tools and no repository access, so "
-        "nothing below was read, fetched or looked up. Treat any file "
-        "contents, page contents, search results or live values in it as "
-        "the consultant's own rather than a source's."
+        "second opinion runs with no repository access — it may search the "
+        "web and read public pages, but cannot read a file on this machine "
+        "or run a command, so nothing below came from the repository. "
+        "Treat any file contents or local values in it as the consultant's "
+        "own, and check anything it attributes to a web source against "
+        "that source before relying on it."
     )
     qualified = (
         "Before the answer, from AIC⚡DC and not from the consultant: a "
-        "second opinion is launched with no tools and no repository "
-        "access — it is given no way to read a file, fetch a page or run "
-        "a command, and that is how this one was started."
+        "second opinion is launched with no repository access — it may "
+        "search the web and read public pages, but is given no way to read "
+        "a file on this machine or run a command, and that is how this one "
+        "was started."
     )
     if not reached and not unknown:
         return f"{certain}\n\n"
@@ -718,13 +726,13 @@ class ConsultantBridge:
                 "data": {
                     "agent_id": agent_id,
                     "message": (
-                        "A second opinion runs with no tools and no "
-                        "repository access: it answers from the question "
-                        "and the context it was given, and cannot read a "
-                        "file, fetch a page or run a command. Anything "
-                        "below about file contents, page contents, search "
-                        "results or live values is this model's own rather "
-                        "than a source's."
+                        "A second opinion may search the web and read "
+                        "public pages, and nothing else: it has no "
+                        "repository access and cannot read a file, reach a "
+                        "local address or run a command. Anything below "
+                        "about file contents is this model's own rather "
+                        "than a source's; each web lookup it makes is shown "
+                        "on its own card."
                     ),
                 },
             },
@@ -813,6 +821,11 @@ class ConsultantBridge:
         def observe(step: Any) -> None:
             if progress is not None:
                 progress["steps"] += 1
+                # For the heartbeat's "last activity": the consultant now
+                # stops on silence rather than on a wall clock, so how long
+                # it has been quiet is the figure that says whether it is
+                # near being stopped.
+                progress["last_at"] = asyncio.get_running_loop().time()
             # **Translate first, and unconditionally.** On this transport
             # the answer exists *because* a frame was absorbed here:
             # ``AgyConsultant._run`` calls ``observer(frame)`` instead of
@@ -961,7 +974,9 @@ class ConsultantBridge:
             )
 
     @contextlib.asynccontextmanager
-    async def _tab(self, label: str, *, anchor: str | None = None) -> Any:
+    async def _tab(
+        self, label: str, *, anchor: str | None = None, prompt: str = ""
+    ) -> Any:
         """Open a tab for one consultation, and settle it however it ends.
 
         A context manager because the *settling* is the part that must not
@@ -1044,7 +1059,12 @@ class ConsultantBridge:
             yield observer
             return
 
-        await self._announce(scope, label, task_id=task_id)
+        # The question rides the opening row only: the tab draws it once,
+        # as the card its notices and answer follow, and the terminal row
+        # has nothing to add to it.
+        await self._announce(
+            scope, label, task_id=task_id, **({"prompt": prompt} if prompt else {})
+        )
         await self._push_posture(scope)
         status = "failed"
         heartbeat = asyncio.ensure_future(self._heartbeat(scope, progress))
@@ -1115,8 +1135,14 @@ class ConsultantBridge:
             if self._emit is None or request_id is None:
                 return
             started = bool(progress and progress.get("steps"))
+            last_at = progress.get("last_at") if progress else None
+            quiet = (
+                f", last activity {asyncio.get_running_loop().time() - last_at:.0f}s ago"
+                if last_at is not None
+                else ""
+            )
             message = (
-                f"Antigravity is working — {waited:.0f}s so far."
+                f"Antigravity is working — {waited:.0f}s so far{quiet}."
                 if started
                 else (
                     f"Waiting for Google to start — {waited:.0f}s so far, and "
@@ -1255,7 +1281,9 @@ class ConsultantBridge:
             # The catch is *outside* the tab, so a failure propagates
             # through it and settles the row as failed rather than as a
             # green "completed". See `_tab`.
-            async with self._tab("Second opinion", anchor=anchor) as observer:
+            async with self._tab(
+                "Second opinion", anchor=anchor, prompt=question
+            ) as observer:
                 answer = await self._consultant.second_opinion(
                     question,
                     context,
@@ -1319,7 +1347,9 @@ class ConsultantBridge:
         anchor = self._claim("generate_image", prompt, output_name, aspect_ratio)
         try:
             # Outside the tab, for the same reason as second_opinion.
-            async with self._tab("Generate image", anchor=anchor) as observer:
+            async with self._tab(
+                "Generate image", anchor=anchor, prompt=prompt
+            ) as observer:
                 result = await self._consultant.generate_image(
                     prompt,
                     output_name=output_name,
@@ -1370,8 +1400,9 @@ class ConsultantBridge:
             "plainly. It keeps no memory between calls, so carry the exchange "
             "forward in `context`, attributing earlier answers to an earlier "
             "reviewer rather than to it — a model shown its own words defends "
-            "them. It has no repository access either, so pass the code it "
-            "needs. Costs a call on a separate Google account.",
+            "them. It can search the web and read public pages, but has no "
+            "repository access, so pass the code it needs. Costs a call on "
+            "a separate Google account.",
             {
                 "type": "object",
                 "properties": {

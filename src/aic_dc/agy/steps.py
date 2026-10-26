@@ -828,6 +828,13 @@ class AgyTranslator:
         # does a card show" would show a user different amounts on
         # different engines for the same reason.
         preview, truncated = truncate_tool_result(content)
+        # `"ok"`, not `"success"`, for the same reason and with the same
+        # symptom one level up: `toolStatus` knows `ok`, `error` and
+        # `interrupted`, and reads anything else as still running. This
+        # sent `"success"` and every finished call on this transport kept
+        # its blue running dot, its elapsed clock still counting, beside
+        # the duration footer that said it had finished.
+        #
         # The refusal notice lands *after* the card that provoked it and
         # before whatever the model writes next, which is the order a
         # reader needs: the call, why it was refused, and then the prose
@@ -838,7 +845,7 @@ class AgyTranslator:
                 {
                     "tool_use_id": call_id,
                     "name": name,
-                    "status": "error" if failed else "success",
+                    "status": "error" if failed else "ok",
                     "preview": preview,
                     "truncated": truncated,
                     "full_bytes": len(content.encode("utf-8")),
@@ -1193,8 +1200,9 @@ class AgyTranslator:
                             "account for: no refusal it can recognise as "
                             "its own gate's, and nothing reported as a "
                             "result. "
-                            "A second opinion runs with no tools and no "
-                            "repository access, so almost certainly nothing "
+                            "A second opinion has no repository access and "
+                            "no tools beyond web lookups, and this was not "
+                            "one of those, so almost certainly nothing "
                             "was retrieved; but almost certainly is not the "
                             "same as nothing, and this app will not claim "
                             "the stronger one. Treat any file contents, page "
@@ -1412,13 +1420,13 @@ class AgyTranslator:
                             "This consultation reached for a tool and got "
                             "nothing back, and anything else it reaches for "
                             "will come back the same way: a second opinion "
-                            "runs with no tools and no repository access. "
-                            "Each such call is shown on its own card, with "
-                            "whatever reason came back with it. Nothing was "
-                            "read or retrieved, so any file contents, page "
-                            "contents, search results or live values in what "
-                            "follows are the model's own rather than a "
-                            "source's."
+                            "has no repository access and no tools beyond "
+                            "web search and reading public pages. Each such "
+                            "call is shown on its own card, with whatever "
+                            "reason came back with it. Nothing was read from "
+                            "this machine, so any file contents or local "
+                            "values in what follows are the model's own "
+                            "rather than a source's."
                         ),
                     },
                 },

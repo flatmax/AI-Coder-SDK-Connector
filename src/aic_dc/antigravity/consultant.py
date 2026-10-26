@@ -29,9 +29,13 @@ Containment
 -----------
 Neither call gets a general-purpose agent pointed at the repository.
 
-``second_opinion`` enables **no tools at all** beyond ``FINISH``. It is a
-question and an answer; it has no business reading the tree, and the
-context it needs is passed in by the caller who already has it.
+``second_opinion`` enables ``SEARCH_WEB`` and ``READ_URL_CONTENT`` beside
+``FINISH``, and nothing else (AG-36). It is a question and an answer that
+may look things up on the web; it has no business reading the tree, and
+the context it needs is passed in by the caller who already has it. The
+page read is allowed only for a public http(s) URL
+(:func:`~aic_dc.antigravity.web.public_url_call`), since ``file://`` and
+``localhost`` would read this machine.
 
 ``generate_image`` enables ``GENERATE_IMAGE`` and ``FINISH``. That is a
 *write* tool — it saves a file and reports the path — so
@@ -91,6 +95,7 @@ from aic_dc.antigravity.credentials import resolve as resolve_credentials
 from aic_dc.antigravity.session import stop_reason_of, turn_usage_of
 from aic_dc.antigravity.steps import _name
 from aic_dc.antigravity.surface import sdk_installed
+from aic_dc.antigravity.web import public_url_call
 
 logger = logging.getLogger(__name__)
 
@@ -364,7 +369,7 @@ class Consultant:
     ) -> str:
         """Ask Antigravity one question and return its answer as text.
 
-        No tools, no workspace, no file access — the ``context`` argument
+        Web lookups and no file access (AG-36) — the ``context`` argument
         is how the caller supplies what it already read. Two independent
         agents disagreeing about a diff is information; one agent given a
         second chance to browse the repository is not.
@@ -381,7 +386,8 @@ class Consultant:
         turn = await self._chat(
             prompt,
             model=self._text_model,
-            builtin_tools=(),
+            builtin_tools=("SEARCH_WEB", "READ_URL_CONTENT"),
+            conditions={"READ_URL_CONTENT": public_url_call},
             observer=observer,
             consultation_id=consultation_id,
         )
@@ -573,6 +579,7 @@ class Consultant:
         *,
         model: str,
         builtin_tools: tuple[str, ...],
+        conditions: dict[str, Any] | None = None,
         observer: Any = None,
         consultation_id: str | None = None,
     ) -> _Turn:
@@ -608,6 +615,7 @@ class Consultant:
 
         enabled = [types.BuiltinTools.FINISH]
         enabled += [getattr(types.BuiltinTools, name) for name in builtin_tools]
+        conditions = dict(conditions or {})
 
         logger.debug("Antigravity consultation starting on %s", model)
         config = LocalAgentConfig(
@@ -627,7 +635,16 @@ class Consultant:
             # the layered assumption that stops being true the moment
             # somebody adds a tool. See this module's docstring for why a
             # static allowlist here is not the AG-5 refusal reversed.
-            policies=[policy.deny_all(), *(policy.allow(t.value) for t in enabled)],
+            #
+            # `conditions` narrows an allow to the calls its predicate
+            # admits, keyed by the `BuiltinTools` member name.
+            policies=[
+                policy.deny_all(),
+                *(
+                    policy.allow(t.value, when=conditions.get(t.name))
+                    for t in enabled
+                ),
+            ],
             **self._credentials.config_kwargs(),
         )
         # Registered before the harness starts and dropped in the

@@ -533,13 +533,17 @@ export function renderMessage(panel, msg, index) {
   const peer = msg.role === 'user' && !msg.system_event
     ? peerHeaderOf(msg.content)
     : null;
+  // `role_label` is for a card whose author is neither the user nor the
+  // assistant — a consultation's question, which the agent asked.
   const roleLabel = msg.system_event
     ? 'System'
-    : peer
-      ? `From ${peer.repoName}`
-      : msg.role === 'user'
-        ? 'You'
-        : 'Assistant';
+    : msg.role_label
+      ? msg.role_label
+      : peer
+        ? `From ${peer.repoName}`
+        : msg.role === 'user'
+          ? 'You'
+          : 'Assistant';
   // Compute whether this message is the current
   // search match. Matches are resolved by index
   // lookup to avoid per-card regex re-evaluation

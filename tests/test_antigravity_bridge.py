@@ -284,15 +284,15 @@ class TestTheAskingAgentIsToldWhatWasRefused:
         where the app's statement is the one that arrives second.
         """
         fake = self.Refusing(
-            denied=("read_url_content", "search_web"),
+            denied=("grep_search", "list_dir"),
             answer="The kernel.org front page lists 6.11.4 as stable.",
         )
         text = body(await ConsultantBridge(fake).second_opinion("What is stable?"))
         assert "The kernel.org front page lists 6.11.4 as stable." in text
-        assert "read_url_content and search_web" in text, (
+        assert "grep_search and list_dir" in text, (
             "a list read as prose, not a comma-separated one"
         )
-        assert text.index("read_url_content and search_web") < text.index(
+        assert text.index("grep_search and list_dir") < text.index(
             "The kernel.org front page"
         )
         assert "got nothing back" in text, (
@@ -306,7 +306,7 @@ class TestTheAskingAgentIsToldWhatWasRefused:
         """The consultant's words and the app's words in one string, and a
         reader that cannot tell them apart has the app's framing for
         nothing."""
-        fake = self.Refusing(denied=("read_url_content",), answer="6.11.4.")
+        fake = self.Refusing(denied=("grep_search",), answer="6.11.4.")
         text = body(await ConsultantBridge(fake).second_opinion("Which?"))
         assert "not from the consultant" in text
 
@@ -318,9 +318,9 @@ class TestTheAskingAgentIsToldWhatWasRefused:
         between two models again; what it has standing to state is that
         nothing was retrieved.
         """
-        fake = self.Refusing(denied=("read_url_content",), answer="6.11.4.")
+        fake = self.Refusing(denied=("grep_search",), answer="6.11.4.")
         text = body(await ConsultantBridge(fake).second_opinion("Which?"))
-        assert "the consultant's own rather than a source's" in text
+        assert "the consultant's own" in text
         assert "wrong" not in text and "false" not in text
 
     @pytest.mark.asyncio
@@ -338,7 +338,7 @@ class TestTheAskingAgentIsToldWhatWasRefused:
         fake = self.Refusing(denied=(), answer="This diff leaks a file handle.")
         result = await ConsultantBridge(fake).second_opinion("Safe?")
         text = body(result)
-        assert "no tools and no repository access" in text
+        assert "runs with no repository access" in text
         assert "got nothing back" not in text, "nothing was reached for"
         assert quoted(result) == "This diff leaks a file handle."
 
@@ -363,13 +363,13 @@ class TestTheAskingAgentIsToldWhatWasRefused:
         looking for it.
         """
         fake = self.Refusing(
-            escaped=("read_url_content",),
+            escaped=("grep_search",),
             answer="The kernel is at 6.19.",
         )
         result = await ConsultantBridge(fake).second_opinion("Which version?")
         text = body(result)
         assert "that did not hold" in text
-        assert "read_url_content ran" in text
+        assert "grep_search ran" in text
         assert "returned output" not in text, (
             "a breach with no output key is still a breach; see P28"
         )
@@ -414,11 +414,11 @@ class TestTheAskingAgentIsToldWhatWasRefused:
         assert "got nothing back" not in text, (
             "that is the claim this call does not support"
         )
-        assert "nothing below was read" not in text, (
+        assert "nothing below came from the repository" not in text, (
             "nor is that one, and it is the more dangerous of the two "
             "because it is stated about the whole answer"
         )
-        assert "launched with no tools and no repository access" in text, (
+        assert "launched with no repository access" in text, (
             "the containment is not in doubt — it is what this app "
             "observed of one call inside it that is"
         )
@@ -430,13 +430,13 @@ class TestTheAskingAgentIsToldWhatWasRefused:
         arrived — and a single list would flatten the weaker into the
         stronger."""
         fake = self.Refusing(
-            denied=("search_web",),
-            unknown=("view_file", "read_url_content"),
+            denied=("list_dir",),
+            unknown=("view_file", "grep_search"),
             answer="No.",
         )
         text = body(await ConsultantBridge(fake).second_opinion("Well?"))
-        assert "reached for search_web, and got nothing back." in text
-        assert "It also reached for view_file and read_url_content" in text
+        assert "reached for list_dir, and got nothing back." in text
+        assert "It also reached for view_file and grep_search" in text
         assert "what came back from those" in text
 
     @pytest.mark.asyncio
@@ -444,7 +444,7 @@ class TestTheAskingAgentIsToldWhatWasRefused:
         """The retraction replaces the paragraph, so a qualified sentence
         beside it would be the same mistake one notch quieter."""
         fake = self.Refusing(
-            escaped=("read_url_content",),
+            escaped=("grep_search",),
             unknown=("view_file",),
             answer="6.19.",
         )
@@ -467,7 +467,7 @@ class TestTheAskingAgentIsToldWhatWasRefused:
         session is exactly the reader the tab's row used to serve and, on a
         turn read back off disk, no longer can.
         """
-        fake = self.Refusing(escaped=("read_url_content",), answer="6.19.")
+        fake = self.Refusing(escaped=("grep_search",), answer="6.19.")
         text = body(await ConsultantBridge(fake).second_opinion("Which?"))
         assert text.index("that did not hold") < text.index(
             "reasoning independently"
@@ -503,7 +503,7 @@ class TestTheAskingAgentIsToldWhatWasRefused:
         ordinary shape, it happens constantly, and promoting it would make
         the lede meaningless for the case that needs it.
         """
-        fake = self.Refusing(denied=("search_web",), answer="6.19.")
+        fake = self.Refusing(denied=("list_dir",), answer="6.19.")
         text = body(await ConsultantBridge(fake).second_opinion("Which?"))
         assert text.startswith("A second opinion from Google Antigravity")
         assert text.index("reasoning independently") < text.index(
@@ -515,7 +515,7 @@ class TestTheAskingAgentIsToldWhatWasRefused:
         fake = self.Refusing(answer="6.19.")
         text = body(await ConsultantBridge(fake).second_opinion("Which?"))
         assert text.startswith("A second opinion from Google Antigravity")
-        assert "nothing below was read" in text
+        assert "nothing below came from the repository" in text
 
     @pytest.mark.asyncio
     async def test_only_a_breach_marks_the_call_as_failed(self):
@@ -535,8 +535,8 @@ class TestTheAskingAgentIsToldWhatWasRefused:
         """
         answer = "6.19."
         cases = {
-            "breach": (dict(escaped=("read_url_content",)), True),
-            "refusal": (dict(denied=("search_web",)), False),
+            "breach": (dict(escaped=("grep_search",)), True),
+            "refusal": (dict(denied=("list_dir",)), False),
             "unwatched": (dict(unknown=("view_file",)), False),
             "clean": ({}, False),
         }
@@ -568,7 +568,7 @@ class TestTheAskingAgentIsToldWhatWasRefused:
     async def test_a_failed_consultation_does_not_pretend_to_ground_anything(self):
         """There is no answer to caveat, and the error already says why."""
         fake = self.Refusing(
-            denied=("read_url_content",),
+            denied=("grep_search",),
             raises=ConsultationError("the model refused"),
         )
         text = body(await ConsultantBridge(fake).second_opinion("Why?"))
@@ -793,6 +793,16 @@ class TestTheConsultationGetsATab:
         rows = self.events(seen, "subagentEvent")
         assert rows, "no subagentEvent — the tab strip never hears about it"
         assert rows[0].payload["subagent_type"] == "Antigravity"
+
+    @pytest.mark.asyncio
+    async def test_the_opening_row_carries_the_question(self):
+        """The tab draws it as the card its notices follow; without it the
+        tab is a column of heartbeats with nothing to say what for."""
+        bridge, seen = self.bridge_with_emit()
+        await bridge.second_opinion("Is the cache keyed right?")
+        rows = self.events(seen, "subagentEvent")
+        assert rows[0].payload["prompt"] == "Is the cache keyed right?"
+        assert "prompt" not in rows[-1].payload
 
     @pytest.mark.asyncio
     async def test_the_event_is_turn_scoped_to_the_live_request(self):
@@ -1139,6 +1149,8 @@ class TestTheConsultationGetsATab:
         assert beats, "no heartbeat at all"
         assert not any("queued behind paid traffic" in m for m in beats)
         assert any("Antigravity is working" in m for m in beats)
+        # The consultant stops on silence, so the beat says how quiet it is.
+        assert any(re.search(r"last activity \d+s ago\.$", m) for m in beats), beats
 
 
 class TestTheRowNestsInsideItsToolCard:

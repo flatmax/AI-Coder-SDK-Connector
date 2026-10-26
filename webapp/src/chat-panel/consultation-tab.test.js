@@ -420,6 +420,95 @@ describe('one tab, wherever its blocks have got to', () => {
     });
 });
 
+describe('the answer card says how the consultation ended', () => {
+  // The strip's LED said it; the card did not, and the card is what gets
+  // read. A consultation whose text streamed in full and then failed on its
+  // closing frame looked exactly like one that finished.
+
+  async function openAndEnd(status) {
+    const p = mountPanel();
+    const reqId = await sendAndGetRequestId(p);
+    pushEvent('tool-use', consultCard(reqId));
+    pushEvent('subagent-event', consultEvent(reqId));
+    pushEvent('stream-chunk', feedChunk(reqId, 'The whole answer.', 0));
+    await settle(p);
+    clickTheRow(p);
+    await settle(p);
+    pushEvent('subagent-event', consultEvent(reqId, {
+      type: status, status, terminal: true,
+    }));
+    await settle(p);
+    return p;
+  }
+
+  function badges(p, where) {
+    return [...p.shadowRoot.querySelectorAll(`${where} .finish-reason-badge`)]
+      .map((el) => el.textContent.trim());
+  }
+
+  it('badges a finished one completed, at the foot', async () => {
+    const p = await openAndEnd('completed');
+    const [{ tab }] = subagentTabs(p);
+    expect(tab.messages.at(-1).terminalReason).toBe('completed');
+    expect(badges(p, '.finish-reason-footer')).toEqual(['✓ completed']);
+    expect(badges(p, '.role-label')).toEqual([]);
+  });
+
+  it('badges a failed one failed, above the text it did get', async () => {
+    const p = await openAndEnd('failed');
+    const [{ tab }] = subagentTabs(p);
+    expect(contentsOf(tab)).toEqual(['The whole answer.']);
+    expect(tab.messages.at(-1).terminalReason).toBe('failed');
+    expect(badges(p, '.role-label')).toEqual(['failed']);
+    expect(badges(p, '.finish-reason-footer')).toEqual([]);
+  });
+
+  it('never claims completed for one whose ending was not heard', async () => {
+    const p = mountPanel();
+    const reqId = await sendAndGetRequestId(p);
+    pushEvent('tool-use', consultCard(reqId));
+    pushEvent('subagent-event', consultEvent(reqId));
+    pushEvent('stream-chunk', feedChunk(reqId, 'Half an ans', 0));
+    await settle(p);
+    clickTheRow(p);
+    await settle(p);
+    pushEvent('stream-complete', {
+      requestId: reqId,
+      result: { response: 'done', terminal_reason: 'completed' },
+    });
+    await settle(p);
+    const [{ tab }] = subagentTabs(p);
+    expect(tab.messages.at(-1).terminalReason).toBe('status_unknown');
+  });
+
+  it('badges the answer of a tab opened after the turn settled', async () => {
+    const p = mountPanel();
+    await settle(p);
+    p._tabs.get('main').messages = [{
+      role: 'assistant',
+      blocks: [
+        { block_id: 'c0', kind: 'text', content: 'It held.', agent_id: PARENT },
+      ],
+    }];
+    p._onViewSubagentsRequested(new CustomEvent('view-subagents-requested', {
+      detail: {
+        agents: [{
+          agent_id: 'consult-1',
+          label: 'Antigravity: is this design sound?',
+          has_transcript: false,
+          tool_use_id: PARENT,
+          row: { key: 'consult-1', agent_id: 'consult-1',
+                 tool_use_id: PARENT, task_type: 'consultation',
+                 status: 'completed', terminal: true },
+        }],
+      },
+    }));
+    await settle(p);
+    const [{ tab }] = subagentTabs(p);
+    expect(tab.messages[0].terminalReason).toBe('completed');
+  });
+});
+
 describe('a tab the user opened survives the strip regrowing', () => {
   it('is left alone by a reconnect, which opens none of its own', async () => {
     // A reconnect mid-turn replays the engine's subagent snapshot through

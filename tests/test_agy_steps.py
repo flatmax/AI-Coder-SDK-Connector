@@ -33,7 +33,7 @@ from typing import Any
 import pytest
 
 from aic_dc.agy import steps
-from aic_dc.agy.consultant import SECOND_OPINION_POLICY
+from aic_dc.agy.consultant import CONTROL_TOOLS, SECOND_OPINION_POLICY
 from aic_dc.agy.gate_server import StaticPolicy
 from aic_dc.agy.steps import UNNAMED_TOOL, AgyTranslator, unwrap
 
@@ -44,7 +44,15 @@ from aic_dc.agy.steps import UNNAMED_TOOL, AgyTranslator, unwrap
 #: text. A fixture built on the unstamped policy would be testing a state
 #: that cannot occur, and every refusal in it would read as a call whose
 #: outcome the app could not establish.
-POLICY = SECOND_OPINION_POLICY.stamped()
+#:
+#: **A no-tools policy, not the second opinion's own.** The captures below
+#: are of consultations refused `read_url_content` and `search_web`, from
+#: before AG-36 let a second opinion look things up. What these tests
+#: defend is how the pump reads a barred call, which does not depend on
+#: which names are barred, so the captures are kept verbatim and the policy
+#: is the one they were taken under.
+BARRING_POLICY = StaticPolicy.of(CONTROL_TOOLS, SECOND_OPINION_POLICY.reason)
+POLICY = BARRING_POLICY.stamped()
 
 
 def frame(step: dict) -> dict:
@@ -225,7 +233,7 @@ class TestToolCards:
         events = t.translate(frame(TOOL_DONE))
         assert names(events) == ["toolResult"]
         assert events[0].payload["tool_use_id"] == "agy-tool-2"
-        assert events[0].payload["status"] == "success"
+        assert events[0].payload["status"] == "ok"
         assert events[0].payload["duration_ms"] == 65
 
     def test_a_call_seen_only_once_still_opens_and_closes(self):
@@ -241,7 +249,7 @@ class TestToolCards:
         assert result["preview"] == ""
         assert result["truncated"] is False
         assert result["full_bytes"] == 0
-        assert result["status"] == "success"
+        assert result["status"] == "ok"
 
     def test_an_output_is_carried_when_there_is_one(self):
         t = AgyTranslator("r1")
@@ -272,7 +280,7 @@ class TestADeniedCallSaysWhy:
         result = t.translate(frame(DENIED))[-1].payload
         assert result["status"] == "error"
         assert "denied by pre-tool hook" in result["preview"]
-        assert "no tools here" in result["preview"], (
+        assert "no repository access" in result["preview"], (
             "the card shows why, not merely that"
         )
         assert result["full_bytes"] > 0
@@ -362,7 +370,7 @@ class TestAnUngroundedAnswerIsMarked:
         translator's own policy issued, rather than a string the test
         handed to both sides.
         """
-        self.policy = SECOND_OPINION_POLICY.stamped()
+        self.policy = BARRING_POLICY.stamped()
 
     def denied(self, **over: Any) -> dict[str, Any]:
         """A denial frame for one barred call, from the live policy.
@@ -625,7 +633,7 @@ class TestTheAppIsNeverTheOneSayingSomethingFalse:
         translator's own policy issued, rather than a string the test
         handed to both sides.
         """
-        self.policy = SECOND_OPINION_POLICY.stamped()
+        self.policy = BARRING_POLICY.stamped()
 
     def denied(self, **over: Any) -> dict[str, Any]:
         """A denial frame for one barred call, from the live policy.
@@ -821,7 +829,7 @@ class TestTheAppIsNeverTheOneSayingSomethingFalse:
         one configuration where nobody is looking.
         """
         t = AgyTranslator("r1")
-        t.note_consultation(SECOND_OPINION_POLICY.allowed)
+        t.note_consultation(BARRING_POLICY.allowed)
         events = t.translate(frame(self.denied()))
         assert names(events) == ["toolUse", "toolResult", "systemEvent"]
         assert events[2].payload["subtype"] == "consultation_unverified"
@@ -1693,7 +1701,7 @@ class TestAGeneratedImageIsCollected:
 
         result = self._result(translator.translate(image_step()))
 
-        assert result.payload["status"] == "success"
+        assert result.payload["status"] == "ok"
         assert result.payload["files_modified"] == []
 
     def test_the_consultants_translator_collects_nothing_here(

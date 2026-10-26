@@ -123,6 +123,7 @@ from aic_dc.antigravity.consultant import (
     verify_image_write,
 )
 from aic_dc.antigravity.credentials import Credentials, agy_credentials
+from aic_dc.antigravity.web import public_url_call
 
 logger = logging.getLogger(__name__)
 
@@ -150,6 +151,69 @@ DEFAULT_TIMEOUT_SECONDS = 180.0
 #: so this is a first bound to be corrected by the first real run rather
 #: than a figure with evidence behind it.
 DEFAULT_IMAGE_TIMEOUT_SECONDS = 300.0
+
+#: How long a consultation may take on a model that thinks for minutes.
+#:
+#: :data:`DEFAULT_TIMEOUT_SECONDS` was sized for the pinned Flash model,
+#: and became wrong the day the model became a Settings control: the
+#: timeout stayed a constant while the model moved, so choosing Gemini 4
+#: Argon killed every large consultation at three minutes and called it
+#: "did not answer". Argon on high effort is reported to reason silently
+#: for 8–11 minutes on a large prompt and to take 15–20 to finish, and
+#: Google's own guidance is an HTTP timeout of at least 15–20 minutes.
+#: Those figures came from a user's research on 2026-10-25 and have not
+#: been measured on this transport yet — the first real Argon run should
+#: correct this number, as it was meant to correct the image one.
+#:
+#: The cost is the one :data:`DEFAULT_TIMEOUT_SECONDS` names: the asking
+#: Claude turn is blocked for the whole call. Choosing Argon is choosing
+#: that wait, so the bound follows the choice rather than refusing it.
+#: Claude Code's own MCP tool-call bound does not interfere — it defaults
+#: to ~28h (``MCP_TOOL_TIMEOUT``, 2.1.299), and an in-process ``sdk``
+#: server has no idle timeout.
+SLOW_MODEL_TIMEOUT_SECONDS = 1200.0
+
+#: Substrings of a model id that mean :data:`SLOW_MODEL_TIMEOUT_SECONDS`.
+#:
+#: Matched on the name rather than listed exactly, because effort is baked
+#: into the name on this surface and every Argon tier should get the
+#: longer bound. ``-high`` alone is deliberately *not* a marker: the
+#: pinned default is ``gemini-3.8-flash-high``, and 180s is what that
+#: model was measured against.
+SLOW_MODEL_MARKERS = ("argon",)
+
+#: The most one consultation may run, however steadily it is sending.
+#:
+#: The bounds above are **silence** bounds, not wall clocks, since
+#: 2026-10-26: every frame restarts the clock, so a consultation is only
+#: stopped once ``agy`` has sent nothing for that long. A fixed deadline
+#: killed replies that were visibly streaming — an Argon-high consultation
+#: that day was still sending its answer at 19 minutes, 57 s inside a
+#: 1200 s bound. Keeping each model's old figure as its silence bound makes
+#: this never stricter than before, whether or not ``agy`` emits anything
+#: while a model thinks, which has not been measured.
+#:
+#: This ceiling is what a watchdog alone would lose: a backend that keeps
+#: sending without ever finishing — the silent-retry quota burn reported
+#: in antigravity-cli #594 — would otherwise hold the asking turn forever.
+#: Raised to the silence bound when a configured one exceeds it.
+CONSULTATION_CEILING_SECONDS = 3600.0
+
+
+def timeout_for_model(model: str | None) -> float:
+    """The default silence bound for a consultation on ``model``.
+
+    How long ``agy`` may send nothing before the consultation is stopped;
+    see :data:`CONSULTATION_CEILING_SECONDS` for the bound on the whole.
+
+    ``None`` — the account holder's own choice — gets the ordinary bound,
+    because this module cannot see which model that is. A user who
+    inherits an Argon selection sets ``engines.consultant_timeout_seconds``.
+    """
+    name = (model or "").lower()
+    if any(marker in name for marker in SLOW_MODEL_MARKERS):
+        return SLOW_MODEL_TIMEOUT_SECONDS
+    return DEFAULT_TIMEOUT_SECONDS
 
 #: The model a consultation runs on, pinned.
 #:
@@ -190,15 +254,31 @@ DEFAULT_MODEL = "gemini-3.8-flash-high"
 #: costs the consultation.
 CONTROL_TOOLS = frozenset({"finish"})
 
+#: What a second opinion may look things up with
+#: ([AG-36](../../../specs5/plan-ag/decisions.md#ag-36)): a web search, and
+#: a read of a public page. Both retrieve from outside this machine, which
+#: is the line the policy draws — the repository and the local network
+#: stay out of reach, and ``read_url_content`` is held to it by
+#: :func:`~aic_dc.antigravity.web.public_url_call`, since a URL is the one
+#: argument that can point a web read back at this computer.
+#:
+#: Optional, unlike :data:`CONTROL_TOOLS`: a binary that does not offer
+#: them still runs a consultation, it just cannot look anything up. See
+#: :func:`_missing_from_binary`.
+WEB_TOOLS = frozenset({"search_web", "read_url_content"})
+
 #: What the model is told when it reaches for a tool a consultation does
 #: not have. Prose rather than a code, because it is read by a model
 #: deciding what to do next, and the thing we want it to do next is
 #: *answer*.
-_NO_TOOLS_REASON = (
+_WEB_ONLY_REASON = (
     "This is a one-shot consultation inside another agent's session, not "
-    "a session of your own. You have no tools here and no repository "
-    "access. Answer from the question and the context you were given, in "
-    "prose, and do not look for another way to read or change files."
+    "a session of your own. You may search the web and read public web "
+    "pages, and nothing else: you have no repository access and cannot "
+    "read local files, local or private-network addresses, or run "
+    "commands. Answer from the question, the context you were given and "
+    "what you can look up, in prose, and do not look for another way to "
+    "read or change files."
 )
 
 _IMAGE_ONLY_REASON = (
@@ -216,39 +296,51 @@ _IMAGE_ONLY_REASON = (
 #: :func:`~aic_dc.agy.steps.locate_generated_image` — so this module's
 #: tests can redirect the directory without reaching into another one.
 
-#: A second opinion: prose in, prose out, nothing else permitted.
-SECOND_OPINION_POLICY = StaticPolicy.of(CONTROL_TOOLS, _NO_TOOLS_REASON)
+#: A second opinion: prose in, prose out, and web lookups along the way.
+SECOND_OPINION_POLICY = StaticPolicy.of(
+    {*WEB_TOOLS, *CONTROL_TOOLS},
+    _WEB_ONLY_REASON,
+    conditions={"read_url_content": public_url_call},
+)
 
 #: An image: one tool, which is the capability the call exists for.
 IMAGE_POLICY = StaticPolicy.of({"generate_image", *CONTROL_TOOLS}, _IMAGE_ONLY_REASON)
 
 
-def _no_tools_or_fail(policy: StaticPolicy) -> StaticPolicy:
-    """Refuse to launch a second opinion under a policy that permits a tool.
+def _web_only_or_fail(policy: StaticPolicy) -> StaticPolicy:
+    """Refuse to launch a second opinion under a policy that reaches this machine.
 
     The header the asking model receives says, in this app's voice, that
-    the consultation ran with no tools and no repository access — and
-    that sentence is true of :data:`SECOND_OPINION_POLICY` only because
-    its one entry, ``finish``, retrieves nothing. Nothing in the type
-    system says so. A future edit adding a read tool "just for
-    consultations" would leave the header asserting something false, in
-    the app's own voice, with every test still green: there is no
-    refusal to notice and no breach to raise, because the call would be
-    *permitted*.
+    the consultation could look things up on the web and had no
+    repository access — and that sentence is true of
+    :data:`SECOND_OPINION_POLICY` only because its entries are
+    :data:`CONTROL_TOOLS`, which retrieve nothing, and :data:`WEB_TOOLS`,
+    whose page read is held to public URLs. Nothing in the type system
+    says so. A future edit adding a read tool "just for consultations",
+    or dropping the URL condition, would leave the header asserting
+    something false with every test still green: there is no refusal to
+    notice and no breach to raise, because the call would be *permitted*.
 
     A raise rather than an ``assert``, which is not pedantry: ``assert``
     is stripped from the bytecode under ``python -O``, so an invariant
     written that way is absent from exactly the builds that run
     unattended.
     """
-    extra = set(policy.allowed) - set(CONTROL_TOOLS)
+    extra = set(policy.allowed) - set(CONTROL_TOOLS) - set(WEB_TOOLS)
     if extra:
         raise ConsultationError(
             "A second opinion cannot be launched: its policy permits "
             + ", ".join(sorted(extra))
             + ". The answer is handed back under a header saying nothing "
-            "was read or fetched, and that sentence is only true while "
-            "the allowlist holds no tool that can retrieve anything."
+            "was read from this machine, and that sentence is only true "
+            "while the allowlist holds nothing beyond web lookups."
+        )
+    conditioned = {name for name, _ in policy.conditions}
+    if "read_url_content" in policy.allowed and "read_url_content" not in conditioned:
+        raise ConsultationError(
+            "A second opinion cannot be launched: its policy permits "
+            "read_url_content with no URL condition, so a file:// or "
+            "localhost URL would read this machine."
         )
     return policy
 
@@ -282,7 +374,10 @@ def _missing_from_binary(
     names = frozenset(advertised)
     if not names:
         return ()
-    return tuple(sorted(frozenset(policy.allowed) - names))
+    # The web tools are a capability rather than a need: a binary without
+    # them still ends its turn, and calling them missing would attach the
+    # "no way to end its turn" sentence to a consultation that had one.
+    return tuple(sorted(frozenset(policy.allowed) - WEB_TOOLS - names))
 
 
 def _renamed_tool_note(names: Iterable[str]) -> str:
@@ -340,9 +435,9 @@ def _empty_answer_reason(translator: Any) -> str:
     if escaped:
         return (
             f"{opening} It is not only that: {_listed(escaped)} ran despite "
-            f"the policy that permits no tools, so this consultation had a "
-            f"containment failure as well as an empty answer. Tell the "
-            f"user.{note}"
+            f"the policy that permits nothing beyond web lookups, so this "
+            f"consultation had a containment failure as well as an empty "
+            f"answer. Tell the user.{note}"
         )
     if unknown:
         return (
@@ -362,6 +457,70 @@ def _listed(names: Iterable[str]) -> str:
     if len(items) == 1:
         return items[0]
     return f"{', '.join(items[:-1])} and {items[-1]}"
+
+
+#: A silence at least this long is logged when the frame that ends it
+#: arrives, so a long consultation leaves a record of where it went quiet.
+SILENCE_LOG_SECONDS = 60.0
+
+
+class _FrameClock:
+    """When a consultation's frames arrived, from the prompt onward.
+
+    Exists to answer one question a timeout could not: was the model still
+    sending something, or had it gone silent? On 2026-10-25 an Argon-high
+    consultation ran to its 1200s bound showing only "Antigravity is
+    working", and nothing recorded whether frames kept arriving — so a
+    model still thinking and a hung backend (antigravity-cli #594) read the
+    same. The answer decides whether an inactivity watchdog can replace the
+    wall clock for slow models, which is why this measures before anything
+    is built on it.
+    """
+
+    def __init__(self, clock: Any = None) -> None:
+        self._now = clock or asyncio.get_running_loop().time
+        self._started = self._now()
+        self._last = self._started
+        self._first: float | None = None
+        self._longest = 0.0
+        self.count = 0
+        self.events: dict[str, int] = {}
+
+    def note(self, frame: dict[str, Any]) -> None:
+        now = self._now()
+        gap = now - self._last
+        event = str(frame.get("event") or "?") if isinstance(frame, dict) else "?"
+        if gap >= SILENCE_LOG_SECONDS:
+            logger.info(
+                "agy consultation: silent for %.0fs, then sent %r (frame %d)",
+                gap,
+                event,
+                self.count + 1,
+            )
+        self._longest = max(self._longest, gap)
+        if self._first is None:
+            self._first = now - self._started
+        self._last = now
+        self.count += 1
+        self.events[event] = self.events.get(event, 0) + 1
+
+    def summary(self) -> str:
+        """One sentence, for the log and for the timeout message."""
+        now = self._now()
+        if self._first is None:
+            return (
+                f"No frame arrived in {now - self._started:.0f}s after the "
+                "prompt was sent."
+            )
+        kinds = ", ".join(
+            f"{name} ×{n}" for name, n in sorted(self.events.items())
+        )
+        return (
+            f"{self.count} frame{'' if self.count == 1 else 's'} ({kinds}); "
+            f"the first after "
+            f"{self._first:.0f}s, the last {now - self._last:.0f}s ago, and "
+            f"the longest silence {max(self._longest, now - self._last):.0f}s."
+        )
 
 
 @dataclasses.dataclass
@@ -418,6 +577,11 @@ class AgyConsultant:
         and GPT-OSS entries, so the inherited decision could quietly make
         a *second* opinion a first one (AG-R-15). ``None`` still means
         "agy's own default" for a caller that wants it back.
+    timeout_seconds:
+        ``None`` by default, meaning "follow the model": resolved per
+        consultation by :meth:`_resolve_timeout`, because the model is.
+        A number pins it, ahead of ``app.json``, which is what tests and
+        direct callers want.
     """
 
     def __init__(
@@ -428,7 +592,7 @@ class AgyConsultant:
         model: str | None = DEFAULT_MODEL,
         config: Any = None,
         executable: str = "agy",
-        timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
+        timeout_seconds: float | None = None,
         image_timeout_seconds: float = DEFAULT_IMAGE_TIMEOUT_SECONDS,
     ) -> None:
         self._repo_root = Path(repo_root).resolve()
@@ -486,6 +650,31 @@ class AgyConsultant:
                 "Could not read engines.consultant_model; using %s", self._model
             )
             return self._model
+
+    def _resolve_timeout(self, model: str | None) -> float:
+        """The bound for a consultation about to run on ``model``.
+
+        A construction-time number first, then
+        ``engines.consultant_timeout_seconds``, then the model's own
+        default from :func:`timeout_for_model`. Read per consultation for
+        the reason :meth:`_resolve_model` is: a bound captured at
+        construction is the constant that went stale when the model became
+        a Settings control.
+        """
+        if self._timeout is not None:
+            return float(self._timeout)
+        if self._config is not None:
+            try:
+                chosen = getattr(self._config, "consultant_timeout_seconds", None)
+            except Exception:  # noqa: BLE001 - a bad config must not lose the answer
+                logger.warning(
+                    "Could not read engines.consultant_timeout_seconds; "
+                    "using the model's default"
+                )
+                chosen = None
+            if chosen is not None:
+                return float(chosen)
+        return timeout_for_model(model)
 
     # ------------------------------------------------------------------
     # What the bridge asks before it offers the tools
@@ -590,10 +779,11 @@ class AgyConsultant:
     ) -> str:
         """Ask Antigravity one question and return its answer as text.
 
-        No tools and no repository access — ``context`` is how the caller
-        supplies what it already read. Two independent agents disagreeing
-        about a diff is information; one agent given a second chance to
-        browse the repository is not.
+        Web lookups and no repository access (AG-36) — ``context`` is how
+        the caller supplies what it already read. Two independent agents
+        disagreeing about a diff is information; one agent given a second
+        chance to browse the repository is not. A datasheet or a changelog
+        is another matter, and that is what the web tools are for.
 
         ``consultation_id`` is what :meth:`cancel` will be given for this
         call, and omitting it means "nothing will ask for this one by
@@ -608,19 +798,30 @@ class AgyConsultant:
         # (AG-21). A consultation has no history, no resumption and no
         # second turn, so it has no use for a root that outlives it — and
         # a fresh one means two consultations cannot collide over the one
-        # file that decides what their agent may do.
-        with roots.ephemeral(self._config_dir) as config_root:
-            translator, _ = await self._run(
-                prompt,
-                policy=_no_tools_or_fail(SECOND_OPINION_POLICY),
-                observer=observer,
-                timeout=self._timeout,
-                config_root=config_root,
-                consultation_id=consultation_id,
-            )
-        answer = translator.response_text().strip()
-        if not answer:
-            raise ConsultationError(_empty_answer_reason(translator))
+        # file that decides what their agent may do. Kept when it fails, as
+        # the image root is: AG-R-36's root went with the nineteen minutes
+        # that ended in an overflow, and an empty answer is checked inside
+        # the block so it counts as a failure here too.
+        model = self._resolve_model()
+        with roots.ephemeral(self._config_dir, keep_on_error=True) as config_root:
+            try:
+                translator, _ = await self._run(
+                    prompt,
+                    policy=_web_only_or_fail(SECOND_OPINION_POLICY),
+                    observer=observer,
+                    model=model,
+                    timeout=self._resolve_timeout(model),
+                    config_root=config_root,
+                    consultation_id=consultation_id,
+                )
+                answer = translator.response_text().strip()
+                if not answer:
+                    raise ConsultationError(_empty_answer_reason(translator))
+            except ConsultationError as exc:
+                raise ConsultationError(
+                    f"{exc} Its working files are kept at {config_root} "
+                    "until the next start."
+                ) from exc
         return answer
 
     async def generate_image(
@@ -675,12 +876,17 @@ class AgyConsultant:
         # picture away before copying it. Kept when anything here raises,
         # because those errors name a directory inside it and a reader who
         # goes to look should find something there.
+        # Never shorter than a text consultation on the same model: the
+        # image loop runs on that model too, so a slow model is slow here.
+        model = self._resolve_model()
+        image_timeout = max(self._image_timeout, self._resolve_timeout(model))
         with roots.ephemeral(self._config_dir, keep_on_error=True) as config_root:
             translator, frames = await self._run(
                 " ".join(instruction),
                 policy=IMAGE_POLICY,
                 observer=observer,
-                timeout=self._image_timeout,
+                model=model,
+                timeout=image_timeout,
                 config_root=config_root,
                 consultation_id=consultation_id,
             )
@@ -827,6 +1033,7 @@ class AgyConsultant:
         *,
         policy: StaticPolicy,
         observer: Any,
+        model: str | None,
         timeout: float,
         config_root: Path,
         consultation_id: str | None = None,
@@ -888,7 +1095,7 @@ class AgyConsultant:
         # here. Two reasons, and either would be enough: a consultation is
         # offered no MCP server, so it has no schema to read; and a read
         # granted around the static policy would falsify the header the
-        # asking model is handed — see `_no_tools_or_fail`.
+        # asking model is handed — see `_web_only_or_fail`.
         gate = AgyGateServer(
             self._socket_path(), policy=policy, config_dir=self._config_dir
         )
@@ -911,7 +1118,9 @@ class AgyConsultant:
         session = AgySession(
             self._repo_root,
             gate=gate,
-            model=self._resolve_model(),
+            # Resolved by the caller, once, so the bound and the model it
+            # was chosen for cannot disagree after a mid-call config save.
+            model=model,
             executable=self._executable,
             config_root=config_root,
         )
@@ -925,8 +1134,18 @@ class AgyConsultant:
         flight = _Flight(session=session)
         self._live[key] = flight
         stream: Any = None
+        clock: _FrameClock | None = None
+        loop = asyncio.get_running_loop()
+        ceiling = max(CONSULTATION_CEILING_SECONDS, timeout)
+        hard_deadline = loop.time() + ceiling
+        watchdog: asyncio.Timeout | None = None
+
+        def rearm() -> None:
+            # The silence bound from now, never past the ceiling.
+            watchdog.reschedule(min(loop.time() + timeout, hard_deadline))
+
         try:
-            async with asyncio.timeout(timeout):
+            async with asyncio.timeout(timeout) as watchdog:
                 await session.start()
                 # **The handshake is the only free look at the vendor's
                 # vocabulary** (AG-R-22). `init` has arrived and no prompt
@@ -952,7 +1171,13 @@ class AgyConsultant:
                     )
                     translator.note_unadvertised(missing)
                 stream = session.stream_frames(prompt)
+                clock = _FrameClock()
+                # From the prompt, not from the spawn: `init` has its own
+                # bound, and a slow start should not eat the model's.
+                rearm()
                 async for frame in stream:
+                    rearm()
+                    clock.note(frame)
                     frames.append(frame)
                     # The only pass over the stream. `response_text()`
                     # reads back what this accumulated, so skipping it for
@@ -966,10 +1191,29 @@ class AgyConsultant:
             # from a slow model. Read off the translator rather than
             # recomputed, so the tab and the answer cannot disagree.
             missing = tuple(getattr(translator, "unadvertised_tools", ()) or ())
+            # Which bound fired, because they mean different things: a
+            # silence is a model that stopped sending, the ceiling is one
+            # that never stopped.
+            when = watchdog.when() if watchdog is not None else None
+            if when is not None and when >= hard_deadline:
+                what = (
+                    f"Antigravity was still working after {ceiling:.0f}s, "
+                    "the most one consultation may run."
+                )
+            elif clock is not None and clock.count:
+                what = (
+                    f"Antigravity went quiet: nothing arrived for "
+                    f"{timeout:.0f}s after its last frame."
+                )
+            else:
+                what = f"Antigravity did not answer within {timeout:.0f}s."
             raise ConsultationError(
-                f"Antigravity did not answer within {timeout:.0f}s. The "
-                "consultation was abandoned and its process stopped."
+                f"{what} The consultation was abandoned and its process "
+                "stopped."
                 + (_renamed_tool_note(missing) if missing else "")
+                # What the stream did while the clock ran, so "still
+                # thinking" and "went silent" stop reading the same.
+                + (f" {clock.summary()}" if clock is not None else "")
             ) from exc
         except AgyNotInstalledError as exc:
             raise ConsultationError(str(exc)) from exc
@@ -986,12 +1230,18 @@ class AgyConsultant:
                 ) from exc
             raise ConsultationError(
                 f"The consultation failed: {' '.join(str(exc).split())[:400]}"
+                # How far it got, for every failure and not only a timeout:
+                # AG-R-36's overflow came after nineteen minutes of frames,
+                # and the message said nothing of them.
+                + (f" {clock.summary()}" if clock is not None else "")
             ) from exc
         finally:
             # Dropped before the teardown, so ⏹ cannot aim a close at a
             # session that is already closing — and cannot report
             # `stopping` for a consultation that is over.
             self._live.pop(key, None)
+            if clock is not None:
+                logger.info("agy consultation ended: %s", clock.summary())
             if stream is not None:
                 # A timeout abandons the loop mid-frame, and an async
                 # generator left suspended runs its `finally` whenever the

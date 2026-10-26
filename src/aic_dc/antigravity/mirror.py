@@ -21,7 +21,7 @@ this is the payoff.
 **They do not emit the same payloads**, and that is the trap this module
 is written around. A ``toolResult`` is
 ``{tool_use_id, status: "ok"|"error", preview, …}`` from the SDK pump and
-``{tool_use_id, name, status: "success"|"error", content, …}`` from the
+``{tool_use_id, name, status: "ok"|"error", content, …}`` from the
 ``agy`` pump. :func:`_result_text` and :func:`_result_failed` are the one
 place that knows both spellings; a second reader elsewhere is the quiet
 "looks fine, does nothing" failure this plan has now paid for four times.
@@ -477,12 +477,11 @@ def _compaction_entry(payload: dict[str, Any]) -> dict[str, Any]:
 
 #: Result-status strings that mean the call succeeded.
 #:
-#: Two spellings for one fact, because the two pumps chose differently —
-#: ``StepTranslator`` says ``"ok"`` and ``AgyTranslator`` says
-#: ``"success"``. Named here, once, rather than compared inline in two
-#: places: an unrecognised status must read as a failure, and a set that
-#: forgot one spelling would mark every successful ``agy`` tool call as an
-#: error in the browsed transcript while the live one showed it green.
+#: Both pumps now say ``"ok"``. ``AgyTranslator`` said ``"success"``
+#: until the webapp was found reading it as still running, and the old
+#: spelling is kept so a payload recorded before that change still reads
+#: as the success it was. Named here, once, rather than compared inline
+#: in two places: an unrecognised status must read as a failure.
 _RESULT_OK = frozenset({"ok", "success"})
 
 

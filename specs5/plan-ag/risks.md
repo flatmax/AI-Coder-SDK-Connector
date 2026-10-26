@@ -1206,6 +1206,46 @@ had.
   silently downgrading — which is the right direction, and is the reason this is a note rather than
   a fallback.
 
+**The timeout did not follow the model, until 2026-10-25.** Making the model a control left the
+bound a constant: `DEFAULT_TIMEOUT_SECONDS = 180.0` was sized for the Flash pin, so choosing Gemini 4
+Argon in Settings killed every large consultation at three minutes and reported it as *"did not
+answer"*. Argon on high effort is reported to think silently for 8–11 minutes on a large prompt and
+take 15–20 minutes to finish, and Google's own guidance is an HTTP timeout of at least 15–20 minutes.
+Those figures come from the user's research, **not from a measurement on this transport**. The bound
+is now resolved per consultation, next to the model: a constructor number, then
+`engines.consultant_timeout_seconds` in `app.json`, then `timeout_for_model()`, which gives
+`SLOW_MODEL_TIMEOUT_SECONDS = 1200` to any id containing `argon` and 180s otherwise. `-high` alone is
+deliberately not a marker, because the pin is `gemini-3.8-flash-high`. An image consultation gets at
+least the text bound for its model. The Claude side does not cut it short: the bundled CLI (2.1.299)
+defaults `MCP_TOOL_TIMEOUT` to 1e8 ms, and gives an in-process `sdk` server no idle timeout.
+
+What this does **not** do:
+
+- **Measure Argon.** 1200s is from someone else's figures. The first real Argon consultation should
+  confirm or correct it, as the first real image run was meant to correct the image bound.
+- **Know an inherited model.** `"auto"` passes no `--model`, so this code cannot tell that the
+  account's own choice is Argon, and it gets 180s. The `app.json` key is the way out of that.
+- **Offer a Settings control.** The key is only in `app.json`, editable in the Settings editor; there
+  is no picker for it beside the model's.
+- **Unblock the turn.** A 20-minute consultation still holds the asking Claude turn for 20 minutes.
+  Running long consultations in the background was considered and left for later as the bigger
+  change.
+
+**The bound became a silence bound, 2026-10-26.** The plan was to measure an Argon run's frames first,
+because a short "no frames for 5 min" bound would kill a model that thinks without sending anything.
+[AG-R-36](#ag-r-36)'s consultation showed the cost of waiting: it was still streaming its answer at
+19 min 3 s, 57 s inside the wall clock. The way round the measurement was to **keep each model's
+figure and change what it measures**. `rearm()` in `AgyConsultant._run` pushes the deadline forward
+on every frame, so 1200 s is now 1200 s *of silence*, which can never stop a consultation the wall
+clock would have let finish. `CONSULTATION_CEILING_SECONDS = 3600` bounds the whole, against a
+backend that keeps sending and never ends (antigravity-cli #594), and is raised to the silence bound
+when a configured one is longer. The message names the bound that fired, every failure carries the
+frame summary, and the bridge heartbeat reports "last activity Ns ago".
+
+What this still does **not** do: **tighten the silence bound.** That needs the measurement this
+replaced as a blocker: a real Argon-high run's frame summary, now in every message and in the log on
+success.
+
 ---
 
 <a id="ag-r-16"></a>
@@ -3225,3 +3265,48 @@ way it fails on a new name — they are the SDK's judgements, and `options.py` b
 then, `test_a_read_only_session_can_still_look_around` and
 `test_the_borrowed_set_does_not_bring_schedule` each pin one fact about `read_only()` and
 `deprecated()`, which catches a repeat of these two changes and not the next one.
+
+---
+
+<a id="ag-r-36"></a>
+## AG-R-36 — Two `agy` readers stopped at asyncio's 64 KiB line, and the closing frame passes it **(closed 2026-10-26)**
+
+**Seen live, 2026-10-26.** An Argon-high consultation ran for 19 min 3 s and returned only *"The
+consultation failed: Separator is found, but chunk is longer than limit"*. That is asyncio's own
+`readline()` error. `AgySession.start` built its subprocess with no `limit=`, so the stdout reader
+stopped at 64 KiB a line, and `agy` writes one NDJSON frame per line.
+
+**The belief it replaced:** that a long reply is a stream of short frames. It is, until the end. The
+`result` frame carries the **whole reply again** in `response` (`AgyTranslator._absorb_result`), so any
+reply past about 60 KB of JSON overflows on the frame that closes the turn, *after* every delta has
+streamed. The same session's earlier replies were 44 KB and 52,772 characters, so this one only had to
+be a little longer. The reply streamed in full into the consultation's tab, and the tab gave no sign
+that the consultation had failed. A fetched page in a tool result has the same shape. Which frame
+actually overflowed here was not recorded, because a text consultation's root is removed on error.
+
+**The gate server had the same fault, unseen.** `asyncio.start_unix_server` was also given no `limit=`,
+and each hook call is one JSON line carrying its arguments. A `write_to_file` past 64 KiB could not be
+read, so it was refused as unreadable and **never reached the dialog**. Found by looking for other
+readers, not in use; `TestTheRoundTrip` now sends a 200 KB write and fails without the fix.
+
+**Fixed:** `session.STREAM_LIMIT_BYTES` and `gate_server.PAYLOAD_LIMIT_BYTES`, both 64 MiB, which is a
+ceiling against a runaway line rather than an expected size. `TestALongReply` pushes a 200 KB `result`
+frame through the fake `agy`, and reproduced the live error before the fix.
+
+**The consultation tab now says how it ended.** Its answer card had no outcome badge, while the main
+card shows one, so a reply that streamed and then failed looked finished. The card now carries the
+main card's badge from the tab's terminal status (`subagent-tabs.js` § `consultationOutcome`):
+`✓ completed` at the foot, `failed` / `interrupted` / `status unknown` by the role label.
+
+What this does **not** do:
+
+- **Keep a failed consultation's record.** `roots.ephemeral` deletes a text consultation's root on
+  error (images pass `keep_on_error=True`), so `agy`'s copy of a failed reply is gone. The tab is the
+  only copy left, and it is lost on reload. **Closed 2026-10-26, later the same day:** the text path
+  now keeps its root on failure and names it in the message; see the README table.
+- **Handle a reply too large for Claude Code.** That limit is a different one, and the CLI already
+  handles it: the 52,772-character reply was saved to a file and the model was told how to read it.
+  Nothing is lost, so nothing is built for it here.
+- **Measure Argon for [AG-R-15](#ag-r-15).** If the failing frame was the `result`, Argon finished at
+  19 min 3 s, **57 s inside its 1200 s bound**. That is inferred, not measured, but it is the closest
+  figure there is, and it says the bound is tight rather than generous.

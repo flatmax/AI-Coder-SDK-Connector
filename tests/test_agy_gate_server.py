@@ -403,6 +403,37 @@ class TestTheRoundTrip:
         assert result == {"decision": "deny", "reason": "the user declined"}
         assert len(recorder.requests()) == 1
 
+    def test_a_call_too_long_for_one_default_line_still_reaches_the_dialog(
+        self, wired
+    ):
+        """A large write is one line on the socket, and not a short one.
+
+        asyncio's reader stops at 64 KiB a line by default, which a file
+        written in one call passes easily. Past it the call could not be
+        read, and an unreadable call is refused — so the user was never
+        asked about it.
+        """
+        recorder, gate, server, config_dir = wired
+        big = payload(
+            tool="write_to_file",
+            args={"TargetFile": "big.txt", "CodeContent": "x" * 200_000},
+        )
+
+        async def go():
+            await server.start()
+            server.claim(OURS)
+            loop = asyncio.get_running_loop()
+            decision = loop.run_in_executor(
+                None, lambda: hook.decide(big, config_dir=config_dir)
+            )
+            await answer_next(gate, recorder, {"action": "allow"})
+            result = await decision
+            await server.stop()
+            return result
+
+        assert asyncio.run(go())["decision"] == "allow"
+        assert len(recorder.requests()) == 1
+
     def test_a_stranger_never_reaches_the_dialog(self, wired):
         """The property that makes a global hook shippable."""
         recorder, _gate, server, config_dir = wired

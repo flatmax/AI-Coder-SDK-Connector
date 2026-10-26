@@ -116,6 +116,31 @@ describe('a live subagent gets a tab', () => {
     expect(tab.messages[0].system_event).toBe(true);
   });
 
+  it('puts a consultation\'s question under the opening line', async () => {
+    const p = mountPanel();
+    const reqId = await sendAndGetRequestId(p);
+    pushEvent('subagent-event', subagentEvent(reqId, {
+      prompt: 'Is the cache keyed right?',
+    }));
+    await settle(p);
+    // A later row without the prompt must not drop or duplicate the card.
+    pushEvent('subagent-event', subagentEvent(reqId, { type: 'progress' }));
+    await settle(p);
+    const tab = p._tabs.get('agent-1');
+    expect(tab.messages[0].subagent_seed).toBe(true);
+    const cards = tab.messages.filter((m) => m.subagent_prompt);
+    expect(cards).toHaveLength(1);
+    expect(tab.messages[1]).toBe(cards[0]);
+    expect(cards[0].content).toBe('Is the cache keyed right?');
+    expect(cards[0].system_event).toBeFalsy();
+  });
+
+  it('draws no question card for a subagent that sent none', async () => {
+    const p = mountPanel();
+    const { tab } = await withSubagent(p);
+    expect(tab.messages.some((m) => m.subagent_prompt)).toBe(false);
+  });
+
   it('leaves the row in Main alone — the tab is an addition', async () => {
     const p = mountPanel();
     await withSubagent(p);
