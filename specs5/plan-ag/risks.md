@@ -3250,3 +3250,47 @@ way it fails on a new name — they are the SDK's judgements, and `options.py` b
 then, `test_a_read_only_session_can_still_look_around` and
 `test_the_borrowed_set_does_not_bring_schedule` each pin one fact about `read_only()` and
 `deprecated()`, which catches a repeat of these two changes and not the next one.
+
+---
+
+<a id="ag-r-36"></a>
+## AG-R-36 — Two `agy` readers stopped at asyncio's 64 KiB line, and the closing frame passes it **(closed 2026-10-26)**
+
+**Seen live, 2026-10-26.** An Argon-high consultation ran for 19 min 3 s and returned only *"The
+consultation failed: Separator is found, but chunk is longer than limit"*. That is asyncio's own
+`readline()` error. `AgySession.start` built its subprocess with no `limit=`, so the stdout reader
+stopped at 64 KiB a line, and `agy` writes one NDJSON frame per line.
+
+**The belief it replaced:** that a long reply is a stream of short frames. It is, until the end. The
+`result` frame carries the **whole reply again** in `response` (`AgyTranslator._absorb_result`), so any
+reply past about 60 KB of JSON overflows on the frame that closes the turn, *after* every delta has
+streamed. The same session's earlier replies were 44 KB and 52,772 characters, so this one only had to
+be a little longer. The reply streamed in full into the consultation's tab, and the tab gave no sign
+that the consultation had failed. A fetched page in a tool result has the same shape. Which frame
+actually overflowed here was not recorded, because a text consultation's root is removed on error.
+
+**The gate server had the same fault, unseen.** `asyncio.start_unix_server` was also given no `limit=`,
+and each hook call is one JSON line carrying its arguments. A `write_to_file` past 64 KiB could not be
+read, so it was refused as unreadable and **never reached the dialog**. Found by looking for other
+readers, not in use; `TestTheRoundTrip` now sends a 200 KB write and fails without the fix.
+
+**Fixed:** `session.STREAM_LIMIT_BYTES` and `gate_server.PAYLOAD_LIMIT_BYTES`, both 64 MiB, which is a
+ceiling against a runaway line rather than an expected size. `TestALongReply` pushes a 200 KB `result`
+frame through the fake `agy`, and reproduced the live error before the fix.
+
+**The consultation tab now says how it ended.** Its answer card had no outcome badge, while the main
+card shows one, so a reply that streamed and then failed looked finished. The card now carries the
+main card's badge from the tab's terminal status (`subagent-tabs.js` § `consultationOutcome`):
+`✓ completed` at the foot, `failed` / `interrupted` / `status unknown` by the role label.
+
+What this does **not** do:
+
+- **Keep a failed consultation's record.** `roots.ephemeral` deletes a text consultation's root on
+  error (images pass `keep_on_error=True`), so `agy`'s copy of a failed reply is gone. The tab is the
+  only copy left, and it is lost on reload. Open, small; see the README table.
+- **Handle a reply too large for Claude Code.** That limit is a different one, and the CLI already
+  handles it: the 52,772-character reply was saved to a file and the model was told how to read it.
+  Nothing is lost, so nothing is built for it here.
+- **Measure Argon for [AG-R-15](#ag-r-15).** If the failing frame was the `result`, Argon finished at
+  19 min 3 s, **57 s inside its 1200 s bound**. That is inferred, not measured, but it is the closest
+  figure there is, and it says the bound is tight rather than generous.

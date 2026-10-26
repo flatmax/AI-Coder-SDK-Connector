@@ -42,6 +42,9 @@ FAKE_AGY = textwrap.dedent(
     '''
     import json, sys, os
     conv = "{conv}"
+    # Padding for the closing frame's `response`, so a test can make one
+    # line longer than a reader's default limit.
+    pad = "x" * int(os.environ.get("FAKE_AGY_REPLY_PAD", "0"))
     def emit(o):
         sys.stdout.write(json.dumps(o) + "\\n"); sys.stdout.flush()
     # Chatter on stderr, which a real agy also produces and which will
@@ -65,7 +68,7 @@ FAKE_AGY = textwrap.dedent(
             "step_type": "agent_response", "text_delta": "the file."}}}})
         emit({{"event": "result", "result": {{
             "conversation_id": conv, "status": "SUCCESS",
-            "response": "Reading the file.", "num_turns": 1,
+            "response": "Reading the file." + pad, "num_turns": 1,
             "usage": {{"total_tokens": 1234}}}}}})
     '''
 ).format(conv=CONV)
@@ -475,6 +478,32 @@ class TestItSurvivesAChattySubprocess:
                 return out
 
         assert "streamComplete" in names(asyncio.run(go()))
+
+
+class TestALongReply:
+    def test_a_frame_past_the_default_line_limit_is_read(
+        self, wired, monkeypatch
+    ):
+        """The closing frame carries the whole reply, in one line.
+
+        asyncio's reader stops at 64 KiB a line unless told otherwise, so
+        a reply past about 60 KB failed on the frame that ends the turn —
+        after every delta had streamed — with "Separator is found, but
+        chunk is longer than limit".
+        """
+        monkeypatch.setenv("FAKE_AGY_REPLY_PAD", str(200_000))
+        session, _server, _cfg, _events = wired
+
+        async def go():
+            await session.start()
+            t = AgyTranslator("r1")
+            out = [e async for e in session.stream_turn("x", translator=t)]
+            await session.close()
+            return out
+
+        events = asyncio.run(go())
+        assert events[-1].name == "streamComplete"
+        assert len(events[-1].payload["response"]) == len("Reading the file.") + 200_000
 
 
 class TestTheAgentIsInTheRepository:

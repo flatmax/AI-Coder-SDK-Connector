@@ -78,6 +78,19 @@ logger = logging.getLogger(__name__)
 #: and the failure this guards against is a hang, not a slow start.
 INIT_TIMEOUT_SECONDS = 120.0
 
+#: The longest single NDJSON frame the stdout reader will accept.
+#:
+#: asyncio's default is 64 KiB, and ``agy`` writes frames longer than that
+#: in ordinary use: its ``result`` frame carries the *whole* reply again in
+#: ``response``, after the deltas that streamed it, so any reply past about
+#: 60 KB overflows on the frame that closes the turn. It did, on
+#: 2026-10-26: a nineteen-minute consultation streamed its answer in full
+#: and then failed with ``Separator is found, but chunk is longer than
+#: limit``, which reached the caller as the whole of the consultation.
+#: A fetched page in a tool result is the same shape. 64 MiB is a ceiling
+#: against a runaway line, not a size anything is expected to reach.
+STREAM_LIMIT_BYTES = 64 * 1024 * 1024
+
 #: Passed to ``--print-timeout``. It bounds the whole turn, so it must
 #: outlast any permission dialog — the default is 5m, which a user reading
 #: a diff can exceed without trying.
@@ -371,6 +384,7 @@ class AgySession:
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                limit=STREAM_LIMIT_BYTES,
             )
         except FileNotFoundError as exc:
             raise AgyNotInstalledError(

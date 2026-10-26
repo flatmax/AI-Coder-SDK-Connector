@@ -97,6 +97,16 @@ UNREADABLE = {
 #: ended in the same merged hooks file (AG-R-16).
 HOOK_TERMINATION = "TERMINAL_CUSTOM_HOOK"
 
+#: The longest hook payload the socket reader will accept, in bytes.
+#:
+#: One call is one line, and a call carries its arguments — a file written
+#: in one ``write_to_file`` is all in there. asyncio's default of 64 KiB a
+#: line is well inside an ordinary file, and a payload past it could not
+#: be read, so it was refused as unreadable and never reached the dialog.
+#: Matches ``session.STREAM_LIMIT_BYTES``, which bounds the same vendor's
+#: other output: a ceiling against a runaway line, not an expected size.
+PAYLOAD_LIMIT_BYTES = 64 * 1024 * 1024
+
 
 class Refusals:
     """Single-use tokens, minted per denial and spent when one comes home.
@@ -605,7 +615,9 @@ class AgyGateServer:
         # this machine has live entries in the same directory.
         registry.reap_stale(self._config_dir)
         self._server = await asyncio.start_unix_server(
-            self._handle, path=str(self._socket_path)
+            self._handle,
+            path=str(self._socket_path),
+            limit=PAYLOAD_LIMIT_BYTES,
         )
         # AG-R-14. Published *before* `agy` is launched, which is what makes
         # it a fix rather than a narrower race: a conversation claim can be
