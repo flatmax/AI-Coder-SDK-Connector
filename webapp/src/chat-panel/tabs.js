@@ -112,6 +112,39 @@ export function findBackgroundTurn(panel, requestId) {
   return null;
 }
 
+/**
+ * The block source of a settled turn main is following up on, or null.
+ *
+ * The tab itself when it is the tab's lingering turn, the parked record when
+ * a newer turn has moved it aside. Either way its `turnBlocks` hold the whole
+ * turn — what the settled card froze plus what main is doing now — so the
+ * card can draw them live in its place (`renderMessage` in rendering.js).
+ */
+export function followUpSource(tab, requestId) {
+  if (!tab || !requestId) return null;
+  if (tab.currentRequestId === requestId && !tab.streaming) {
+    return tab.followUpStartedAt != null ? tab : null;
+  }
+  const parked = tab.backgroundTurns?.get(requestId);
+  return parked?.followUpStartedAt != null ? parked : null;
+}
+
+/**
+ * Whether main is following up on any of this tab's settled turns.
+ *
+ * Busy as far as the strip's indicator and the run-timer ticker are concerned,
+ * though not `streaming`: the composer stays open, because a prompt sent now
+ * is one the CLI folds into main's reply rather than one it refuses.
+ */
+export function tabIsFollowingUp(tab) {
+  if (!tab) return false;
+  if (tab.followUpStartedAt != null) return true;
+  for (const parked of tab.backgroundTurns?.values() ?? []) {
+    if (parked.followUpStartedAt != null) return true;
+  }
+  return false;
+}
+
 // ---------------------------------------------------------------
 // Tab activation, close, overflow menu
 // ---------------------------------------------------------------
@@ -335,6 +368,9 @@ export function renderTabStrip(panel) {
           // aren't currently looking at.
           const tab = panel._tabs.get(tabId);
           const streaming = !!(tab && tab.streaming);
+          // Main following up on a subagent's hand-back is work happening
+          // too, and the subagent's own tab has just gone quiet.
+          const busy = streaming || tabIsFollowingUp(tab);
           const readOnly = !!(tab && tab.readOnly);
           // A live subagent's feed, as opposed to an archived transcript
           // read off disk. Both are read-only; only this one can still be
@@ -374,7 +410,7 @@ export function renderTabStrip(panel) {
               class=${cls}
               role="tab"
               aria-selected=${active}
-              aria-busy=${streaming}
+              aria-busy=${busy}
               data-tab-id=${tabId}
               @click=${() => onTabClick(panel, tabId)}
               title=${tooltip}
@@ -397,7 +433,7 @@ export function renderTabStrip(panel) {
                   onTabContextClick(panel, tabId);
                 }
               }}
-            >📊</span>`}${streaming
+            >📊</span>`}${busy
               ? html`<span
                   class="tab-streaming-indicator"
                   aria-hidden="true"
@@ -514,6 +550,7 @@ export function renderOverflowMenu(panel, tabs) {
         const active = tabId === panel._activeTabId;
         const tab = panel._tabs.get(tabId);
         const streaming = !!(tab && tab.streaming);
+        const busy = streaming || tabIsFollowingUp(tab);
         const tooltip = label;
         return html`
           <button
@@ -521,9 +558,9 @@ export function renderOverflowMenu(panel, tabs) {
             role="menuitem"
             data-tab-id=${tabId}
             title=${tooltip}
-            aria-busy=${streaming}
+            aria-busy=${busy}
             @click=${() => onOverflowItemClick(panel, tabId)}
-          >${streaming
+          >${busy
             ? html`<span
                 class="tab-streaming-indicator"
                 aria-hidden="true"

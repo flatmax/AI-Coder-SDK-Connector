@@ -74,6 +74,7 @@ import {
   findBackgroundTurn,
   findTabForRequest,
   loadSubagentFeedIfEmpty,
+  tabIsFollowingUp,
 } from './tabs.js';
 import { peerHeaderOf } from './peer-conversation.js';
 import { formatResetTime, limitTypeLabel } from '../rate-limit.js';
@@ -183,7 +184,7 @@ export function startStreamTimerTick(panel) {
   panel._streamTimerInterval = setInterval(() => {
     let anyActive = false;
     for (const tab of panel._tabs.values()) {
-      if (tab.streamStartedAt != null && tab.streaming) {
+      if (hasLiveTimer(tab)) {
         anyActive = true;
         break;
       }
@@ -228,9 +229,17 @@ export function stopStreamTimerTick(panel) {
  */
 export function maybeStopStreamTimerTick(panel) {
   for (const tab of panel._tabs.values()) {
-    if (tab.streamStartedAt != null && tab.streaming) return;
+    if (hasLiveTimer(tab)) return;
   }
   stopStreamTimerTick(panel);
+}
+
+/**
+ * Whether a tab has a clock on screen that the ticker must keep advancing:
+ * the turn it is streaming, or a settled turn main is following up on.
+ */
+function hasLiveTimer(tab) {
+  return (tab.streamStartedAt != null && tab.streaming) || tabIsFollowingUp(tab);
 }
 
 // ---------------------------------------------------------------
@@ -322,9 +331,16 @@ function liveOwner(panel, requestId) {
 export function parkBackgroundTurn(tab) {
   const requestId = tab?.currentRequestId;
   if (!requestId || tab.streaming) return false;
-  tab.backgroundTurns.set(requestId, { requestId, turnBlocks: tab.turnBlocks });
+  // A follow-up in progress is not carried along: the send hands main to the
+  // new turn, and the CLI folds the prompt into the reply main was writing.
+  tab.backgroundTurns.set(requestId, {
+    requestId,
+    turnBlocks: tab.turnBlocks,
+    followUpStartedAt: null,
+  });
   tab.turnBlocks = makeTurnBlocks();
   tab.currentRequestId = null;
+  tab.followUpStartedAt = null;
   return true;
 }
 
@@ -349,6 +365,32 @@ export function parkBackgroundTurn(tab) {
 function markBlocksDirty(panel, owner) {
   const mirrored = mirrorSubagentBlocks(panel, owner.source);
   if (owner.active || mirrored) panel.requestUpdate();
+}
+
+/**
+ * Notice main working on a turn whose result has already landed.
+ *
+ * A turn that leaves a background subagent running settles at its first
+ * result: footer drawn, spinner stopped. When the subagent hands back, the
+ * CLI wakes main to act on the report, and that reply can run for a minute
+ * of tool calls before its `continuation` result revises the footer. Its
+ * blocks were always folded into the turn, but nothing drew them — the
+ * subagent's tab had gone green, Main showed a finished card, and the HUD
+ * popped up out of apparent silence.
+ *
+ * Main-scope output (no `agent_id`) on a settled turn is that reply, so it
+ * stamps the start of the follow-up; `renderMessage` draws the card live from
+ * then until `settleTurnMessage` clears it.
+ */
+function noteFollowUp(panel, owner, requestId, agentId) {
+  if (agentId) return;
+  const { tab, source } = owner;
+  const settled = owner.background
+    || (tab.currentRequestId === requestId && !tab.streaming);
+  if (!settled || source.followUpStartedAt != null) return;
+  source.followUpStartedAt = Date.now();
+  startStreamTimerTick(panel);
+  panel.requestUpdate();
 }
 
 // ---------------------------------------------------------------
@@ -389,6 +431,7 @@ function routeChunk(panel, detail, kind) {
   if (!owner) return;
   const { tab } = owner;
   if (!stageChunk(owner.turn, payload, kind)) return;
+  noteFollowUp(panel, owner, requestId, payload.agent_id);
   scheduleFlush(panel);
   // Apply synchronously in addition to scheduling the rAF coalesce. The rAF
   // caps re-render rate for rapid chunks; the sync path is insurance against
@@ -475,7 +518,9 @@ export function onToolUse(panel, event) {
   const { requestId, data } = event.detail || {};
   const owner = liveOwner(panel, requestId);
   if (!owner || !data) return;
-  if (applyToolUse(owner.turn, data)) markBlocksDirty(panel, owner);
+  if (!applyToolUse(owner.turn, data)) return;
+  noteFollowUp(panel, owner, requestId, data.agent_id);
+  markBlocksDirty(panel, owner);
 }
 
 /**
@@ -1208,6 +1253,8 @@ function settleBackgroundTurn(panel, requestId, result, backgroundTasks) {
  * turn under a second footer, and the subagent row with it.
  */
 function settleTurnMessage(panel, tab, source, requestId, result, { durationMs }) {
+  // Whatever main was following up on, this result is its end.
+  source.followUpStartedAt = null;
   // Drain anything staged but not yet applied: the engine can send the
   // result immediately after its last chunk, before the rAF fires.
   drainChunks(source.turnBlocks);

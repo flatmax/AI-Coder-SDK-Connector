@@ -98,7 +98,7 @@ import {
   renderPeerBanner,
 } from './peer-conversation.js';
 import { renderPermissionModeSelector } from './permission-mode.js';
-import { renderTabStrip } from './tabs.js';
+import { followUpSource, renderTabStrip, tabIsFollowingUp } from './tabs.js';
 import { formatRunDuration } from './helpers.js';
 import {
   computeSearchMatches,
@@ -395,18 +395,35 @@ function renderInputSurface(panel) {
             >
               ⏹ Stop
             </button>`
-          : html`<button
-              class="send-button"
-              ?disabled=${!panel.rpcConnected || peerLocked ||
-              (!panel._input.trim() && panel._pendingImages.length === 0)}
-              @click=${() => send(panel)}
-              aria-label="Send message"
-            >
-              Send
-            </button>`}
+          : renderSendButton(panel, peerLocked)}
       </div>
     </div>
   `;
+}
+
+/**
+ * The Send button, busy-looking while main follows up on a settled turn.
+ *
+ * Busy-looking and nothing more: it stays Send and stays enabled. Stop would
+ * be a lie — there is no active turn for `cancel_streaming` to interrupt once
+ * the turn's first result has landed, so it would answer `idle` while main
+ * kept working — and a message sent now is accepted and folded into main's
+ * reply, which the tooltip says.
+ */
+function renderSendButton(panel, peerLocked) {
+  const followingUp = tabIsFollowingUp(panel._tabs.get(panel._activeTabId));
+  return html`<button
+    class="send-button${followingUp ? ' following-up' : ''}"
+    ?disabled=${!panel.rpcConnected || peerLocked ||
+    (!panel._input.trim() && panel._pendingImages.length === 0)}
+    @click=${() => send(panel)}
+    aria-label=${followingUp ? 'Send message (main is following up)' : 'Send message'}
+    title=${followingUp
+      ? 'Main is following up on a subagent\'s report — a message now joins its reply'
+      : nothing}
+  >${followingUp
+    ? html`<span class="send-busy-indicator" aria-hidden="true"></span>`
+    : ''}Send</button>`;
 }
 
 /** What stands in for the input surface on a subagent transcript. */
@@ -567,11 +584,28 @@ export function renderMessage(panel, msg, index) {
   // through the edit-block segmenter so edit
   // blocks become visual cards instead of raw
   // prose.
+  // A settled turn main has been woken to follow up on draws its live blocks
+  // instead of the frozen ones — the frozen list stops at the first result —
+  // with a running clock under them (`noteFollowUp` in streaming.js).
+  const followUp = msg.role === 'assistant' && Array.isArray(msg.blocks)
+    ? followUpSource(panel._tabs.get(panel._activeTabId), msg.requestId)
+    : null;
   let bodyHtml;
   if (msg.role === 'user' && !msg.system_event) {
     bodyHtml = html`
       <div class="md-content">
         ${unsafeHTML(renderMarkdown(peer ? peerBodyOf(msg.content) : msg.content))}
+      </div>
+    `;
+  } else if (followUp) {
+    bodyHtml = html`
+      ${renderTurnBlocks(panel, followUp.turnBlocks.blocks, {
+        subagents: followUp.turnBlocks.subagents,
+        settled: false,
+      })}
+      <div class="turn-following-up">
+        <span class="turn-waiting">Following up on a subagent's report…</span>
+        ${renderRunTimer(Math.max(0, Date.now() - followUp.followUpStartedAt), true)}
       </div>
     `;
   } else if (msg.role === 'assistant' && Array.isArray(msg.blocks)) {

@@ -1433,6 +1433,21 @@ export const STYLES = css`
     background: #f85149;
     color: #fff;
   }
+  /* Main following up on a subagent's hand-back. Still Send, but showing
+   * work — and not dimmed to the empty-input level, which would hide it. */
+  .send-button.following-up:disabled {
+    opacity: 0.75;
+  }
+  .send-busy-indicator {
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: currentColor;
+    margin-right: 0.4rem;
+    vertical-align: middle;
+    animation: tab-pulse 1.5s ease-in-out infinite;
+  }
 
   /* What sits where the input row would be on a subagent transcript.
    * Quiet and unbordered: it explains an absence, it is not a warning. */
@@ -2303,6 +2318,14 @@ export const STYLES = css`
     color: var(--text-secondary, #8b949e);
     font-style: italic;
     opacity: 0.8;
+  }
+  /* Main working on a settled turn after a subagent handed back: the
+   * waiting line and its live clock, at the bottom of the turn's blocks. */
+  .turn-following-up {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-top: 0.5rem;
   }
   /* Text blocks carry .md-content too, so the markdown
    * rules already apply. This only manages the spacing

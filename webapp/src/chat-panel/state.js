@@ -107,6 +107,12 @@ export function makeTabState() {
     // `parkBackgroundTurn` in streaming.js. Deleted when the engine reports
     // that turn's background work finished.
     backgroundTurns: new Map(),
+    // When main began following up on this tab's settled turn: a background
+    // subagent handed back after the turn's result, and main is acting on its
+    // report. The turn's card shows its live blocks and a running timer until
+    // the continuation result lands — see `noteFollowUp` in streaming.js. A
+    // parked record carries the same field. Null when main is not following up.
+    followUpStartedAt: null,
     // Run-timer start stamp. Set to Date.now() the
     // moment a turn's stream is armed on this tab
     // (send, resume-after-reconnect, agent spawn /
