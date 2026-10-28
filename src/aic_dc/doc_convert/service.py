@@ -318,6 +318,70 @@ class DocConvert:
             return False
 
     # ------------------------------------------------------------------
+    # export_svg_to_pptx — SVG viewer's "Export as PowerPoint"
+    # ------------------------------------------------------------------
+
+    def export_svg_to_pptx(
+        self, svg_text: str, path: str | None = None
+    ) -> dict[str, Any]:
+        """Convert SVG source to a .pptx of native, editable shapes.
+
+        ``path`` is the SVG's repo-relative path. It names the
+        download and anchors relative ``<image>`` hrefs, which
+        resolve only to files inside the repo. Nothing is
+        written to disk, so — unlike ``convert_files`` — the
+        call is open to collab participants.
+
+        Returns ``{"data": base64, "filename", "warnings"}``, or
+        ``{"error": message}`` when python-pptx is missing or
+        the SVG can't be converted.
+        """
+        import base64
+
+        if not self._probe_import("pptx"):
+            return {
+                "error": (
+                    "PowerPoint export needs python-pptx — install "
+                    "it with: pip install \"aic-dc[docs-convert]\""
+                ),
+            }
+        from .svg_to_pptx import SvgExportError, svg_to_pptx
+
+        root = self._root().resolve()
+        base_dir = root
+        stem = "drawing"
+        if path:
+            source = Path(path)
+            stem = source.stem or stem
+            candidate = (root / source).parent.resolve()
+            if candidate.is_relative_to(root):
+                base_dir = candidate
+
+        def resolve_href(href: str) -> bytes | None:
+            if "://" in href or href.startswith("/"):
+                return None
+            target = (base_dir / href.split("#", 1)[0]).resolve()
+            if not target.is_relative_to(root) or not target.is_file():
+                return None
+            try:
+                return target.read_bytes()
+            except OSError:
+                return None
+
+        try:
+            data, warnings = svg_to_pptx(svg_text or "", resolve_href)
+        except SvgExportError as exc:
+            return {"error": str(exc)}
+        except Exception as exc:
+            logger.exception("SVG → PowerPoint export failed")
+            return {"error": f"PowerPoint export failed: {exc}"}
+        return {
+            "data": base64.b64encode(data).decode("ascii"),
+            "filename": f"{stem}.pptx",
+            "warnings": warnings,
+        }
+
+    # ------------------------------------------------------------------
     # scan_convertible_files — repository walk + status classification
     # ------------------------------------------------------------------
 

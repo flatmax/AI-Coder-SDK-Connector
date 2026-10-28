@@ -317,6 +317,7 @@ Right-clicking on the right (editable) panel opens a context menu. Some actions 
 |---|---|---|
 | Copy as PNG | Always | Renders the current modified SVG to a canvas and copies as PNG to clipboard |
 | Copy as SVG | Always | Copies the current modified SVG source to the clipboard as text — same serialized form a save would produce (handle overlay stripped, pan-zoom wrapper unwrapped, externalized image hrefs intact) |
+| Export as PowerPoint | Always | Downloads a one-slide `.pptx` of native, editable PowerPoint shapes built from the current modified SVG — see [Export as PowerPoint](#export-as-powerpoint) |
 | Make horizontal / Make vertical | Exactly one selection of a snappable shape | Snap a line, two-point polyline, or single-segment straight path to be horizontal or vertical |
 | Align horizontal (left / center / right) | Two or more selected elements | Translate every selected element so its left edge / horizontal center / right edge aligns with the union bbox's |
 | Align vertical (top / middle / bottom) | Two or more selected elements | Translate every selected element so its top edge / vertical middle / bottom edge aligns with the union bbox's |
@@ -354,6 +355,13 @@ Success and failure communicated via a toast event dispatched from the viewer. A
 Available via two paths:
 - Context menu
 - Keyboard shortcut
+## Export as PowerPoint
+Neither copy gives editable objects in PowerPoint for the web, which accepts no vector paste from outside Office. The export downloads a file it can open instead; the user opens it, selects all, copies, and pastes into the target deck, where the shapes stay editable.
+- Sends the same serialised SVG Copy as SVG uses, plus the repo-relative path, to `DocConvert.export_svg_to_pptx` (see [Document Convert](../4-features/doc-convert.md#svg-to-powerpoint-export))
+- Decodes the returned base64 and downloads it through a synthesized link, named after the SVG with a `.pptx` extension
+- The backend's warnings — features with no PowerPoint equivalent that were dropped — ride along in the toast, which is then a warning rather than a success, so an approximation is never silent
+- An error result (python-pptx not installed, unparseable SVG) shows as an error toast and downloads nothing
+
 ## SVG ↔ Text Diff Mode Toggle
 
 SVG files can be viewed in either the visual SVG editor or the Monaco text diff editor. Two buttons enable bidirectional switching:

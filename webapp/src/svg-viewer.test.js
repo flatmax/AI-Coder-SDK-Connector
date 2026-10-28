@@ -1408,3 +1408,98 @@ describe('SvgViewer viewBox mirroring', () => {
     expect(el._syncingViewBox).toBe(false);
   });
 });
+// ---------------------------------------------------------------------------
+// Export as PowerPoint
+// ---------------------------------------------------------------------------
+
+describe('SvgViewer export as PowerPoint', () => {
+  let toasts;
+  let onToast;
+  let clicked;
+
+  beforeEach(() => {
+    toasts = [];
+    onToast = (e) => toasts.push(e.detail);
+    window.addEventListener('aic-toast', onToast);
+    clicked = [];
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(
+      function () {
+        clicked.push(this.download);
+      },
+    );
+    URL.createObjectURL = vi.fn(() => 'blob:fake');
+    URL.revokeObjectURL = vi.fn();
+  });
+
+  afterEach(() => {
+    window.removeEventListener('aic-toast', onToast);
+    vi.restoreAllMocks();
+  });
+
+  async function openWith(exportImpl) {
+    setFakeRpc({
+      'Repo.get_file_content': vi.fn(async () => svgFixture('x')),
+      'DocConvert.export_svg_to_pptx': exportImpl,
+    });
+    const el = mountViewer();
+    await settle(el);
+    await el.openFile({ path: 'docs/diagram.svg' });
+    await settle(el);
+    return el;
+  }
+
+  it('offers the action in the context menu', async () => {
+    const el = await openWith(vi.fn());
+    el.shadowRoot.querySelector('.pane-right').dispatchEvent(
+      new MouseEvent('contextmenu', { bubbles: true, cancelable: true }),
+    );
+    await settle(el);
+    const items = [
+      ...el.shadowRoot.querySelectorAll('.context-menu-item'),
+    ].map((b) => b.textContent.trim());
+    expect(items).toContain('📊 Export as PowerPoint');
+  });
+
+  it('sends the SVG and path, then downloads the result', async () => {
+    const exportRpc = vi.fn(async () => ({
+      uuid: {
+        data: btoa('PK'),
+        filename: 'diagram.pptx',
+        warnings: [],
+      },
+    }));
+    const el = await openWith(exportRpc);
+    await el._exportAsPptx();
+    const [svgText, path] = exportRpc.mock.calls[0];
+    expect(svgText).toContain('<svg');
+    expect(path).toBe('docs/diagram.svg');
+    expect(clicked).toEqual(['diagram.pptx']);
+    expect(toasts.at(-1)).toEqual({
+      message: 'Downloaded diagram.pptx',
+      type: 'success',
+    });
+  });
+
+  it('shows the backend warnings with the download', async () => {
+    const el = await openWith(async () => ({
+      data: btoa('PK'),
+      filename: 'diagram.pptx',
+      warnings: ['Clip paths were ignored'],
+    }));
+    await el._exportAsPptx();
+    expect(toasts.at(-1).type).toBe('warning');
+    expect(toasts.at(-1).message).toContain('Clip paths were ignored');
+  });
+
+  it('reports an error result without downloading', async () => {
+    const el = await openWith(async () => ({
+      error: 'PowerPoint export needs python-pptx',
+    }));
+    await el._exportAsPptx();
+    expect(clicked).toEqual([]);
+    expect(toasts.at(-1)).toEqual({
+      message: 'PowerPoint export needs python-pptx',
+      type: 'error',
+    });
+  });
+});
