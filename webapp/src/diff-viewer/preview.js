@@ -454,9 +454,92 @@ export function markImageFailed(host, img, path, err, generation) {
 }
 
 /**
+ * GitHub-style heading slug: lowercase, punctuation
+ * dropped, whitespace runs to hyphens.
+ */
+export function headingSlug(text) {
+  return String(text || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\s_-]/gu, '')
+    .replace(/\s+/g, '-');
+}
+
+/**
+ * Normalise heading / TOC-entry text for comparison.
+ * Strips a leading section number ("4.1", "2.") so a
+ * Word-exported TOC entry matches an unnumbered
+ * markdown heading.
+ */
+function _normaliseHeadingText(text) {
+  return String(text || '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/^\d+(\.\d+)*\.?\s+/, '')
+    .toLowerCase();
+}
+
+/**
+ * Find the element a fragment-only link points at
+ * inside the preview pane. Tries, in order: an element
+ * with that id or name; a heading whose slug matches;
+ * a heading whose text matches the link's text. The
+ * last covers documents converted from Word, whose TOC
+ * links target `_Toc…` bookmarks that didn't survive
+ * conversion — the entry text ("1.5 External
+ * References 8", trailing page number) still names
+ * the heading.
+ */
+export function findFragmentTarget(pane, fragment, linkText) {
+  if (!pane) return null;
+  let frag = fragment;
+  try {
+    frag = decodeURIComponent(fragment);
+  } catch (_) {}
+  if (frag) {
+    for (const el of pane.querySelectorAll('[id], a[name]')) {
+      if (el.id === frag || el.getAttribute('name') === frag) {
+        return el;
+      }
+    }
+  }
+  const headings = [...pane.querySelectorAll('h1, h2, h3, h4, h5, h6')];
+  if (frag) {
+    const slug = headingSlug(frag);
+    const bySlug = headings.find(
+      (h) => headingSlug(h.textContent) === slug,
+    );
+    if (bySlug) return bySlug;
+  }
+  const raw = String(linkText || '').replace(/\s+/g, ' ').trim();
+  if (!raw) return null;
+  const wanted = _normaliseHeadingText(raw);
+  const withoutPage = _normaliseHeadingText(raw.replace(/\s+\d+$/, ''));
+  return (
+    headings.find((h) => {
+      const t = _normaliseHeadingText(h.textContent);
+      return t === wanted || t === withoutPage;
+    }) || null
+  );
+}
+
+/**
+ * Scroll the preview pane so `target` sits at its top.
+ * The pane lives in a shadow root, so the browser's own
+ * fragment navigation can't reach it.
+ */
+function _scrollPaneTo(pane, target) {
+  const delta =
+    target.getBoundingClientRect().top -
+    pane.getBoundingClientRect().top;
+  pane.scrollTop += delta;
+}
+
+/**
  * Intercept clicks on relative <a href> elements in
- * the preview pane. Absolute URLs and fragment-only
- * refs pass through to the browser's default behavior.
+ * the preview pane. Absolute URLs pass through to the
+ * browser's default behavior. Fragment-only refs scroll
+ * the pane to their target when one can be found.
  * Relative paths resolve against the current file's
  * directory and dispatch navigate-file events.
  */
@@ -466,7 +549,18 @@ export function onPreviewClick(host, event) {
   const href = anchor.getAttribute('href');
   if (!href) return;
   if (isAbsoluteUrl(href)) return;
-  if (href.startsWith('#')) return;
+  if (href.startsWith('#')) {
+    const pane =
+      host._previewPane ||
+      host.shadowRoot?.querySelector('.preview-pane');
+    const target = findFragmentTarget(
+      pane, href.slice(1), anchor.textContent,
+    );
+    if (!target) return;
+    event.preventDefault();
+    _scrollPaneTo(pane, target);
+    return;
+  }
   if (href.startsWith('/')) return;
   if (/^[a-z][a-z0-9+.-]*:/i.test(href)) return;
   if (host._file === null) return;

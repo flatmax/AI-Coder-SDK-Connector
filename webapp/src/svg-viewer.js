@@ -68,6 +68,8 @@ import {
   extractBase64Uri,
   fetchFileContent,
   getRpcCall,
+  rpcErrorMessage,
+  unwrapRpc,
 } from './diff-viewer/fetch.js';
 import { toRepoPath } from './repo-path.js';
 
@@ -2132,6 +2134,77 @@ export class SvgViewer extends LitElement {
   }
 
   /**
+   * Download the current modified SVG as a one-slide .pptx
+   * of native PowerPoint shapes, built by
+   * `DocConvert.export_svg_to_pptx`. Unlike either copy, the
+   * result stays editable after pasting into a deck — and
+   * PowerPoint for the web accepts no vector paste from
+   * outside Office, so a file it can open is the only route
+   * to editable objects there. Open the download, select all,
+   * copy, and paste into the target deck.
+   *
+   * Sends the same serialised form `_copyAsSvg` copies, with
+   * the repo-relative path so the backend can name the file
+   * and read externalised `<image>` hrefs. The backend's
+   * warnings (clip paths, filters, … dropped) ride along in
+   * the success toast so an approximation is never silent.
+   */
+  async _exportAsPptx() {
+    this._contextMenu = null;
+    if (this._activeIndex < 0) return;
+    const file = this._files[this._activeIndex];
+    if (!file) return;
+    this._onEditorChange();
+    const svgText = file.modified || '';
+    if (!svgText) {
+      this._emitToast('Nothing to export', 'info');
+      return;
+    }
+    const call = getRpcCall();
+    const method = call && call['DocConvert.export_svg_to_pptx'];
+    if (typeof method !== 'function') {
+      this._emitToast('PowerPoint export is not available', 'error');
+      return;
+    }
+    let result;
+    try {
+      result = unwrapRpc(await method(svgText, toRepoPath(file.path)));
+    } catch (err) {
+      this._emitToast(
+        `PowerPoint export failed: ${rpcErrorMessage(err)}`,
+        'error',
+      );
+      return;
+    }
+    if (!result || typeof result.data !== 'string') {
+      this._emitToast(
+        result?.error || 'PowerPoint export failed',
+        'error',
+      );
+      return;
+    }
+    const bytes = Uint8Array.from(atob(result.data), (c) =>
+      c.charCodeAt(0),
+    );
+    const blob = new Blob([bytes], {
+      type:
+        'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+    });
+    const a = document.createElement('a');
+    a.download = result.filename || 'drawing.pptx';
+    a.href = URL.createObjectURL(blob);
+    a.click();
+    URL.revokeObjectURL(a.href);
+    const warnings = Array.isArray(result.warnings) ? result.warnings : [];
+    this._emitToast(
+      warnings.length
+        ? `Downloaded ${a.download} — ${warnings.join('; ')}`
+        : `Downloaded ${a.download}`,
+      warnings.length ? 'warning' : 'success',
+    );
+  }
+
+  /**
    * Render an SVG string to an `image/png` Blob. Shared
    * pipeline between `_copyAsSvg` (which combines this
    * with the SVG source for a multi-format clipboard
@@ -2603,6 +2676,14 @@ export class SvgViewer extends LitElement {
                 @click=${this._copyAsSvg}
               >
                 📄 Copy as SVG
+              </button>
+              <button
+                class="context-menu-item"
+                role="menuitem"
+                title="Download a .pptx whose shapes stay editable in PowerPoint"
+                @click=${this._exportAsPptx}
+              >
+                📊 Export as PowerPoint
               </button>
               ${this._canSnapToAxis()
                 ? html`

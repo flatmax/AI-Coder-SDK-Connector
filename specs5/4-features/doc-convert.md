@@ -280,3 +280,19 @@ The feature is entirely optional — the document index, keyword enrichment, and
 - Re-conversion of a stale file always cleans up orphan images from the previous conversion
 - Files without a docuvert header are always treated as conflict — never silently overwritten without user selection
 - The tab is hidden when markitdown is unavailable, never shown empty or errored
+
+## SVG to PowerPoint Export
+The reverse direction, serving the SVG viewer's "Export as PowerPoint" action. `export_svg_to_pptx(svg_text, path)` converts SVG source to a one-slide `.pptx` whose contents are native DrawingML shapes rather than a picture, and returns `{data, filename, warnings}` with the file base64-encoded, or `{error}`. Nothing is written to disk, so unlike `convert_files` the call is not localhost-restricted. Needs python-pptx (the `docs-convert` extra); without it the call returns an error naming the install command.
+| SVG | PowerPoint |
+|---|---|
+| `rect`, `circle`, `ellipse` | Preset rectangle / rounded rectangle / ellipse, rotated with the element's transform; skew, reflection, or elliptical corners fall back to a freeform |
+| `line` | Connector line (endpoint handles), flipped to keep direction |
+| `path`, `polyline`, `polygon` | Freeform; arcs and quadratics converted to cubics; frame is the curve's tight bounds |
+| `text`, `tspan` | Text box per label with a run per tspan; evenly stacked lines under one anchor share a box, other lines get their own; `text-anchor` → paragraph alignment |
+| `g`, `a`, nested `svg`, `use` / `symbol` | Group shape; single-child groups flatten |
+| `image` | Picture, from a data URI or an href relative to the SVG; hrefs resolving outside the repo are not read |
+- Paint: colours (hex, `rgb()`, `hsl()`, named, `currentColor`), fill/stroke/element opacity, linear and radial gradients, dash arrays, caps, joins, and `marker-start`/`marker-end` as line-end arrowheads
+- Styles: presentation attributes, `<style>` rules with tag/class/id compound selectors joined by descendant or child combinators, then inline `style` — in CSS precedence order
+- Sizing: one SVG pixel at the authored size is 9525 EMU, so the slide is the size a browser draws the SVG; larger than PowerPoint's 56-inch limit scales down to fit
+- Fonts: first concrete family in the list; generic families map to a common font (`sans-serif` → Arial, `monospace` → Courier New); unspecified is Times New Roman, the browser default
+- Clip paths, masks, filters, patterns, and `foreignObject` have no DrawingML counterpart — dropped and named in the warnings

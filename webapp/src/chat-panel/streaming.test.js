@@ -1135,6 +1135,111 @@ describe('ChatPanel agent tabs', () => {
   });
 
   // -------------------------------------------------------------------
+  // Main working between the hand-back and the continuation
+  // -------------------------------------------------------------------
+  //
+  // Main's reply to a hand-back can run for a minute of tool calls. Its blocks
+  // were folded into the turn, but the card stayed frozen at the first result
+  // and the strip showed nothing running, so the HUD that followed seemed to
+  // come from nowhere.
+
+  function mainCard(panel) {
+    const cards = panel.shadowRoot.querySelectorAll('.message-card.role-assistant');
+    return cards[cards.length - 1];
+  }
+
+  function mainTabBusy(panel) {
+    const button = panel.shadowRoot.querySelector('.tab-strip-scroll [data-tab-id="main"]');
+    return !!button?.querySelector('.tab-streaming-indicator');
+  }
+
+  it('main’s follow-up draws live on the settled card until it ends', async () => {
+    const p = mountPanel();
+    const reqId = await backgroundTurn(p);
+    expect(mainCard(p).querySelector('.turn-following-up')).toBeNull();
+    pushEvent('stream-chunk', {
+      requestId: reqId,
+      chunk: { block_id: 'blk_late', seq: 1, content: 'Checking the report.', done: false },
+    });
+    await settle(p);
+    const card = mainCard(p);
+    expect(card.querySelector('.turn-following-up')).toBeTruthy();
+    expect(card.querySelector('.run-timer-live')).toBeTruthy();
+    expect(card.textContent).toContain('Checking the report.');
+    expect(p._tabs.get('main').followUpStartedAt).toEqual(expect.any(Number));
+    expect(mainTabBusy(p)).toBe(true);
+    // Still not streaming: the composer stays open, and the button stays Send
+    // — Stop would find no active turn to interrupt — but shows the work.
+    expect(p._tabs.get('main').streaming).toBe(false);
+    let button = p.shadowRoot.querySelector('.send-button');
+    expect(button.classList.contains('stop')).toBe(false);
+    expect(button.classList.contains('following-up')).toBe(true);
+    expect(button.querySelector('.send-busy-indicator')).toBeTruthy();
+    expect(button.textContent.trim()).toBe('Send');
+
+    pushEvent('stream-complete', {
+      requestId: reqId,
+      result: {
+        response: 'dispatchedChecking the report.',
+        terminal_reason: 'completed',
+        continuation: true,
+        background_tasks: [],
+      },
+    });
+    await settle(p);
+    expect(mainCard(p).querySelector('.turn-following-up')).toBeNull();
+    expect(p._tabs.get('main').followUpStartedAt).toBeNull();
+    expect(mainTabBusy(p)).toBe(false);
+    button = p.shadowRoot.querySelector('.send-button');
+    expect(button.classList.contains('following-up')).toBe(false);
+    expect(button.querySelector('.send-busy-indicator')).toBeNull();
+  });
+
+  it('a main tool call on a settled turn starts the follow-up', async () => {
+    const p = mountPanel();
+    const reqId = await backgroundTurn(p);
+    pushEvent('tool-use', {
+      requestId: reqId,
+      data: { tool_use_id: 'toolu_late', name: 'Bash', input: { command: 'ls' } },
+    });
+    await settle(p);
+    expect(mainCard(p).querySelector('.turn-following-up')).toBeTruthy();
+  });
+
+  it('the subagent’s own output is not a follow-up', async () => {
+    const p = mountPanel();
+    const reqId = await backgroundTurn(p);
+    pushEvent('tool-use', {
+      requestId: reqId,
+      data: {
+        tool_use_id: 'toolu_sub',
+        name: 'Read',
+        input: { file_path: 'README.md' },
+        agent_id: 'agent-1',
+      },
+    });
+    await settle(p);
+    expect(p._tabs.get('main').followUpStartedAt).toBeNull();
+    expect(mainCard(p).querySelector('.turn-following-up')).toBeNull();
+  });
+
+  it('sending ends the follow-up it interrupts', async () => {
+    const p = mountPanel();
+    const first = await backgroundTurn(p);
+    pushEvent('stream-chunk', {
+      requestId: first,
+      chunk: { block_id: 'blk_late', seq: 1, content: 'Checking.', done: false },
+    });
+    await settle(p);
+    await startMainStream(p, 'next');
+    // The CLI folds the new prompt into main's reply; the older card goes
+    // back to what it settled with.
+    expect(p._tabs.get('main').followUpStartedAt).toBeNull();
+    expect(p._tabs.get('main').backgroundTurns.get(first).followUpStartedAt).toBeNull();
+    expect(p.shadowRoot.querySelector('.turn-following-up')).toBeNull();
+  });
+
+  // -------------------------------------------------------------------
   // Sending while an older turn's subagents still run
   // -------------------------------------------------------------------
   //

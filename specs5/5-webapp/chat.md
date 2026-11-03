@@ -83,6 +83,18 @@ only thing that reads it, and the handler replaces that message in place.
 - The turn is torn down only when the continuation reports nothing left running. One that still has work in flight leaves the turn addressable, because more events are coming for it
 - A continuation for a request with no settled message appends one. That is a turn whose first result carried nothing to render — not a case to lose the answer over
 
+**Main's reply is shown while it runs.** Between the hand-back and the continuation, main can spend a
+minute or more on tool calls. Without an indication, the subagent's tab had gone green, Main showed a
+finished card, and the HUD then appeared at the continuation with nothing visible before it. So the first
+main-scope event (a text or thinking chunk or a tool call with no `agent_id`) on a settled turn stamps
+`followUpStartedAt` on the turn's block source, either the tab or its parked record. Until the next
+result clears the stamp, the settled card draws the turn's live blocks in place of its frozen ones, with
+a "Following up…" line and a live ⏱ under them, and the tab strip shows the tab's busy dot. The tab is not
+`streaming`: the composer stays open, because a prompt sent now is folded into main's reply, and the send
+that parks the turn drops the stamp. The Send button shows a pulsing dot and says so in its tooltip, but it
+stays Send rather than becoming Stop. The engine clears its active turn at the first result, so
+`cancel_streaming` would answer `idle` while main kept working.
+
 **The user can send before it ends again.** The composer is released at the first result, background
 work or not. The send parks the lingering turn — its request id and block state move to the tab's
 `backgroundTurns` — and the new turn starts with fresh block state and the tab's streaming slot.
@@ -303,7 +315,10 @@ turn", and the split is what says whether that size was expensive.
 ### Live Token Counter
 
 The footer's chips have a running twin: while a turn is streaming, the same chips render under the
-streaming card, prefixed `SO FAR` and dimmed.
+streaming card, prefixed `SO FAR` and dimmed. The live ⏱ run timer leads the same row, undimmed, and
+shows from the moment the turn starts — before any usage has arrived. It sits at the bottom rather than
+beside the role label so a long turn's clock stays in view without scrolling to the card's top. The
+settled card's frozen ⏱ badge stays beside the role label.
 
 - The source is `turnUsage`, pushed by the engine as each assistant message reports what it used
   ([`../3-engine/session.md`](../3-engine/session.md#message-taxonomy--ui)). Same `turn_model_usage`

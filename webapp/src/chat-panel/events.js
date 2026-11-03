@@ -529,6 +529,7 @@ export function onSessionChanged(panel, event) {
   for (const tab of panel._tabs.values()) {
     resetTurnBlocks(tab.turnBlocks);
     tab.backgroundTurns?.clear();
+    tab.followUpStartedAt = null;
   }
   // Subagent transcripts belong to the session that was on screen. Keeping
   // them across a resume would leave a tab labelled with one session's task

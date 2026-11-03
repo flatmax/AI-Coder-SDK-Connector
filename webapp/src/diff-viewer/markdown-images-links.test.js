@@ -477,3 +477,81 @@ describe('DiffViewer markdown preview — link navigation', () => {
     }
   });
 });
+describe('DiffViewer markdown preview — in-page fragment links', () => {
+  async function enterPreview(el, path = 'docs/README.md') {
+    await el.openFile({ path });
+    await settle(el);
+    el.shadowRoot.querySelector('.preview-button').click();
+    await settle(el);
+  }
+
+  /**
+   * Click the first link in the pane and return the
+   * heading the pane was asked to scroll to (via a
+   * stubbed geometry: each heading reports its index *
+   * 100 as its offset).
+   */
+  async function clickFirstLink(el) {
+    const pane = el.shadowRoot.querySelector('.preview-pane');
+    const headings = [...pane.querySelectorAll('h1, h2, h3')];
+    headings.forEach((h, i) => {
+      h.getBoundingClientRect = () => ({ top: (i + 1) * 100 });
+    });
+    pane.getBoundingClientRect = () => ({ top: 0 });
+    let scrolledTo = 0;
+    Object.defineProperty(pane, 'scrollTop', {
+      configurable: true,
+      get: () => 0,
+      set: (v) => { scrolledTo = v; },
+    });
+    const ev = new MouseEvent('click', { bubbles: true, cancelable: true });
+    pane.querySelector('a').dispatchEvent(ev);
+    await settle(el);
+    const idx = scrolledTo / 100 - 1;
+    return { ev, heading: headings[idx] || null };
+  }
+
+  it('scrolls to a heading matched by slug', async () => {
+    setFakeRpc({
+      'Repo.get_file_content': vi.fn(
+        async () => '[go](#second-part)\n\n# First\n\n# Second Part\n',
+      ),
+    });
+    const el = mountViewer();
+    await settle(el);
+    await enterPreview(el);
+    const { ev, heading } = await clickFirstLink(el);
+    expect(ev.defaultPrevented).toBe(true);
+    expect(heading.textContent).toBe('Second Part');
+  });
+
+  it('falls back to the link text for Word-style TOC bookmarks', async () => {
+    setFakeRpc({
+      'Repo.get_file_content': vi.fn(
+        async () =>
+          '[1.5 External References 8](#_Toc244506223)\n\n' +
+          '# Intro\n\n## External References\n',
+      ),
+    });
+    const el = mountViewer();
+    await settle(el);
+    await enterPreview(el);
+    const { ev, heading } = await clickFirstLink(el);
+    expect(ev.defaultPrevented).toBe(true);
+    expect(heading.textContent).toBe('External References');
+  });
+
+  it('leaves the click alone when nothing matches', async () => {
+    setFakeRpc({
+      'Repo.get_file_content': vi.fn(
+        async () => '[nowhere](#missing)\n\n# Intro\n',
+      ),
+    });
+    const el = mountViewer();
+    await settle(el);
+    await enterPreview(el);
+    const { ev, heading } = await clickFirstLink(el);
+    expect(ev.defaultPrevented).toBe(false);
+    expect(heading).toBe(null);
+  });
+});
