@@ -739,10 +739,36 @@ export function renderBlock(panel, block, candidates, settled) {
   if (!block || block.superseded) return nothing;
   if (block.kind === 'tool') {
     if (isTodoWrite(block.tool?.name)) return nothing;
+    const report = handbackReport(block);
+    if (report) {
+      return html`${renderToolCard(panel, block)}${renderTextBlock(
+        panel,
+        { block_id: `${block.block_id}-report`, content: report, done: true },
+        candidates,
+        settled,
+      )}`;
+    }
     return renderToolCard(panel, block);
   }
   if (block.kind === 'thinking') return renderThinkingBlock(panel, block);
   return renderTextBlock(panel, block, candidates, settled);
+}
+
+/**
+ * A subagent's final report, when the block is its `SubagentHandback` call.
+ *
+ * The CLI has a subagent end by calling that tool with the report as
+ * `message`, so the report is the call's input and nothing else carries it
+ * on the subagent's tab. As a plain card it was one truncated
+ * `message=## Fact-check: …` line — the subagent's findings, unreadable
+ * where the user went to read them. The card stays, for its status and time,
+ * and the report is drawn under it as markdown, the way the agent wrote it.
+ */
+export function handbackReport(block) {
+  const name = block?.tool?.name;
+  if (name !== 'SubagentHandback' && !name?.endsWith?.('__SubagentHandback')) return '';
+  const message = block.tool.input?.message;
+  return typeof message === 'string' ? message.trim() : '';
 }
 
 // ---------------------------------------------------------------
