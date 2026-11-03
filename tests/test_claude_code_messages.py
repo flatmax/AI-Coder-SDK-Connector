@@ -709,6 +709,55 @@ class TestAssistantMessages:
         assert events == []
         assert len(translator.rendered_blocks()) == 1
 
+    def test_a_message_split_per_block_finalises_each_block_once(self, translator):
+        """The CLI sends ``[thinking, thinking]`` as two single-block messages.
+
+        Both carry the same message id. Matching each on its position in its
+        own AssistantMessage put both at index 0, so the second block's text
+        was written into the first as well — the same thinking shown twice.
+        """
+
+        def deliver(index, text, uuid):
+            translator.translate(
+                stream(
+                    {
+                        "type": "content_block_start",
+                        "index": index,
+                        "content_block": {"type": "thinking"},
+                    }
+                )
+            )
+            if text:
+                translator.translate(
+                    stream(
+                        {
+                            "type": "content_block_delta",
+                            "index": index,
+                            "delta": {"type": "thinking_delta", "thinking": text},
+                        }
+                    )
+                )
+            translator.translate(stream({"type": "content_block_stop", "index": index}))
+            message = AssistantMessage(
+                content=[ThinkingBlock(thinking=text, signature="sig")],
+                model="claude-opus-5",
+                message_id="msg_1",
+                uuid=uuid,
+            )
+            translator.translate(message)
+            return message
+
+        translator.translate(stream({"type": "message_start", "message": {"id": "msg_1"}}))
+        deliver(0, "", "u-0")
+        second = deliver(1, "The README quote", "u-1")
+        # A re-delivered piece lands on its own block, not a new one.
+        translator.translate(second)
+
+        assert [b["content"] for b in translator.rendered_blocks()] == [
+            "",
+            "The README quote",
+        ]
+
     def test_a_dropped_delta_is_corrected_by_the_completed_message(self, translator):
         """The completed content is authoritative; a hole must not persist."""
         open_stream_block(translator, message_id="msg_1")
