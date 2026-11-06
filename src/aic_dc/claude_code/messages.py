@@ -136,6 +136,7 @@ _SUBAGENT_FIELDS = (
     "description",
     "task_type",
     "subagent_type",
+    "prompt",
     "status",
     "last_tool_name",
     "usage",
@@ -714,6 +715,11 @@ class TurnTranslator:
             # headless CLI run on 2026-08-25: `task_started` carried
             # `{"task_type": "local_agent", "subagent_type": "Explore"}`.
             "subagent_type": data.get("subagent_type") or patch.get("subagent_type"),
+            # What the subagent was asked, verbatim. Only `task_started` sends
+            # it and the SDK dataclass does not hoist it either. Captured from
+            # a headless CLI run on 2026-11-07; the tab draws it as the card
+            # its feed answers (`seedPrompt` in subagent-tabs.js).
+            "prompt": data.get("prompt"),
             "status": status,
             "last_tool_name": getattr(message, "last_tool_name", None),
             "usage": dict(usage) if usage else None,

@@ -127,7 +127,11 @@ class TestSubclassDispatch:
         events = translator.translate(
             TaskStartedMessage(
                 subtype="task_started",
-                data={"agent_id": "agent-7", "subagent_type": "Explore"},
+                data={
+                    "agent_id": "agent-7",
+                    "subagent_type": "Explore",
+                    "prompt": "Map the repo layout.",
+                },
                 task_id="task-1",
                 description="Explore the repo",
                 uuid="u",
@@ -144,6 +148,7 @@ class TestSubclassDispatch:
         assert payload["tool_use_id"] == "toolu_1"
         assert payload["task_type"] == "local_agent"
         assert payload["subagent_type"] == "Explore"
+        assert payload["prompt"] == "Map the repo layout."
         assert payload["terminal"] is False
 
     def test_subagent_type_is_read_off_the_raw_payload(self, translator):
@@ -1666,7 +1671,7 @@ class TestReplay:
         translator.translate(
             TaskStartedMessage(
                 subtype="task_started",
-                data={"agent_id": "agent-7"},
+                data={"agent_id": "agent-7", "prompt": "Map the repo layout."},
                 task_id="task-1",
                 description="Explore the repo",
                 uuid="u",
@@ -1693,6 +1698,8 @@ class TestReplay:
         assert row["key"] == "task-1"
         # The progress message carried no description; the label survives it.
         assert row["description"] == "Explore the repo"
+        # Only `task_started` carries the prompt; a reconnect rebuilds it here.
+        assert row["prompt"] == "Map the repo layout."
         assert row["agent_id"] == "agent-7"
         assert row["tool_use_id"] == "toolu_1"
         assert row["last_tool_name"] == "Grep"

@@ -875,8 +875,11 @@ export async function loadSubagentFeedIfEmpty(panel, tabId) {
   // key. Identity, not presence: a tab that was deleted and recreated is a
   // different subagent's.
   if (panel._tabs.get(tabId) !== tab) return false;
-  // After the seed line, which says what the subagent was asked to do.
-  tab.messages = [...tab.messages, ...messages];
+  // After the seed line, which says what the subagent was asked to do. A
+  // transcript opens with the prompt, and the tab's card already shows that.
+  const [first, ...rest] = messages;
+  const repeatsPrompt = first?.role === 'user' && first.content === sub.prompt;
+  tab.messages = [...tab.messages, ...(repeatsPrompt ? rest : messages)];
   panel.requestUpdate();
   return true;
 }

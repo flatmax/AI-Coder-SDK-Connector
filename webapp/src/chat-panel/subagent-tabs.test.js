@@ -54,6 +54,25 @@ function subagentEvent(reqId, over = {}) {
   };
 }
 
+describe('a subagent tab shows what the subagent was asked', () => {
+  it('draws the prompt as a card under the opening line, once', async () => {
+    const p = mountPanel();
+    await settle(p);
+    const { reqId, tab } = await withSubagent(p, { prompt: 'Audit the parser.' });
+    // `started` is the only event that carries it; later ones must not lose it.
+    pushEvent('subagent-event', subagentEvent(reqId, { type: 'progress' }));
+    await settle(p);
+
+    expect(tab.messages[0].subagent_seed).toBe(true);
+    expect(tab.messages[1]).toMatchObject({
+      role: 'user',
+      content: 'Audit the parser.',
+      role_label: 'Asked by the agent',
+    });
+    expect(tab.messages.filter((m) => m.subagent_prompt)).toHaveLength(1);
+  });
+});
+
 function feedChunk(reqId, content, seq = 0, agentId = PARENT) {
   return {
     requestId: reqId,

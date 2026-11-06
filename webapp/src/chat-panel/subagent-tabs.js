@@ -464,7 +464,7 @@ function seedDescription(tab) {
  * The question itself, as a prompt card under the opening line.
  *
  * The opening line names the task ("Antigravity — Second opinion") and says
- * nothing of what was asked, so a consultation's tab read as a column of
+ * nothing of what was asked, so a tab read as a column of tool calls or
  * heartbeats with no question to hang them on. A prompt card, not a system
  * line, because it is what the feed below is answering — but labelled for
  * who asked, since it was the agent and not the user.
