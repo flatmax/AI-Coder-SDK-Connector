@@ -87,8 +87,7 @@ export function onEditorScroll(host) {
   let topLine;
   try {
     const scrollTop = modifiedEditor.getScrollTop?.() ?? 0;
-    const lineHeight = getLineHeight(modifiedEditor);
-    topLine = Math.floor(scrollTop / lineHeight) + 1;
+    topLine = editorScrollTopToLine(host, modifiedEditor, scrollTop);
   } catch (_) {
     return;
   }
@@ -118,10 +117,57 @@ export function onPreviewScroll(host) {
   if (targetLine == null) return;
   acquireScrollLock(host, 'preview');
   try {
-    const lineHeight = getLineHeight(modifiedEditor);
-    const targetScroll = (targetLine - 1) * lineHeight;
+    const targetScroll = editorLineToScrollTop(
+      host, modifiedEditor, targetLine,
+    );
     modifiedEditor.setScrollTop?.(targetScroll);
   } catch (_) {}
+}
+
+/**
+ * Pixel top of a (fractional) editor line. Uses Monaco's
+ * layout so view zones (inline deleted lines, diff
+ * padding) and wrapped lines are accounted for; a plain
+ * `(line - 1) * lineHeight` drifts further the more of
+ * those sit above the viewport.
+ */
+export function editorLineToScrollTop(host, editor, line) {
+  if (typeof editor.getTopForLineNumber !== 'function') {
+    return (line - 1) * getLineHeight(editor);
+  }
+  const count = getEditorLineCount(host) || Math.ceil(line);
+  const whole = Math.max(1, Math.min(count, Math.floor(line)));
+  const top = editor.getTopForLineNumber(whole);
+  const next = whole < count
+    ? editor.getTopForLineNumber(whole + 1)
+    : top + getLineHeight(editor);
+  return top + (line - whole) * (next - top);
+}
+
+/**
+ * Inverse of editorLineToScrollTop — binary-search the
+ * line whose top is at/just above `scrollTop`, then add
+ * the fraction of the way to the next line.
+ */
+export function editorScrollTopToLine(host, editor, scrollTop) {
+  if (typeof editor.getTopForLineNumber !== 'function') {
+    return scrollTop / getLineHeight(editor) + 1;
+  }
+  const count = getEditorLineCount(host);
+  if (!count) return 1;
+  let lo = 1;
+  let hi = count;
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1;
+    if (editor.getTopForLineNumber(mid) <= scrollTop) lo = mid;
+    else hi = mid - 1;
+  }
+  const top = editor.getTopForLineNumber(lo);
+  const next = lo < count
+    ? editor.getTopForLineNumber(lo + 1)
+    : top + getLineHeight(editor);
+  if (next <= top) return lo;
+  return lo + Math.min(1, (scrollTop - top) / (next - top));
 }
 
 /**
@@ -180,9 +226,7 @@ export function mapOffsetTopToLine(host, anchors, offsetTop) {
     }
     const frac = (offsetTop - last.offsetTop) /
       (total - last.offsetTop);
-    return Math.round(
-      last.line + frac * (maxEditorLines - last.line),
-    );
+    return last.line + frac * (maxEditorLines - last.line);
   }
   let lo = 0;
   let hi = anchors.length - 1;
@@ -196,7 +240,7 @@ export function mapOffsetTopToLine(host, anchors, offsetTop) {
   if (a.offsetTop === b.offsetTop) return a.line;
   const t = (offsetTop - a.offsetTop) /
     (b.offsetTop - a.offsetTop);
-  return Math.round(a.line + t * (b.line - a.line));
+  return a.line + t * (b.line - a.line);
 }
 
 export function getLineHeight(modifiedEditor) {

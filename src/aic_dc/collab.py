@@ -574,6 +574,11 @@ class CollabServer(MaxSizeJRPCServer):
         await server.start()
     """
 
+    # Participants' pages come from the host's LAN address, so the loopback
+    # rule cannot apply. The rule that can is specified but not built:
+    # specs5/4-features/collaboration.md § Origin Check.
+    allowed_origins = None
+
     def __init__(
         self,
         port: int = 9000,
@@ -581,12 +586,14 @@ class CollabServer(MaxSizeJRPCServer):
         collab: Optional[Collab] = None,
         ssl_context: Any = None,
         max_size: int = DEFAULT_MAX_MESSAGE_SIZE,
+        host: str = "127.0.0.1",
     ) -> None:
         super().__init__(
             port=port,
             remote_timeout=remote_timeout,
             ssl_context=ssl_context,
             max_size=max_size,
+            host=host,
         )
         self._collab = collab if collab is not None else Collab()
         self._collab._server = self

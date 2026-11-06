@@ -223,6 +223,7 @@ export const DIFF_VIEWER_STYLES = css`
       min-width: 0;
       min-height: 0;
       overflow-y: auto;
+      position: relative;
       padding: 1rem 1.5rem;
       color: var(--text-primary, #c9d1d9);
       font-size: 0.9375rem;

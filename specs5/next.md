@@ -1334,6 +1334,14 @@ decision that parked them.
   two-real-clients workflow this bullet already says is the precondition. `Collab.admit_client` and
   `Collab.deny_client` are callerless for the same reason and are listed as such in
   `tests/test_rpc_surface.py`, so the absence now fails a test if anybody deletes the explanation.
+
+  **Added to this pause 2026-11-06, and the one piece that must land first: the collaboration `Origin`
+  check.** Solo mode refuses pages on other sites; `--collab` has no check, deliberately for now
+  (`CollabServer.allowed_origins = None`). The rule is written in
+  [`4-features/collaboration.md`](4-features/collaboration.md) § *Origin Check*, and it is small. Unlike
+  the rest of this bullet it is not dominated by the pause, because the hole does not need a participant:
+  a hostile page in the host's own browser can take the auto-admitted host seat. It is deferred only
+  because collaboration is off by default. Anyone running `--collab` today has it.
 - **CC-12 — the preset selector.** The code/doc mode toggle stays mounted and inert, annotated where it
   sits, because removing a receiver while leaving its consumer mounted moves the break instead of
   fixing it. **Open item 11 is down to this pair:** the five other dead `LLMService.*` names it lists

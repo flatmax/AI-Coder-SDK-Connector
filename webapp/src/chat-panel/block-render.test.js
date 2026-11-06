@@ -912,6 +912,27 @@ describe('renderBlock', () => {
   it('survives a null block', () => {
     expect(() => draw(renderBlock(stubPanel(), null))).not.toThrow();
   });
+
+  it("draws a SubagentHandback's report as markdown under its card", () => {
+    const host = draw(renderBlock(stubPanel(), toolBlock({
+      tool: {
+        name: 'SubagentHandback',
+        input: { message: '## Fact-check\n\n| # | Claim |\n|---|---|\n| 1a | QBI |' },
+      },
+    })));
+    expect(host.querySelector('.tool-card')).toBeTruthy();
+    const report = host.querySelector('.md-content.block-text');
+    expect(report.querySelector('h2').textContent).toBe('Fact-check');
+    expect(report.querySelector('table')).toBeTruthy();
+  });
+
+  it('draws only the card for a SubagentHandback with no message', () => {
+    const host = draw(renderBlock(stubPanel(), toolBlock({
+      tool: { name: 'SubagentHandback', input: {} },
+    })));
+    expect(host.querySelector('.tool-card')).toBeTruthy();
+    expect(host.querySelector('.md-content')).toBeNull();
+  });
 });
 
 // ---------------------------------------------------------------------------

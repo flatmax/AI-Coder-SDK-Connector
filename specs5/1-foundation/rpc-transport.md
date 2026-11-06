@@ -7,6 +7,7 @@ Bidirectional JSON-RPC 2.0 over a single WebSocket connection, using the jrpc-oo
 - Single WebSocket carries all traffic, multiplexed by JSON-RPC request IDs
 - Browser is the client; Python process is the server
 - Localhost-only binding by default; all-interfaces binding when collaboration is enabled
+- Without collaboration, a handshake whose `Origin` hostname is not `localhost`, `127.0.0.1` or `[::1]` is refused with a 403. Any port and either scheme. A handshake with no `Origin` is not a browser and is allowed. The bind keeps other machines out; this keeps out pages on other sites, which a browser on this machine would otherwise connect on their behalf, since the same-origin policy does not cover WebSockets. A sandboxed page's `null` origin is refused
 - Port passed to browser via URL query parameter
 
 ## Transport Configuration

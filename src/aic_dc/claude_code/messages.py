@@ -303,6 +303,14 @@ class TurnTranslator:
         self._partial_blocks: dict[tuple[str, str, int], str] = {}
         # agent scope → the message id currently streaming in that scope.
         self._streaming_message: dict[str, str] = {}
+        # The CLI delivers one API message as several AssistantMessages, one
+        # content block each, all sharing the message id — so a block's
+        # position in its AssistantMessage is not its stream index. These
+        # recover it: (scope, message id) → blocks delivered so far, and
+        # AssistantMessage uuid → the stream index its first block sits at
+        # (so a re-delivered one lands on the same blocks, not new ones).
+        self._delivered_blocks: dict[tuple[str, str], int] = {}
+        self._delivery_offset: dict[str, int] = {}
 
         self._tools: dict[str, _ToolCall] = {}
         # task key → the accumulated row for one subagent. Kept for the same
@@ -865,8 +873,10 @@ class TurnTranslator:
             message, "uuid", None
         )
         events: list[Event] = []
+        content = getattr(message, "content", None) or []
+        offset = self._stream_offset(scope, message, len(content))
 
-        for index, block in enumerate(getattr(message, "content", None) or []):
+        for index, block in enumerate(content, start=offset):
             if isinstance(block, TextBlock):
                 events.extend(
                     self._finalise_text_block(
@@ -920,6 +930,29 @@ class TurnTranslator:
                 )
             )
         return events
+
+    def _stream_offset(self, scope: str, message: Any, count: int) -> int:
+        """The stream index of this AssistantMessage's first block.
+
+        Zero for a message delivered whole. For one the CLI split per block
+        — a ``[thinking, thinking]`` reply arrives as two single-block
+        messages sharing one id — it is the number of blocks already
+        delivered under that id. Without it every piece finalised at index
+        0: the second thinking block's text was written into the first one
+        as well, and the transcript showed the same thinking twice.
+        """
+        message_key = getattr(message, "message_id", None) or ""
+        uuid = getattr(message, "uuid", None)
+        if not message_key:
+            return 0
+        if uuid and uuid in self._delivery_offset:
+            return self._delivery_offset[uuid]
+        key = (scope, message_key)
+        offset = self._delivered_blocks.get(key, 0)
+        self._delivered_blocks[key] = offset + count
+        if uuid:
+            self._delivery_offset[uuid] = offset
+        return offset
 
     def _note_usage(self, message: Any) -> list[Event]:
         """A completed assistant message's token counters → ``turnUsage``.

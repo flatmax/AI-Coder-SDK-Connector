@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import socket
 from typing import TYPE_CHECKING, Any, Coroutine
 
@@ -312,10 +313,12 @@ class RpcServer:
     connection-screening subclass of :class:`JRPCServer` without
     touching the rest of :class:`RpcServer`'s API.
 
-    Host binding — the ``host`` argument is currently recorded but
-    not passed through to jrpc-oo, which binds to localhost by
-    default. Layer 4 will either upgrade jrpc-oo to accept a host
-    parameter or subclass :meth:`_create_inner_server` to pass one.
+    Host binding — ``host`` is the interface the socket listens on,
+    and loopback unless the caller says otherwise. jrpc-oo's own
+    ``start`` hardcodes ``"0.0.0.0"``, so :class:`MaxSizeJRPCServer`
+    replaces it rather than relying on it. Solo mode has no admission
+    flow: this bind is the only thing keeping the LAN off the RPC
+    surface.
     """
 
     def __init__(
@@ -344,7 +347,7 @@ class RpcServer:
 
     @property
     def host(self) -> str:
-        """The configured host. Recorded for Layer 4 collab use."""
+        """The interface the socket listens on."""
         return self._host
 
     @property
@@ -374,6 +377,7 @@ class RpcServer:
         """
         return MaxSizeJRPCServer(
             port=self._port,
+            host=self._host,
             remote_timeout=self._remote_timeout,
             max_size=self._max_message_size,
             broadcaster=self._broadcaster,
@@ -486,6 +490,19 @@ class RpcServer:
 # ---------------------------------------------------------------------------
 
 
+#: What a solo server accepts in a handshake's ``Origin`` header. Binding
+#: to loopback keeps other machines out, but not a page on some other site:
+#: a browser on this machine will open a WebSocket to ``127.0.0.1`` for any
+#: page that asks, because the same-origin policy does not cover WebSockets.
+#: Any port, so an SSH tunnel and the Vite server keep working; ``None`` is
+#: a client with no ``Origin`` at all, which is not a browser. The pattern
+#: is applied with ``fullmatch``, and a sandboxed page's ``null`` fails it.
+LOOPBACK_ORIGINS: tuple[re.Pattern[str] | None, ...] = (
+    re.compile(r"https?://(localhost|127\.0\.0\.1|\[::1\])(:\d+)?"),
+    None,
+)
+
+
 class MaxSizeJRPCServer(JRPCServer):
     """JRPCServer that raises the ``websockets`` frame-size limit.
 
@@ -496,6 +513,11 @@ class MaxSizeJRPCServer(JRPCServer):
     for the rationale behind the default.
     """
 
+    #: Handed to :func:`websockets.serve`; ``None`` there means no check.
+    allowed_origins: tuple[re.Pattern[str] | None, ...] | None = (
+        LOOPBACK_ORIGINS
+    )
+
     def __init__(
         self,
         port: int = DEFAULT_SERVER_PORT,
@@ -503,6 +525,7 @@ class MaxSizeJRPCServer(JRPCServer):
         ssl_context: Any = None,
         max_size: int = DEFAULT_MAX_MESSAGE_SIZE,
         broadcaster: Broadcaster | None = None,
+        host: str = "127.0.0.1",
     ) -> None:
         super().__init__(
             port=port,
@@ -510,6 +533,7 @@ class MaxSizeJRPCServer(JRPCServer):
             ssl_context=ssl_context,
         )
         self._max_size = max_size
+        self.host = host
         self.broadcaster = (
             broadcaster if broadcaster is not None else Broadcaster()
         )
@@ -551,15 +575,17 @@ class MaxSizeJRPCServer(JRPCServer):
     async def start(self) -> None:
         self.ws_server = await websockets.serve(
             self.handle_connection,
-            "0.0.0.0",
+            self.host,
             self.port,
             ssl=self.ssl_context,
             max_size=self._max_size,
+            origins=self.allowed_origins,
         )
         protocol = "WSS" if self.ssl_context else "WS"
         logger.info(
-            "JRPC Server started on port %d with %s protocol "
+            "JRPC Server started on %s:%d with %s protocol "
             "(max_size=%d bytes)",
+            self.host,
             self.port,
             protocol,
             self._max_size,

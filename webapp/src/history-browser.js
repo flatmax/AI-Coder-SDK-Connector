@@ -466,6 +466,7 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
     .preview-pane {
       flex: 1;
       min-width: 0;
+      min-height: 0;
       display: flex;
       flex-direction: column;
     }
@@ -480,9 +481,14 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
     /* The session's subagents, held above the scroller: they belong to
      * the session rather than to any message in it, and wrapping rather
      * than scrolling horizontally so a turn that fanned out widely is
-     * all readable at once. */
+     * all readable at once. Capped and scrolled on its own past a few
+     * rows, though: a session that spawned dozens of subagents would
+     * otherwise grow the bar until it pushed the footer, and Resume with
+     * it, out of the bottom of the modal. */
     .subagents-bar {
       flex-shrink: 0;
+      max-height: 30%;
+      overflow-y: auto;
       display: flex;
       flex-wrap: wrap;
       align-items: center;
