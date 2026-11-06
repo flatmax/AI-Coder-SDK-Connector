@@ -602,6 +602,12 @@ class AgyTranslator:
                         # carries; `type_name` is its kind.
                         "description": known["role"],
                         "subagent_type": known["type_name"],
+                        # Not a label: the card the tab's feed answers.
+                        # Unframed, and the same text as the first message
+                        # of the subagent's transcript, which is how the
+                        # tab knows not to draw it twice. Measured
+                        # 2026-11-07 against a real announcement.
+                        "prompt": known["initial_prompt"],
                         "task_type": str(step.get("tool_name") or "subagent"),
                         # A subagent the user stopped is `stopped`,
                         # whatever `agy` says the step's state was — it

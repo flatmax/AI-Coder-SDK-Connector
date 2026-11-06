@@ -1135,6 +1135,15 @@ class TestASubagentIsAnnounced:
         assert payload["description"] == "Notes Reader"
         assert payload["subagent_type"] == "research"
 
+    def test_the_prompt_is_the_one_it_was_given(self):
+        """The tab's card, verbatim. Absent is empty, and draws no card."""
+        t = AgyTranslator("r1")
+        payload = t.translate(frame(SUBAGENT_ACTIVE))[0].payload
+        assert payload["prompt"] == SUBAGENT_ENTRY["initial_prompt"]
+        entry = {k: v for k, v in SUBAGENT_ENTRY.items() if k != "initial_prompt"}
+        step = dict(SUBAGENT_ACTIVE, subagent_info={"subagents": [entry]})
+        assert AgyTranslator("r2").translate(frame(step))[0].payload["prompt"] == ""
+
     def test_it_is_not_terminal_while_active(self):
         t = AgyTranslator("r1")
         payload = t.translate(frame(SUBAGENT_ACTIVE))[0].payload

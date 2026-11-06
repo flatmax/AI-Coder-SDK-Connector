@@ -258,7 +258,7 @@ the Context tab and the usage HUD.
 
 ## Tab Content
 
-A subagent tab opens with what the subagent was asked: a seed line naming the task, then the prompt verbatim as a card labelled "Asked by the agent". The prompt arrives on the `started` event and is kept on the row, so a reconnect redraws it; a transcript read into the tab skips its own first message when that repeats the card.
+A subagent tab opens with what the subagent was asked: a seed line naming the task, then the prompt verbatim as a card labelled "Asked by the agent". The prompt arrives on the subagent's first event and is kept on the row, so a reconnect redraws it; a transcript read into the tab skips its own first message when that repeats the card.
 
 A subagent tab renders its transcript through the same pipeline as the main chat:
 

@@ -396,10 +396,10 @@ export function applySubagentEvent(turn, payload) {
     has_transcript: true,
     subagent_type: null,
     // What the subagent was asked, verbatim. A Claude `Task` sends it on
-    // `task_started` (`_task_event` in src/aic_dc/claude_code/messages.py) and
-    // a consultation on its announcement (`_announce` in
-    // src/aic_dc/antigravity/bridge.py); the tab draws it as the card its feed
-    // answers.
+    // `task_started` (`_task_event` in src/aic_dc/claude_code/messages.py), an
+    // `agy` subagent on its step (src/aic_dc/agy/steps.py) and a consultation
+    // on its announcement (`_announce` in src/aic_dc/antigravity/bridge.py);
+    // the tab draws it as the card its feed answers.
     prompt: null,
     status: null,
     last_tool_name: null,
