@@ -23,6 +23,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+import websockets
 
 from aic_dc.rpc import (
     DEFAULT_REMOTE_TIMEOUT,
@@ -692,3 +693,125 @@ class TestRpcServerRoundTrip:
             except asyncio.TimeoutError:
                 print("  [test] server.stop timed out")
             print("  [test] cleanup done")
+
+class TestBindAddress:
+    """What the listening socket is really bound to.
+
+    Asserted on real sockets. Every lifecycle test above mocks the inner
+    server, which is how ``RpcServer(host="127.0.0.1")`` came to listen on
+    ``0.0.0.0``: ``server.host`` read back correctly the whole time.
+    """
+
+    @staticmethod
+    def _bound_hosts(inner: Any) -> set[str]:
+        return {s.getsockname()[0] for s in inner.ws_server.sockets}
+
+    async def test_solo_server_listens_on_loopback_only(self) -> None:
+        """Solo mode has no admission flow; the bind is the only gate."""
+        server = RpcServer(port=find_available_port(start=19100))
+        await server.start()
+        try:
+            assert self._bound_hosts(server._inner) == {"127.0.0.1"}
+        finally:
+            await server.stop()
+
+    async def test_explicit_host_reaches_the_socket(self) -> None:
+        server = RpcServer(
+            port=find_available_port(start=19100), host="0.0.0.0"
+        )
+        await server.start()
+        try:
+            assert self._bound_hosts(server._inner) == {"0.0.0.0"}
+        finally:
+            await server.stop()
+
+    async def test_collab_server_binds_what_it_is_given(self) -> None:
+        """Collab reaches the LAN by asking, and only by asking."""
+        from aic_dc.collab import CollabServer
+
+        assert CollabServer(port=0).host == "127.0.0.1"
+
+        server = CollabServer(
+            port=find_available_port(start=19100), host="0.0.0.0"
+        )
+        await server.start()
+        try:
+            assert self._bound_hosts(server) == {"0.0.0.0"}
+        finally:
+            await server.stop()
+
+
+class TestOriginCheck:
+    """A browser page on another site is refused at the handshake.
+
+    Binding to loopback does not cover this: the browser is on this
+    machine, and the same-origin policy does not apply to WebSockets.
+    """
+
+    @staticmethod
+    async def _handshake(port: int, origin: str | None) -> bool:
+        """Whether a handshake carrying ``origin`` is accepted."""
+        try:
+            async with websockets.connect(
+                f"ws://127.0.0.1:{port}", origin=origin
+            ):
+                return True
+        except websockets.exceptions.InvalidStatus as exc:
+            assert exc.response.status_code == 403
+            return False
+
+    @pytest.mark.parametrize(
+        "origin",
+        [
+            "http://localhost:18999",
+            "http://localhost",
+            "http://127.0.0.1:18999",
+            "http://[::1]:18999",
+            # The port is not checked: an SSH tunnel can use any local one.
+            "http://localhost:9999",
+            "https://localhost:18999",
+            # No Origin at all is not a browser.
+            None,
+        ],
+    )
+    async def test_local_origins_connect(self, origin: str | None) -> None:
+        server = RpcServer(port=find_available_port(start=19120))
+        await server.start()
+        try:
+            assert await self._handshake(server.port, origin)
+        finally:
+            await server.stop()
+
+    @pytest.mark.parametrize(
+        "origin",
+        [
+            "https://evil.example",
+            "http://192.168.1.142:18999",
+            # Sandboxed iframes and file:// pages.
+            "null",
+            # Lookalikes, which a prefix or substring match would let in.
+            "http://localhost.evil.example",
+            "http://127.0.0.1.evil.example",
+            "http://evil.example/localhost",
+            "http://localhost@evil.example",
+            "ftp://localhost",
+        ],
+    )
+    async def test_other_origins_are_refused(self, origin: str) -> None:
+        server = RpcServer(port=find_available_port(start=19120))
+        await server.start()
+        try:
+            assert not await self._handshake(server.port, origin)
+        finally:
+            await server.stop()
+
+    def test_collab_has_no_origin_check_yet(self) -> None:
+        """Deferred by decision: collaboration.md § Origin Check.
+
+        Pinned so that building the rule has to come here and delete this,
+        and so that loopback origins cannot reach collab by inheritance:
+        they would lock out every participant.
+        """
+        from aic_dc.collab import CollabServer
+
+        assert CollabServer.allowed_origins is None

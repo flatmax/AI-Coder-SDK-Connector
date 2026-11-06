@@ -180,6 +180,7 @@ itself can be relied on, so each consequence that outlives the process is handle
 | File access | Paths resolved relative to repo root; parent-directory traversal rejected |
 | Git operations | Local only (except shallow clones for URL fetching) |
 | WebSocket binding | Loopback by default; all interfaces only when collaboration flag is set |
+| WebSocket origin | Pages on other sites refused without the collaboration flag ([`../1-foundation/rpc-transport.md`](../1-foundation/rpc-transport.md)). **No check with it** — specified, not built ([`../4-features/collaboration.md`](../4-features/collaboration.md) § *Origin Check*) |
 | Agent tool calls | Gated by the permission layer; write and exec classes always reach a human on localhost unless a rule or mode says otherwise ([`../3-engine/permissions.md`](../3-engine/permissions.md)) |
 | Permission decisions | Localhost clients only; non-localhost participants see requests read-only ([`../4-features/collaboration.md`](../4-features/collaboration.md)) |
 | Credentials | Never read, written, logged, or forwarded. The CLI owns them; AIC⚡DC reports only which source was resolved |

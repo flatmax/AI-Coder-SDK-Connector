@@ -1241,6 +1241,7 @@ async def run(
         collab_instance = Collab()
         server = CollabServer(
             port=server_port,
+            host=bind_host,
             remote_timeout=120,
             collab=collab_instance,
         )

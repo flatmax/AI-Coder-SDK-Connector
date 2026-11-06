@@ -218,6 +218,37 @@ When collaboration is enabled, the WebSocket server and webapp server bind to al
 
 Remote collaborators open the share link (which uses the host's LAN IP) to load the webapp and connect back to the host's WebSocket port over the LAN.
 
+### Origin Check
+
+**Specified, not built.** Decided 2026-11-06. `CollabServer.allowed_origins` is `None`, so with the flag on
+the server accepts a handshake from a page on any site. Solo mode has the loopback rule
+([`../1-foundation/rpc-transport.md`](../1-foundation/rpc-transport.md)); collaboration cannot share it,
+because a participant's page comes from the host's LAN address.
+
+**It matters more here than in solo mode.** The first connection is auto-admitted as host with no screening,
+and a page open in the host's own browser arrives from a local IP, so it passes Localhost Detection. A
+hostile page that connects before the host's own tab takes the host seat, and every localhost-only method
+with it. The admission flow cannot catch this, because the first connection never reaches it.
+
+The rule, for whoever builds it:
+
+- **Refuse a handshake whose `Origin` hostname is not this machine:** `localhost`, `127.0.0.1`, `[::1]`, or
+  an address on a local interface — the set Localhost Detection already computes. Read it at handshake time,
+  since an address can change while the process runs. Any port, as in solo mode.
+- **The check is on where the page came from, not who is connecting.** A participant's browser is on another
+  machine, but its page was served by this one, so its `Origin` names the host. That is why one rule covers
+  the host and every participant.
+- **Compare against that set, not the `Host` header.** `Origin` matching `Host` is the obvious check and DNS
+  rebinding defeats it: both then name the attacker's domain.
+- **A missing `Origin` goes to the admission flow and does not take the auto-admit.** It is not a browser, so
+  the rule above says nothing about it, but a LAN client should not become host by connecting first. That is
+  a change to *First Connection*, and to the first invariant below.
+- **A hostname share link breaks.** `myhost.local` is not in the set. Share links use the LAN IP today, so
+  nothing does this yet; a build that adds hostnames has to add them here too.
+
+Build it before the admission UI is un-paused ([`../next.md`](../next.md) § E). Until then nobody can join,
+but the host-seat problem above does not need anyone to join.
+
 ### WebSocket URI Derivation
 
 - Webapp builds its WebSocket connection URI dynamically from the page URL

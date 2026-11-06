@@ -222,3 +222,46 @@ its badge cannot render. Not reached by this fix because the `-z` forms restruct
 entries into separate NUL fields — `status -z` emits new-then-old as two fields with no ` -> `
 separator, and `numstat -z` splits the rename's source and destination out behind the counts. That is
 a parser change, not a flag change.
+
+---
+
+**The RPC WebSocket listened on every interface in solo mode, not on loopback.** Found 2026-11-06 while
+reading what two sessions on one repo would share. ✅ *The bind is fixed — the `Origin` half below is not.*
+`main.py` computed `bind_host = "127.0.0.1"` without `--collab` and handed it to `RpcServer`, which only
+recorded it; its docstring said jrpc-oo "binds to localhost by default", which was the wrong belief.
+jrpc-oo hardcodes `"0.0.0.0"`, and `MaxSizeJRPCServer.start` copied that line. Measured with `ss -ltnp`
+the same day: all five running `aic-dc` processes on `0.0.0.0:18080`–`18084`, none with `--collab`, and a
+TCP connect to the machine's own LAN address was accepted. The startup log printed `bind_host`, so it
+reported loopback throughout, and `server.host` read back correctly, so every test passed: the lifecycle
+tests mock the inner server. `host` now reaches the socket, `CollabServer` receives `bind_host`
+explicitly, and `tests/test_rpc.py` § `TestBindAddress` asserts on real sockets. After the fix a live
+server shows `127.0.0.1`, and the LAN address is refused, as it is on a full `aic-dc` launch. Instances
+started before the fix keep the old bind until restarted. Not yet done: a connection from a second host
+(the check above came from this machine), or a real `--collab` session from another machine, where only the
+socket's bind is tested.
+
+**Any website could reach the loopback port.** ✅ *Fixed 2026-11-06 for solo mode; `--collab` is deferred by
+decision.* The bind did not stop the browser on this machine connecting on a page's behalf, since the
+same-origin policy does not cover WebSockets. Measured the same day: a handshake to `127.0.0.1` with
+`Origin: https://evil.example` was accepted, and solo mode has no admission flow, with `_check_localhost_only`
+returning early while `_collab` is `None`. Measured to the handshake only; no RPC was attempted through it.
+`MaxSizeJRPCServer.allowed_origins` now passes `LOOPBACK_ORIGINS` to `websockets.serve`, so that handshake
+gets a 403. Any port, so SSH tunnels and Vite keep working, and no `Origin` is allowed for non-browser
+clients. Verified the same day on a full `aic-dc` launch in a throwaway repo: the webapp connected in Chrome
+from `localhost` and `127.0.0.1`, and a page at `http://evil.localhost` was refused, with the server logging
+`403 Forbidden` and `invalid Origin header`. A page on `https://example.com` proves nothing either way: its
+socket timed out and never reached the server, so Chrome held it first, probably at its local-network check.
+Do not rely on that browser behaviour, which is why the server-side check exists. A refused handshake logs
+`websockets.server` at ERROR with a full traceback, which is noisy but harmless.
+**`CollabServer` sets it to `None`, so `--collab` is still open:** the rule it needs is in
+[`4-features/collaboration.md`](4-features/collaboration.md) § *Origin Check*, and the work is in
+[`next.md`](next.md) § E.
+
+**Starting a second instance on the same repo is not refused, and it opens the first one's conversation.**
+Found 2026-11-06. Ports probe upward so it starts cleanly, nothing detects the first instance, and
+`_auto_resume` starts true, so `_most_recent_session_id` picks the newest transcript in the store — which
+is the live one. The worse half is that review, `commit_all` and `reset_to_head` are guarded against a
+running turn only in the browser (`stream-gate.js`), so a second instance's UI cannot see the first one's
+turn: `commit_all` sweeps up its half-finished edits, `reset --hard` destroys them, and entering review
+moves the tree under it. Read, not run. Worktrees avoid all of it, by the code's own keying, and that is
+also untested — see the decision pending on parallel sessions, which has no entry in `next.md` yet.
