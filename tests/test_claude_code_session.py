@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import inspect
+import json
 from dataclasses import fields
 from types import SimpleNamespace
 
@@ -531,6 +532,59 @@ class TestConnect:
 
         assert watchdog.done()
         assert session._token_watchdog_task is None
+
+    async def test_a_turn_hands_the_child_a_token_renewed_elsewhere(
+        self, engine, tmp_path, monkeypatch
+    ):
+        """Observed 2026-11-09: a laptop slept past the child's expiry, the
+        user renewed `~/.claude` in a terminal, and every turn still failed
+        with a 401 because nothing copied the new token across until the
+        watchdog's sleep ended. The turn itself is the moment that matters."""
+        now_ms = token_refresh._now_ms()
+        parent = tmp_path / "parent.json"
+        parent.write_text(json.dumps({"claudeAiOauth": {
+            "accessToken": "fresh", "refreshToken": "secret",
+            "expiresAt": now_ms + 8 * 3600 * 1000,
+        }}))
+        child_dir = tmp_path / "child"
+        child_dir.mkdir()
+        (child_dir / ".credentials.json").write_text(json.dumps({"claudeAiOauth": {
+            "accessToken": "stale", "expiresAt": now_ms - 17 * 3600 * 1000,
+        }}))
+        monkeypatch.setattr(session_module, "subscription_credential_path", lambda: parent)
+        engine._materialized_dir = child_dir
+
+        await collect(engine)
+
+        child = json.loads((child_dir / ".credentials.json").read_text())["claudeAiOauth"]
+        assert child["accessToken"] == "fresh"
+        assert "refreshToken" not in child
+
+    async def test_the_token_watchdog_never_sleeps_past_its_ceiling(
+        self, engine, tmp_path, monkeypatch
+    ):
+        """A sleep counts on the monotonic clock, which stops during suspend,
+        so an eight-hour sleep is an eight-*awake*-hour sleep. Short ones
+        re-read the wall clock."""
+        parent = tmp_path / "parent.json"
+        parent.write_text(json.dumps({"claudeAiOauth": {
+            "expiresAt": token_refresh._now_ms() + 8 * 3600 * 1000,
+        }}))
+        monkeypatch.setattr(session_module, "subscription_credential_path", lambda: parent)
+        slept = []
+
+        async def fake_sleep(seconds):
+            slept.append(seconds)
+            engine._client = None  # ends the loop after one tick
+
+        monkeypatch.setattr(session_module.asyncio, "sleep", fake_sleep)
+        client = engine._client
+        try:
+            await engine._token_watchdog()
+        finally:
+            engine._client = client
+
+        assert slept == [session_module.TOKEN_WATCHDOG_MAX_SLEEP]
 
     async def test_session_id_is_null_until_the_init_message(self, engine):
         """connect() completes the handshake; the ID comes with the turn."""
