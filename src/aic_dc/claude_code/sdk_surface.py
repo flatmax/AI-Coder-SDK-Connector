@@ -123,6 +123,11 @@ PENDING_OPTIONS: dict[str, str] = {
     "named MCP tool instead of can_use_tool. We own the dialog.",
     "user": "an end-user identifier for multi-tenant hosts. AIC-DC is "
     "single-user and localhost-restricted.",
+    "client_app": "names the host app (`aic-dc/<version>`) in the User-Agent "
+    "the CLI sends to the API. Unset, the SDK derives a label only for a "
+    "`python -m` launch, and the `aic-dc` console script is not one, so "
+    "nothing is sent today. Setting it is an outward-facing choice to "
+    "identify ourselves to Anthropic, which wants deciding, not defaulting.",
     "settings": "a path to an alternative settings file. setting_sources "
     "already loads user/project/local, which is the point (CC-11).",
     "continue_conversation": "resumes the most recent session implicitly. "
