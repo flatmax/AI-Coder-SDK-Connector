@@ -46,6 +46,7 @@ export const GATED_EVENTS = Object.freeze([
   'modeChanged',
   'sessionChanged',
   'sessionDeleted',
+  'sessionLabelled',
   'reviewStarted',
   'reviewEnded',
   'navigateFile',

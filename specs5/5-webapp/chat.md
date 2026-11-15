@@ -458,6 +458,7 @@ Two visual groups separated by a thin vertical divider:
 - Session group — new session, open history browser (hidden in file search mode, and on any tab but the live conversation: a subagent transcript and a historical archive have no session of their own to restart, so ✨ there would restart the one behind the tab being read)
   - ✨ calls `new_session` and clears nothing locally. The server broadcasts `sessionChanged` with an empty message list and the panel acts on that, so the client that started the session and the clients merely watching it take one path. It is disabled while a turn is streaming because the server refuses mid-turn, and a button whose only outcome is a refusal it could have predicted is noise. Two refusals still reach the user as toasts: `turn_in_progress` (the turn started underneath the click) and `restricted` (the call is the host's — it discards the context every client is looking at)
   - 📜 stays live while a turn streams. Browsing is a pure read of the mirrored transcript; it is *resuming* from inside the browser that the engine refuses mid-turn
+  - The session title chip — the current session's title (the CLI's generated one until renamed), with its tag. Click to rename in place via `history_rename`; absent until the session has an ID. It re-reads the label on connect, on resume/fork/new, and after a turn only while untitled; renames from anywhere arrive as `session-labelled`
   - The engine chip — which engine is answering. Present only when more than one engine is mountable, and it opens the engine notice rather than acting directly. See § Engine Indicator and Notice
 
 Git action buttons (copy diff, commit, reset) and the review toggle live in the file picker's top toolbar, alongside the sort glyphs and Settings button. They are not in the chat action bar. See [file-picker.md](file-picker.md).
@@ -733,7 +734,7 @@ not about the page.
 ## History Browser
 
 - Modal overlay hosted inside the chat panel
-- Left panel — session list or search results; preview text, relative timestamp, message count badge
+- Left panel — session list or search results; the session's title (falling back to the preview text, which then becomes the tooltip), relative timestamp, message count badge, and its tag as a chip
 - Right panel — messages for selected session with simplified markdown rendering and image thumbnails, with the session's subagent transcripts listed above them
 - Header — title, search input, close button
 - All reads (list, messages, search, image bytes) come from the repo-local mirror of the engine transcript, read through the SDK's `*_from_store` parsers. Browsing history never touches the engine — no subprocess, no turn, no context. It is the *same* transcript the engine resumes from, read rather than replayed
@@ -753,6 +754,7 @@ not about the page.
 - **Delete session** — `history_delete(session_id)`, in the footer beside Resume. It takes two clicks: the first arms the button (`Delete permanently?`), the second sends. The confirmation is a second click rather than a dialog because the act is small and the modal already owns the screen, but it is confirmed at all because the delete is irreversible and spans three files — transcript, images, events log, and the index rows that point at them. An armed button belongs to the session it was armed on: changing the selection or closing the modal disarms it, so a click can never delete a session the user did not arm
 - The live session is refused, not deleted: `{error, reason: "session_live"}` becomes a toast ("That is the current conversation. Start a new session first.") and the row stays. Deleting the session the engine is mirroring into would only have it written straight back
 - A deleted row leaves the list on the **`sessionDeleted` broadcast**, not on the reply to the delete. The client that asked is not the only one holding a stale list, and a row whose transcript is gone is a click that can only fail; taking the broadcast route means every open browser converges by the same account rather than the acting client converging early and the rest lagging. A failed delete therefore leaves the row exactly where it was
+- **Rename and Tag** — footer buttons beside Delete. Each swaps in an inline input for the selected session; Enter calls `history_rename` / `history_tag`, Escape or blur cancels, and an unchanged value is a cancel. An empty title is a cancel too — the SDK cannot clear a title, and the CLI's generated one would come back — while an empty tag clears the tag. A refusal toasts and keeps the input open. The row updates from the **`sessionLabelled` broadcast**, for the same reason a deleted row leaves on `sessionDeleted`. The live session is allowed: a label is an appended entry, which the CLI's mirror cannot overwrite
 - Close — backdrop click, close button, or Escape
 
 ### Resume Is Not Load
@@ -772,6 +774,7 @@ the UI in two places that must be got right:
 | `paste-to-prompt` | Outward (bubbles) | Carries message text to insert into chat input |
 | `load-diff-panel` | Outward (bubbles) | Load content in diff viewer left or right panel |
 | `view-subagents-requested` | Outward (bubbles, composed) | Carries `{agents: [{agent_id, label}], session_id}` to the chat panel's tab strip, which reads the transcript and opens a read-only tab |
+| `session-labelled` | Inward (`window`) | Re-dispatched by the shell from the `sessionLabelled` broadcast (`{session_id, title, tag}`); patches the matching row. The chat panel's title chip listens to it too |
 | `session-deleted` | Inward (`window`) | Re-dispatched by the shell from the `sessionDeleted` broadcast; drops the row, its search hits, its subagent listing, and the preview if that session was the one selected |
 | `open-history` | Inward (`window`) | Opens the browser on behalf of another surface. The only inward window event on the panel that does not come from the server: the Settings tab's session-storage figure argues for deleting sessions and links here, because deletion belongs beside the transcript being deleted rather than behind a settings button ([settings.md § Session Controls](settings.md)). It opens; it does not toggle — a second request from a surface that cannot see the browser must not close it |
 

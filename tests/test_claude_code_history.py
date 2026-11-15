@@ -1397,10 +1397,12 @@ class FakeInfo:
         self.summary = kwargs.get("summary")
         self.first_prompt = kwargs.get("first_prompt")
         self.created_at = kwargs.get("created_at", 1_786_881_600_123)
+        self.custom_title = kwargs.get("custom_title")
+        self.tag = kwargs.get("tag")
 
 
 class TestTheSessionSummary:
-    def test_it_has_exactly_the_seven_documented_fields(self):
+    def test_it_has_exactly_the_nine_documented_fields(self):
         summary = summarise_session(FakeInfo(first_prompt="hi"), [object()])
         assert set(summary) == {
             "session_id",
@@ -1410,7 +1412,20 @@ class TestTheSessionSummary:
             "first_role",
             "resumable",
             "total_cost_usd",
+            "title",
+            "tag",
         }
+
+    def test_the_title_and_tag_are_the_sdks(self):
+        """``custom_title`` already prefers a user's title to the CLI's."""
+        summary = summarise_session(
+            FakeInfo(custom_title="Parser rewrite", tag="wip"), [object()]
+        )
+        assert (summary["title"], summary["tag"]) == ("Parser rewrite", "wip")
+
+    def test_no_title_or_tag_is_empty_not_none(self):
+        summary = summarise_session(FakeInfo(), [object()])
+        assert (summary["title"], summary["tag"]) == ("", "")
 
     def test_the_message_count_is_exact_not_estimated(self):
         summary = summarise_session(FakeInfo(), [object(), object(), object()])

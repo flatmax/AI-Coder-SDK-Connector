@@ -1524,6 +1524,155 @@ describe('HistoryBrowser delete', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Titles and tags
+// ---------------------------------------------------------------------------
+
+describe('HistoryBrowser titles and tags', () => {
+  async function setupLabels(methods = {}, sessions = [oneSession()]) {
+    publishFakeRpc({
+      'ClaudeCodeService.history_list': vi.fn().mockResolvedValue(sessions),
+      'ClaudeCodeService.history_load': vi.fn().mockResolvedValue([]),
+      ...methods,
+    });
+    const el = mountBrowser({ open: true });
+    await settle(el);
+    el.shadowRoot.querySelector('.session-item').click();
+    await settle(el);
+    return el;
+  }
+
+  function labelled(detail) {
+    window.dispatchEvent(new CustomEvent('session-labelled', { detail }));
+  }
+
+  async function type(el, value, key = 'Enter') {
+    const input = el.shadowRoot.querySelector('.label-input');
+    input.value = value;
+    input.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true }));
+    await settle(el);
+  }
+
+  it('shows a title in place of the preview, which moves to the tooltip', async () => {
+    const el = await setupLabels({}, [
+      oneSession({ title: 'Parser rewrite', preview: 'fix the parser' }),
+    ]);
+    const row = el.shadowRoot.querySelector('.session-preview');
+    expect(row.textContent.trim()).toBe('Parser rewrite');
+    expect(row.classList.contains('titled')).toBe(true);
+    expect(row.getAttribute('title')).toBe('fix the parser');
+  });
+
+  it('falls back to the preview without a title', async () => {
+    const el = await setupLabels({}, [oneSession({ title: '' })]);
+    const row = el.shadowRoot.querySelector('.session-preview');
+    expect(row.textContent.trim()).toBe('one');
+    expect(row.classList.contains('titled')).toBe(false);
+  });
+
+  it('shows a tag on the row', async () => {
+    const el = await setupLabels({}, [oneSession({ tag: 'wip' })]);
+    expect(el.shadowRoot.querySelector('.session-tag').textContent).toBe('wip');
+  });
+
+  it('renames the selected session', async () => {
+    const rename = vi.fn().mockResolvedValue({
+      session_id: 's1', title: 'Named', tag: '',
+    });
+    const el = await setupLabels({ 'ClaudeCodeService.history_rename': rename });
+    el.shadowRoot.querySelector('.rename-button').click();
+    await settle(el);
+    await type(el, '  Named  ');
+    expect(rename).toHaveBeenCalledWith('s1', 'Named');
+    expect(el.shadowRoot.querySelector('.label-input')).toBeNull();
+  });
+
+  it('waits for the broadcast to change the row, like delete', async () => {
+    const rename = vi.fn().mockResolvedValue({
+      session_id: 's1', title: 'Named', tag: '',
+    });
+    const el = await setupLabels({ 'ClaudeCodeService.history_rename': rename });
+    el.shadowRoot.querySelector('.rename-button').click();
+    await settle(el);
+    await type(el, 'Named');
+    expect(el.shadowRoot.querySelector('.session-preview').textContent.trim())
+      .toBe('one');
+    labelled({ session_id: 's1', title: 'Named', tag: '' });
+    await settle(el);
+    expect(el.shadowRoot.querySelector('.session-preview').textContent.trim())
+      .toBe('Named');
+  });
+
+  it('an empty or unchanged title is a cancel, not a call', async () => {
+    const rename = vi.fn();
+    const el = await setupLabels(
+      { 'ClaudeCodeService.history_rename': rename },
+      [oneSession({ title: 'Same' })],
+    );
+    el.shadowRoot.querySelector('.rename-button').click();
+    await settle(el);
+    await type(el, '   ');
+    el.shadowRoot.querySelector('.rename-button').click();
+    await settle(el);
+    await type(el, 'Same');
+    expect(rename).not.toHaveBeenCalled();
+  });
+
+  it('an empty tag clears it', async () => {
+    const tag = vi.fn().mockResolvedValue({ session_id: 's1', title: '', tag: '' });
+    const el = await setupLabels(
+      { 'ClaudeCodeService.history_tag': tag },
+      [oneSession({ tag: 'wip' })],
+    );
+    el.shadowRoot.querySelector('.tag-button').click();
+    await settle(el);
+    await type(el, '');
+    expect(tag).toHaveBeenCalledWith('s1', '');
+  });
+
+  it('Escape cancels the edit without closing the modal', async () => {
+    const el = await setupLabels();
+    el.shadowRoot.querySelector('.tag-button').click();
+    await settle(el);
+    await type(el, 'x', 'Escape');
+    expect(el.shadowRoot.querySelector('.label-input')).toBeNull();
+    expect(el.open).toBe(true);
+  });
+
+  it('keeps the editor and toasts when the server refuses', async () => {
+    const rename = vi.fn().mockResolvedValue({ error: 'Remote clients cannot' });
+    const el = await setupLabels({ 'ClaudeCodeService.history_rename': rename });
+    el.shadowRoot.querySelector('.rename-button').click();
+    await settle(el);
+    const toasts = await withToasts(() => type(el, 'Mine'));
+    expect(toasts.map((t) => t.message)).toEqual(['Remote clients cannot']);
+    expect(el.shadowRoot.querySelector('.label-input')).not.toBeNull();
+  });
+
+  it('moving the selection abandons the edit', async () => {
+    const el = await setupLabels({}, [
+      oneSession(),
+      oneSession({ session_id: 's2', preview: 'two' }),
+    ]);
+    el.shadowRoot.querySelector('.rename-button').click();
+    await settle(el);
+    el.shadowRoot.querySelectorAll('.session-item')[1].click();
+    await settle(el);
+    expect(el.shadowRoot.querySelector('.label-input')).toBeNull();
+  });
+
+  it('a label from another client patches only its own row', async () => {
+    const el = await setupLabels({}, [
+      oneSession(),
+      oneSession({ session_id: 's2', preview: 'two' }),
+    ]);
+    labelled({ session_id: 's2', title: 'Theirs', tag: 'x' });
+    await settle(el);
+    const rows = el.shadowRoot.querySelectorAll('.session-preview');
+    expect([...rows].map((r) => r.textContent.trim())).toEqual(['one', 'Theirs']);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // State reset on close
 // ---------------------------------------------------------------------------
 

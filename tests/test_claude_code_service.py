@@ -2502,6 +2502,10 @@ GATED_METHODS: dict[str, tuple] = {
     # Destroys history every client can see — including the record of a turn
     # a participant might be there to review.
     "history_delete": ("sess-1",),
+    # The label is history every client sees too: a participant renaming or
+    # tagging sessions would be relabelling the host's record of the work.
+    "history_rename": ("88888888-8888-4888-8888-888888888888", "Mine"),
+    "history_tag": ("88888888-8888-4888-8888-888888888888", "mine"),
     # Git writes to the host's tree, and the review arrangement moves every
     # file in it. Same restriction the native methods carried.
     "commit_all": (),
@@ -2577,6 +2581,8 @@ READ_ONLY_METHODS: dict[str, tuple] = {
     "history_load": ("sess-1",),
     "history_image": ("sess-1", "sess-1-u1", 0),
     "history_search": ("parser",),
+    # One row's title and tag — what the listing already shows.
+    "history_label": ("sess-1",),
     # The size of that history, for the same reason: it is a figure about
     # what a participant may already read, and the deletion it argues for
     # is gated where deletion happens.
@@ -4148,6 +4154,109 @@ class TestDeletingASession:
         assert "error" in await wired.history_delete(old)
         assert len(await wired.events_log.load(old)) == 1
         assert events_of(wired) == []
+
+
+class TestRenamingAndTaggingASession:
+    """A title and a tag, appended through the SDK and told to every client."""
+
+    @pytest.fixture
+    def old(self):
+        return "88888888-8888-4888-8888-888888888888"
+
+    @pytest.fixture
+    def live(self):
+        return "99999999-9999-4999-8999-999999999999"
+
+    @pytest.fixture
+    async def wired(self, tmp_path, events, old, live):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        svc = ClaudeCodeService(
+            FakeConfig(repo), event_callback=events, engine_config=EngineConfig()
+        )
+        svc.session = FakeSession()
+        await seed_transcript(svc, old, prompt="the old conversation")
+        await seed_transcript(svc, live, prompt="the live one")
+        svc.session.session_id = live
+        return svc
+
+    def _row(self, rows, session_id):
+        return next(r for r in rows if r["session_id"] == session_id)
+
+    async def test_a_rename_shows_in_the_listing(self, wired, old):
+        assert await wired.history_rename(old, "  Parser rewrite  ") == {
+            "session_id": old,
+            "title": "Parser rewrite",
+            "tag": "",
+        }
+        row = self._row(await wired.history_list(), old)
+        assert row["title"] == "Parser rewrite"
+        # The preview is still the user's own words, for the row's tooltip.
+        assert row["preview"] == "the old conversation"
+
+    async def test_the_last_rename_wins(self, wired, old):
+        await wired.history_rename(old, "first")
+        await wired.history_rename(old, "second")
+        assert (await wired.history_label(old))["title"] == "second"
+
+    async def test_the_current_conversation_can_be_renamed(self, wired, live):
+        """Unlike delete: a title is one more appended entry, and naming the
+        conversation you are in is the commonest rename."""
+        assert (await wired.history_rename(live, "Now"))["title"] == "Now"
+        messages = await wired.history_load(live)
+        assert any(m.get("content") == "the live one" for m in messages)
+
+    async def test_a_tag_is_set_and_cleared(self, wired, old):
+        assert (await wired.history_tag(old, "experiment"))["tag"] == "experiment"
+        assert self._row(await wired.history_list(), old)["tag"] == "experiment"
+        assert (await wired.history_tag(old, "   "))["tag"] == ""
+        assert (await wired.history_tag(old, "x"))["tag"] == "x"
+        assert (await wired.history_tag(old, None))["tag"] == ""
+
+    async def test_a_cached_row_picks_up_the_new_label(self, wired, old):
+        """The index caches finished rows; the appended entry must move the
+        fingerprint, or the rename would not show until something else did."""
+        await wired.history_list()
+        await wired.history_rename(old, "Renamed")
+        assert self._row(await wired.history_list(), old)["title"] == "Renamed"
+
+    async def test_every_client_is_told(self, wired, old):
+        await wired.history_rename(old, "Named")
+        await wired.history_tag(old, "t")
+        told = [c for c in events_of(wired) if c[0] == "sessionLabelled"]
+        assert told == [
+            ("sessionLabelled", {"session_id": old, "title": "Named", "tag": ""}),
+            ("sessionLabelled", {"session_id": old, "title": "Named", "tag": "t"}),
+        ]
+
+    async def test_an_empty_title_is_refused(self, wired, old):
+        """The SDK has no "clear" for a title; the CLI's would come back."""
+        assert (await wired.history_rename(old, "  "))["reason"] == "empty_title"
+        assert events_of(wired) == []
+
+    async def test_a_session_without_a_transcript_is_not_created(self, wired):
+        """The store would make a file holding only a title, which would list
+        as a session with nothing in it."""
+        ghost = "77777777-7777-4777-8777-777777777777"
+        assert (await wired.history_rename(ghost, "Ghost"))["reason"] == "not_found"
+        assert ghost not in [s["session_id"] for s in await wired.history_list()]
+
+    async def test_a_session_id_is_required(self, wired):
+        assert (await wired.history_rename("", "x"))["reason"] == "no_session_id"
+
+    async def test_a_remote_collaborator_cannot_relabel(self, wired, old):
+        wired._collab = FakeCollab(is_localhost=False)
+        assert "error" in await wired.history_rename(old, "Mine now")
+        assert "error" in await wired.history_tag(old, "mine")
+        assert (await wired.history_label(old))["title"] == ""
+
+    async def test_the_label_of_an_unknown_session_is_empty(self, wired):
+        ghost = "77777777-7777-4777-8777-777777777777"
+        assert await wired.history_label(ghost) == {
+            "session_id": ghost,
+            "title": "",
+            "tag": "",
+        }
 
 
 class TestSessionLifecycle:

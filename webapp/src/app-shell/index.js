@@ -1084,6 +1084,16 @@ export class AppShell extends JRPCClient {
     return true;
   }
 
+  sessionLabelled(data) {
+    // Fired by `history_rename` / `history_tag` with the label the
+    // store now holds: `{session_id, title, tag}`. Every client, so
+    // every open session list and the title chip over the chat agree.
+    window.dispatchEvent(
+      new CustomEvent('session-labelled', { detail: data }),
+    );
+    return true;
+  }
+
   reviewStarted(data) {
     // Re-dispatch as a window event so files-tab's
     // `_onReviewStarted` handler fires. files-tab

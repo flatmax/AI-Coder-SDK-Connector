@@ -1168,6 +1168,66 @@ class AntigravityService:
         )
         return {"session_id": session_id, "status": "deleted"}
 
+    async def history_label(self, session_id: str) -> dict[str, Any]:
+        """One session's ``{session_id, title, tag}``.
+
+        What the chat panel's title chip reads for the session on screen,
+        which the listing would answer too, at the cost of a parse per
+        session. Unrestricted, like the listing it is one row of.
+        """
+        if not session_id or self.session_store is None:
+            return {"session_id": session_id, "title": "", "tag": ""}
+
+        from aic_dc.claude_code import history
+
+        try:
+            label = await history.session_label(
+                self.session_store, session_id, str(self._repo_root)
+            )
+        except Exception as exc:  # noqa: BLE001 - answered, not raised
+            logger.exception("history_label failed for %s", session_id)
+            return {"error": f"Could not read session {session_id}: {exc}"}
+        return label or {"session_id": session_id, "title": "", "tag": ""}
+
+    async def history_rename(self, session_id: str, title: str) -> dict[str, Any]:
+        """Give a session a title. **Localhost only.**
+
+        The session on screen included, unlike delete: a title is one more
+        appended entry, so the live mirror writing behind it loses nothing,
+        and naming the conversation you are in is the commonest rename.
+        """
+        return await self._relabel(session_id, title=title)
+
+    async def history_tag(self, session_id: str, tag: str | None) -> dict[str, Any]:
+        """Tag a session; an empty tag clears it. **Localhost only.**"""
+        return await self._relabel(session_id, tag=tag)
+
+    async def _relabel(self, session_id: str, **change: Any) -> dict[str, Any]:
+        """The gate and the broadcast around :func:`history.relabel_session`.
+
+        Gated for the same reason as delete: the label is history every
+        client sees. Broadcast so every open session list and title chip
+        shows the new label, including the asking client's, by one route.
+        """
+        restricted = self._check_localhost_only()
+        if restricted is not None:
+            return restricted
+        if self.session_store is None:
+            return {"error": "No session history: this run has no repo directory"}
+
+        from aic_dc.claude_code import history
+
+        try:
+            label = await history.relabel_session(
+                self.session_store, session_id, str(self._repo_root), **change
+            )
+        except Exception as exc:  # noqa: BLE001 - answered, not raised
+            logger.exception("Relabelling %s failed", session_id)
+            return {"error": f"Could not update session {session_id}: {exc}"}
+        if "error" not in label:
+            await self._broadcast(Event("sessionLabelled", label, turn_scoped=False))
+        return label
+
     async def history_image(
         self, session_id: str, entry_uuid: str, block: int
     ) -> dict[str, Any]:

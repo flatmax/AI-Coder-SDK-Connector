@@ -567,6 +567,45 @@ class TestAttaching:
             "after the restart",
         ]
 
+    def test_a_rename_between_restarts_does_not_break_the_chain(self, tmp_path):
+        """A title or tag entry carries a ``uuid`` but is in no chain.
+
+        Seeding the next message's parent from one would start the second
+        chain the test above guards against, and the turns before the
+        rename would stop rendering.
+        """
+        store, first = build(tmp_path)
+
+        async def session_one():
+            await first.attach(CONVERSATION)
+            await first.note_prompt("before the rename", request_id="r1")
+            await drive(first, [
+                chunk("a:text", "answered before"),
+                Event("streamComplete", {"request_id": "r1", "usage": {}}),
+            ])
+            await history.rename_session(store, CONVERSATION, "Named", str(tmp_path))
+            await history.tag_session(store, CONVERSATION, "t", str(tmp_path))
+
+        asyncio.run(session_one())
+
+        _, second = build(tmp_path, run=1)
+
+        async def session_two():
+            await second.attach(CONVERSATION)
+            await second.note_prompt("after the rename", request_id="r2")
+            await drive(second, [
+                chunk("b:text", "answered after"),
+                Event("streamComplete", {"request_id": "r2", "usage": {}}),
+            ])
+
+        asyncio.run(session_two())
+
+        messages = load(store, tmp_path)
+        assert [m["content"] for m in messages if m["role"] == "user"] == [
+            "before the rename",
+            "after the rename",
+        ]
+
     def test_detaching_stops_the_mirror(self, tmp_path):
         """``new_session``: the conversation the user discarded gets nothing."""
         store, mirror = build(tmp_path)

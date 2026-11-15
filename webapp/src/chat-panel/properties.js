@@ -333,6 +333,15 @@ export const PROPERTIES = {
    */
   _sessionInfo: { type: Object, state: true },
   /**
+   * The session on screen's `{session_id, title, tag}`, for the action bar's
+   * title chip (session-title.js). Null when no session ID exists yet.
+   */
+  _sessionLabel: { type: Object, state: true },
+  /** The title chip is an input. */
+  _sessionTitleEditing: { type: Boolean, state: true },
+  /** A rename from the title chip is in flight. */
+  _sessionTitlePending: { type: Boolean, state: true },
+  /**
    * Latest `engineHealth` payload. Stashed rather than toasted: engine health
    * changes on reconnect and mid-turn, and a toast per transition would drown
    * the ones that matter. Null until the engine reports.

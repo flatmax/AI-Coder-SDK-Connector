@@ -109,6 +109,10 @@ MIRRORED_EVENTS = frozenset(
     }
 )
 
+#: The entry types this mirror writes, and so the only ones a resumed chain
+#: may continue from (:meth:`SessionMirror._seed_chain`).
+_CHAIN_TYPES = frozenset({"user", "assistant", "system"})
+
 
 class SessionMirror:
     """Turns one Antigravity conversation's events into stored entries.
@@ -381,6 +385,12 @@ class SessionMirror:
         parent would start a second chain in the same file. The reader
         picks *one* terminal and walks back from it, so the older half of
         the conversation would silently stop rendering.
+
+        Only an entry this mirror writes can be the parent. A rename or a
+        tag (``history.relabel_session``) appends a ``custom-title`` or
+        ``tag`` entry that carries a ``uuid`` too, and is in no chain: a
+        message parented on one would start the second chain this exists
+        to prevent.
         """
         if self._seeded or self._session_id is None:
             return
@@ -391,7 +401,11 @@ class SessionMirror:
             logger.exception("Could not read %s to continue its chain", self._session_id)
             return
         for entry in reversed(entries):
-            if isinstance(entry, dict) and isinstance(entry.get("uuid"), str):
+            if (
+                isinstance(entry, dict)
+                and entry.get("type") in _CHAIN_TYPES
+                and isinstance(entry.get("uuid"), str)
+            ):
                 self._parent = entry["uuid"]
                 return
 

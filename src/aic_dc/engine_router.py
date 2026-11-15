@@ -125,9 +125,12 @@ RPC_SURFACES: dict[str, str] = {
     "resume_session": "session_mirror",
     "history_delete": "transcript_history",
     "history_image": "transcript_history",
+    "history_label": "transcript_history",
     "history_list": "transcript_history",
     "history_load": "transcript_history",
+    "history_rename": "transcript_history",
     "history_search": "transcript_history",
+    "history_tag": "transcript_history",
     # Two surfaces rather than one since 2026-09-10: reading a subagent's
     # transcript and ending its run are different capabilities, and `agy`
     # can do the first and not the second. Mapping them to one key would

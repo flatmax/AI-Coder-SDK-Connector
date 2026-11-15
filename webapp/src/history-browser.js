@@ -314,6 +314,14 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
     /** True while a delete RPC is in flight. */
     _deleting: { type: Boolean, state: true },
     /**
+     * The label being edited in the footer: `{sessionId, field}` with
+     * `field` `'title'` or `'tag'`, or null. Per session like an armed
+     * Delete, so moving the selection abandons the edit.
+     */
+    _labelEdit: { type: Object, state: true },
+    /** True while a rename or tag RPC is in flight. */
+    _labelling: { type: Boolean, state: true },
+    /**
      * Context menu state. Null when closed; otherwise
      * `{x, y, message}` — position in viewport coordinates
      * and the message the menu targets.
@@ -427,6 +435,17 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
       margin-top: 0.25rem;
       font-size: 0.7rem;
       color: var(--text-secondary, #8b949e);
+    }
+    /* A title — the user's, or the one the CLI generated — rather
+     * than the first prompt; the prompt moves to the tooltip. */
+    .session-preview.titled {
+      font-weight: 600;
+    }
+    .session-tag {
+      background: rgba(88, 166, 255, 0.15);
+      color: var(--accent-primary, #58a6ff);
+      padding: 0.05rem 0.35rem;
+      border-radius: 3px;
     }
     .msg-count {
       background: rgba(240, 246, 252, 0.08);
@@ -619,6 +638,34 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
     /* Delete. As far from Resume as the row allows, and unfilled
      * until it is armed — the second click is the one that destroys
      * a transcript, so that is the click the red is for. */
+    .label-button {
+      padding: 0.4rem 0.75rem;
+      background: transparent;
+      border: 1px solid rgba(240, 246, 252, 0.15);
+      border-radius: 4px;
+      color: var(--text-secondary, #8b949e);
+      font-family: inherit;
+      font-size: 0.8125rem;
+      cursor: pointer;
+    }
+    .label-button:hover {
+      color: var(--text-primary, #c9d1d9);
+      border-color: rgba(240, 246, 252, 0.3);
+    }
+    .label-button:disabled {
+      opacity: 0.4;
+      cursor: not-allowed;
+    }
+    .label-input {
+      min-width: 14rem;
+      padding: 0.35rem 0.5rem;
+      background: rgba(13, 17, 23, 0.8);
+      border: 1px solid var(--accent-primary, #58a6ff);
+      border-radius: 4px;
+      color: var(--text-primary, #c9d1d9);
+      font-family: inherit;
+      font-size: 0.8125rem;
+    }
     .delete-button {
       padding: 0.4rem 0.75rem;
       background: transparent;
@@ -988,6 +1035,8 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
     this._confirmDelete = null;
     this._confirmResume = null;
     this._deleting = false;
+    this._labelEdit = null;
+    this._labelling = false;
     this._contextMenu = null;
 
     // Debounce timer for search.
@@ -1011,6 +1060,7 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
     this._onKeyDown = this._onKeyDown.bind(this);
     this._onContextDismiss = this._onContextDismiss.bind(this);
     this._onSessionDeleted = this._onSessionDeleted.bind(this);
+    this._onSessionLabelled = this._onSessionLabelled.bind(this);
   }
 
   connectedCallback() {
@@ -1022,6 +1072,8 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
     // Either way the row has to go, and the broadcast is the only
     // account of it that reaches every open list.
     window.addEventListener('session-deleted', this._onSessionDeleted);
+    // Renamed or tagged, here or by another client — same route.
+    window.addEventListener('session-labelled', this._onSessionLabelled);
     // Dismiss context menu on any click outside it.
     // Using `click` (not `pointerdown`) so clicks on
     // menu buttons fire their own handlers before this
@@ -1039,6 +1091,10 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
     window.removeEventListener(
       'session-deleted',
       this._onSessionDeleted,
+    );
+    window.removeEventListener(
+      'session-labelled',
+      this._onSessionLabelled,
     );
     if (this._searchDebounceTimer != null) {
       clearTimeout(this._searchDebounceTimer);
@@ -1091,6 +1147,7 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
           this._subagentsError = '';
           this._confirmDelete = null;
           this._confirmResume = null;
+          this._labelEdit = null;
           this._contextMenu = null;
         });
       }
@@ -1427,6 +1484,7 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
     // Moving the selection disarms it rather than re-aiming it.
     this._confirmDelete = null;
     this._confirmResume = null;
+    this._labelEdit = null;
     // Two reads, neither awaited and neither waiting on the other: the
     // transcript and the subagent listing are separate files on disk and
     // the pane draws each as it lands.
@@ -1649,6 +1707,112 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
     }
   }
 
+  /**
+   * A session was renamed or tagged — here, or by another client.
+   *
+   * Patches the row with the label the server stored, which is the
+   * stripped and sanitised one rather than what was typed. Like
+   * delete, the asking client waits for this rather than patching on
+   * its own answer, so every open list changes by the same route.
+   */
+  _onSessionLabelled(event) {
+    const label = event?.detail;
+    if (!label?.session_id) return;
+    this._sessions = this._sessions.map((s) =>
+      s.session_id === label.session_id
+        ? { ...s, title: label.title || '', tag: label.tag || '' }
+        : s,
+    );
+  }
+
+  /** Open the footer's inline editor for the selected session's label. */
+  _beginLabelEdit(field) {
+    if (!this._selectedSessionId) return;
+    this._confirmDelete = null;
+    this._labelEdit = { sessionId: this._selectedSessionId, field };
+    this.updateComplete.then(() => {
+      const input = this.shadowRoot?.querySelector('.label-input');
+      input?.focus();
+      input?.select();
+    });
+  }
+
+  _onLabelKeyDown(event) {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      this._commitLabelEdit(event.target.value);
+    } else if (event.key === 'Escape') {
+      // Cancels the edit, not the modal.
+      event.stopPropagation();
+      this._labelEdit = null;
+    }
+  }
+
+  /**
+   * Send the edited label. An unchanged value is a cancel, and so is an
+   * empty title — the SDK cannot clear one, and the CLI's own title
+   * would come back. An empty tag is a real answer: it clears the tag.
+   */
+  async _commitLabelEdit(rawValue) {
+    const edit = this._labelEdit;
+    if (!edit || this._labelling) return;
+    const value = String(rawValue ?? '').trim();
+    const session = this._sessions.find(
+      (s) => s.session_id === edit.sessionId,
+    );
+    const current = (session?.[edit.field] || '').trim();
+    if (value === current || (edit.field === 'title' && !value)) {
+      this._labelEdit = null;
+      return;
+    }
+    this._labelling = true;
+    // Spelled out, not built: the RPC-surface test finds callers by name.
+    const [rpc, method] = edit.field === 'title'
+      ? ['ClaudeCodeService.history_rename', 'history_rename']
+      : ['ClaudeCodeService.history_tag', 'history_tag'];
+    try {
+      const result = await withRpcTimeout(
+        this.rpcExtract(rpc, edit.sessionId, value),
+        HISTORY_TIMEOUT_MS,
+        method,
+      );
+      if (result && result.error) {
+        this._emitToast(String(result.error), 'warning');
+        return;
+      }
+      this._labelEdit = null;
+    } catch (err) {
+      console.error(`[history-browser] ${method} failed`, err);
+      this._emitToast(
+        err?.message || 'Could not update that session',
+        'warning',
+      );
+    } finally {
+      this._labelling = false;
+    }
+  }
+
+  _renderLabelEditor() {
+    const { sessionId, field } = this._labelEdit;
+    const session = this._sessions.find((s) => s.session_id === sessionId);
+    return html`
+      <input
+        class="label-input"
+        type="text"
+        .value=${session?.[field] || ''}
+        placeholder=${field === 'title'
+          ? 'Session title'
+          : 'Tag (empty clears it)'}
+        aria-label=${field === 'title' ? 'Session title' : 'Session tag'}
+        ?disabled=${this._labelling}
+        @keydown=${(e) => this._onLabelKeyDown(e)}
+        @blur=${() => {
+          if (!this._labelling) this._labelEdit = null;
+        }}
+      />
+    `;
+  }
+
   // ---------------------------------------------------------------
   // Message actions (copy, paste-to-prompt, load-in-panel)
   // ---------------------------------------------------------------
@@ -1835,8 +1999,30 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
       !resumable ||
       !this.rpcConnected;
     const armed = this._confirmDelete === this._selectedSessionId;
+    const editing =
+      this._labelEdit &&
+      this._labelEdit.sessionId === this._selectedSessionId;
+    const labelBlocked = !this._selectedSessionId || !this.rpcConnected;
     return html`
       <div class="footer-left">
+        ${editing
+          ? this._renderLabelEditor()
+          : html`<button
+                class="label-button rename-button"
+                ?disabled=${labelBlocked}
+                @click=${() => this._beginLabelEdit('title')}
+                title="Give this session a title"
+              >
+                ✏ Rename
+              </button>
+              <button
+                class="label-button tag-button"
+                ?disabled=${labelBlocked}
+                @click=${() => this._beginLabelEdit('tag')}
+                title="Tag this session"
+              >
+                🏷 Tag
+              </button>`}
         <button
           class="delete-button ${armed ? 'armed' : ''}"
           ?disabled=${!this._selectedSessionId ||
@@ -1916,14 +2102,20 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
           role="button"
           aria-pressed=${this._selectedSessionId === s.session_id}
         >
-          <div class="session-preview">
-            ${s.preview || '(empty)'}
+          <div
+            class="session-preview ${s.title ? 'titled' : ''}"
+            title=${s.title ? s.preview || '' : ''}
+          >
+            ${s.title || s.preview || '(empty)'}
           </div>
           <div class="session-meta">
             <span>${formatRelativeTime(s.timestamp)}</span>
             <span class="msg-count">
               ${s.message_count} ${s.message_count === 1 ? 'msg' : 'msgs'}
             </span>
+            ${s.tag
+              ? html`<span class="session-tag" title="Tag">${s.tag}</span>`
+              : ''}
             ${isResumable(s)
               ? ''
               : html`<span

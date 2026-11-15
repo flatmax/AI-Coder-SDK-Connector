@@ -317,6 +317,8 @@ index is cold:
 | `first_role` | string | |
 | `resumable` | bool | The store holds loadable entries for this ID and it is a valid UUID. False ⇒ browsable, labelled non-resumable |
 | `total_cost_usd` | float \| null | **Always null.** There are no result entries to sum (see *Browse rendering*), and the field is kept only because the session row reads it |
+| `title` | string | `SDKSessionInfo.custom_title` — a user rename, else the CLI's generated `ai-title`. `""` when neither exists |
+| `tag` | string | `SDKSessionInfo.tag`. `""` when untagged |
 
 `engine_session` is gone: with one store, a session that exists is an engine session. What used to
 distinguish them — a browsable record with no transcript behind it — can now only arise from a deleted
@@ -376,6 +378,9 @@ History — the whole set is renamed off the native engine's names, because none
 | `history_load` | `session_id: str` | `list[MessageDict]` — built at read time from parsed entries, interleaved with that session's `events.jsonl` records. Image blocks carry pointers, not data URIs |
 | `history_search` | `query: str, role?: str, limit?: int` | `list[{session_id, entry_uuid, role, content_preview, timestamp}]` |
 | `history_delete` | `session_id: str` | `{session_id, status: "deleted"}` — localhost-only. Deletes the transcript, its summary sidecar, its subagent transcripts, its events and its index rows; the images in those entries go with them. `{error, reason: "session_live"}` for the session on screen |
+| `history_label` | `session_id: str` | `{session_id, title, tag}` — empty strings for a session with no store or no transcript. Open to participants, like the other reads |
+| `history_rename` | `session_id: str, title: str` | `{session_id, title, tag}` read back after the write, or `{error, reason}` with `reason` one of `no_session_id`, `empty_title`, `not_found`, `invalid`. Localhost-only. Appends a `custom-title` entry through `rename_session_via_store` — the same entry the CLI's `/rename` writes. **The live session is allowed**: unlike a delete, an appended label entry does not fight the CLI's mirror |
+| `history_tag` | `session_id: str, tag: str` | As `history_rename`, via `tag_session_via_store`. A blank tag clears it (the SDK records an empty-string `tag` entry) |
 | `history_image` | `session_id: str, entry_uuid: str, block: int` | `{data_uri: str}` or `{error: str}` — how a thumbnail or lightbox fetches bytes that no broadcast carried |
 | `get_session_storage` | — | `{bytes: int, over_warning: bool}`, or `{error: str}` for a walk that failed, or `{error: str, reason: "no_repo"}` for a run with no repo. The readable half of the disk-usage measurement; **not** a caller of the one-shot warning, and `over_warning` is the verdict rather than the threshold behind it |
 | `get_engine_errors` | `limit?: int` | `{errors: list[EngineErrorRecord]}` (below), or `{error: str}`, or `{error: str, reason: "no_repo"}`. Recent engine failures read off `engine-errors.jsonl`, newest last, defaulting to the last 20 |
