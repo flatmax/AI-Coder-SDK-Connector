@@ -832,7 +832,7 @@ class TestTheMirrorHasItsOwnRoot:
 
 
 class TestTheHistoryRpcs:
-    """Seven delegations. Driven end to end rather than by mocking, so a
+    """Ten delegations. Driven end to end rather than by mocking, so a
     change to the entry shape fails here and not only in the mirror's own
     tests."""
 
@@ -896,6 +896,17 @@ class TestTheHistoryRpcs:
         answer = asyncio.run(svc.history_delete(CONVERSATION))
         assert answer["status"] == "deleted"
         assert asyncio.run(svc.history_list()) == []
+
+    def test_the_live_conversation_can_be_renamed_and_tagged(self, tmp_path):
+        """Same helper as the Claude engine's, over this engine's own store."""
+        svc = self._with_a_conversation(tmp_path)
+        assert asyncio.run(svc.history_rename(CONVERSATION, "Widgets")) == {
+            "session_id": CONVERSATION, "title": "Widgets", "tag": "",
+        }
+        assert asyncio.run(svc.history_tag(CONVERSATION, "ui"))["tag"] == "ui"
+        [row] = asyncio.run(svc.history_list())
+        assert (row["title"], row["tag"]) == ("Widgets", "ui")
+        assert asyncio.run(svc.history_label(CONVERSATION))["title"] == "Widgets"
 
     def test_storage_is_measured_over_this_engines_root_only(self, tmp_path):
         svc = self._with_a_conversation(tmp_path)

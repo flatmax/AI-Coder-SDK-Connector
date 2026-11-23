@@ -91,6 +91,27 @@ describe('an empty subagent tab fills from its transcript', () => {
     expect(tab.messages[2].blocks[0].content).toBe('Probe finished clean.');
   });
 
+  it('does not repeat the prompt the tab already shows', async () => {
+    const read = vi.fn().mockResolvedValue([
+      { role: 'user', content: 'Run the probe' },
+      TRANSCRIPT[TRANSCRIPT.length - 1],
+    ]);
+    publishFakeRpc({ 'ClaudeCodeService.get_subagent_transcript': read });
+    const p = mountPanel();
+    await settle(p);
+    const tab = seedSubagentTab(p, { prompt: 'Run the probe' });
+    tab.messages.push({
+      role: 'user',
+      content: 'Run the probe',
+      role_label: 'Asked by the agent',
+      subagent_prompt: true,
+    });
+
+    await loadSubagentFeedIfEmpty(p, 'agent_abc');
+    expect(tab.messages.filter((m) => m.content === 'Run the probe')).toHaveLength(1);
+    expect(tab.messages[tab.messages.length - 1].role).toBe('assistant');
+  });
+
   it('fires when the user activates the tab, by any route in', async () => {
     const read = vi.fn().mockResolvedValue(TRANSCRIPT);
     publishFakeRpc({ 'ClaudeCodeService.get_subagent_transcript': read });

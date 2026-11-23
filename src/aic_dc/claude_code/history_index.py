@@ -65,7 +65,11 @@ logger = logging.getLogger(__name__)
 # long session read the same — and a long session is the one most worth
 # finding again. Bumped for the same reason as 2: the stale row is what the
 # user would see.
-INDEX_VERSION = 3
+#
+# 4: rows gained `title` and `tag`. A version-3 row has neither, and its
+# transcript has not moved, so without a bump every untouched session would
+# keep listing untitled.
+INDEX_VERSION = 4
 
 # The native engine's `HistoryStore.search` default, carried over
 # unchanged: it applies to index-backed search and the fallback scan alike

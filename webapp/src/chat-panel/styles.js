@@ -1627,6 +1627,37 @@ export const STYLES = css`
     color: #58a6ff;
   }
 
+  /* The session on screen's title — the user's, else the CLI's. A
+   * button so the click that renames it is where the name is; capped
+   * so a long title cannot push the action bar's controls away. */
+  .session-title {
+    max-width: 16rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 0.75rem;
+  }
+  .session-title.untitled {
+    font-style: italic;
+    opacity: 0.7;
+  }
+  .session-title-tag {
+    margin-left: 0.4rem;
+    padding: 0 0.3rem;
+    border-radius: 3px;
+    background: rgba(88, 166, 255, 0.15);
+    color: var(--accent-primary, #58a6ff);
+  }
+  .session-title-input {
+    width: 16rem;
+    padding: 0.2rem 0.4rem;
+    background: rgba(13, 17, 23, 0.8);
+    border: 1px solid var(--accent-primary, #58a6ff);
+    border-radius: 4px;
+    color: var(--text-primary, #c9d1d9);
+    font-family: inherit;
+    font-size: 0.75rem;
+  }
   /* Engine chip — which engine is answering, in the action bar.
    * Only rendered when more than one engine is mountable, so its
    * presence is already the signal that there is a question to

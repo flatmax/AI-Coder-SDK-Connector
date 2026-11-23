@@ -69,6 +69,15 @@ whatever session it is attached to: the transcript would come straight back, and
 resume an ID with nothing behind it. That is refused rather than half-done, and starting a new session
 first makes it deletable.
 
+**Renaming and tagging are appends, so the session on screen is allowed.** `history_rename` and
+`history_tag` go through the SDK's `rename_session_via_store` / `tag_session_via_store`, which append a
+`custom-title` or `tag` entry; the last one wins, and a blank tag clears. That is why the live session
+can be renamed when it cannot be deleted — nothing the CLI later appends undoes a label. A session with
+no transcript is refused (`not_found`) rather than conjured into existence by its label entry. Every
+client hears of the change through a `sessionLabelled` broadcast, and the index row is refreshed by the
+transcript's changed fingerprint. A label entry carries a uuid but belongs to no message chain, so the
+Antigravity mirror seeds its chain parent from `user`/`assistant`/`system` entries only.
+
 ## `SessionStore`
 
 AIC⚡DC implements the SDK's `SessionStore` protocol so a copy of the engine transcript lands inside

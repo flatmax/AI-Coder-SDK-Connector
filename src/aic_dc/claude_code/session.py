@@ -79,6 +79,14 @@ INTERRUPT_DRAIN_TIMEOUT = 30.0
 # attempt a minute rather than a spin loop against a subprocess.
 TOKEN_WATCHDOG_MIN_SLEEP = 60.0
 
+# Ceiling on the same sleep. `asyncio.sleep` counts on the loop's monotonic
+# clock, which on Linux stops while the machine is suspended, so one long
+# sleep computed from the wall clock wakes hours after the expiry it was
+# aimed at — observed 2026-11-09, `specs5/known-issues.md`. Short sleeps
+# re-read the wall clock, and a parent renewed by somebody else reaches the
+# child within this long. Each tick is a file read when nothing is due.
+TOKEN_WATCHDOG_MAX_SLEEP = 300.0
+
 
 # Task types whose completion the engine waits for past a result message —
 # the ones that make a result end a turn rather than the run. Mirrors
@@ -850,14 +858,28 @@ class EngineSession:
             if expires_at is None:
                 return
             delay = token_refresh.seconds_remaining(expires_at) - token_refresh.REFRESH_MARGIN_SECONDS
-            await asyncio.sleep(max(delay, TOKEN_WATCHDOG_MIN_SLEEP))
+            await asyncio.sleep(
+                min(max(delay, TOKEN_WATCHDOG_MIN_SLEEP), TOKEN_WATCHDOG_MAX_SLEEP)
+            )
             if self._client is None or self._cli_path is None:
                 return
-            await self._refresh_access_token(self._cli_path)
-            token_refresh.propagate(
-                credential_path=credential_path,
-                materialized_dir=self._materialized_dir,
-            )
+            await self._sync_access_token()
+
+    async def _sync_access_token(self) -> None:
+        """Renew the parent's token if due, then hand it to the CLI child.
+
+        Shared by the watchdog and :meth:`run_turn`. The per-turn call is the
+        one that does not depend on timing: whatever the watchdog's sleep
+        made of a suspend, the token is checked at the moment a turn is about
+        to need it. When nothing is due it costs two small file reads.
+        """
+        if self._cli_path is None:
+            return
+        await self._refresh_access_token(self._cli_path)
+        token_refresh.propagate(
+            credential_path=subscription_credential_path(),
+            materialized_dir=self._materialized_dir,
+        )
 
     def adopt_config(self, config: EngineConfig) -> None:
         """Replace the config the *next* :meth:`connect` builds options from.
@@ -989,6 +1011,7 @@ class EngineSession:
 
         try:
             await self._take_main(active)
+            await self._sync_access_token()
             await self._send(turn)
             return await self._pump(active)
         finally:

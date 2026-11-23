@@ -260,6 +260,17 @@ describe('AppShell events and toasts', () => {
       window.removeEventListener('session-deleted', listener);
     });
 
+    it('sessionLabelled dispatches window event with the label', () => {
+      const shell = mountShell();
+      const listener = vi.fn();
+      window.addEventListener('session-labelled', listener);
+      shell.sessionLabelled({ session_id: 's1', title: 'T', tag: '' });
+      expect(listener.mock.calls[0][0].detail).toEqual({
+        session_id: 's1', title: 'T', tag: '',
+      });
+      window.removeEventListener('session-labelled', listener);
+    });
+
     it('callbacks return true for jrpc-oo ack', () => {
       const shell = mountShell();
       expect(shell.streamChunk('r', 'c')).toBe(true);

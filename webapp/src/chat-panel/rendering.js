@@ -98,6 +98,7 @@ import {
   renderPeerBanner,
 } from './peer-conversation.js';
 import { renderPermissionModeSelector } from './permission-mode.js';
+import { renderSessionTitle } from './session-title.js';
 import { followUpSource, renderTabStrip, tabIsFollowingUp } from './tabs.js';
 import { formatRunDuration } from './helpers.js';
 import {
@@ -289,6 +290,7 @@ export function render(panel) {
                     </button>`
                   : ''}
                 ${renderEngineChip(panel)}
+                ${renderSessionTitle(panel)}
               </div>
             `}
       </div>

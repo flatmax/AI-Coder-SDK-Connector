@@ -46,6 +46,7 @@ import {
 } from './permission-mode.js';
 import { applyPeerSnapshot, onPeerChanged } from './peer-conversation.js';
 import { restoreMessage } from './restore.js';
+import { attachSessionTitle, detachSessionTitle } from './session-title.js';
 import {
   clearSubagentTabs,
   mirrorSubagentBlocks,
@@ -342,6 +343,7 @@ export function attachEventListeners(panel) {
   window.addEventListener('tool-result', panel._onToolResult);
   window.addEventListener('turn-usage', panel._onTurnUsage);
   window.addEventListener('session-started', panel._onSessionStarted);
+  attachSessionTitle(panel);
   window.addEventListener('subagent-event', panel._onSubagentEvent);
   window.addEventListener('hook-event', panel._onHookEvent);
   window.addEventListener('rate-limit', panel._onRateLimit);
@@ -426,6 +428,7 @@ export function detachEventListeners(panel) {
   window.removeEventListener('tool-result', panel._onToolResult);
   window.removeEventListener('turn-usage', panel._onTurnUsage);
   window.removeEventListener('session-started', panel._onSessionStarted);
+  detachSessionTitle(panel);
   window.removeEventListener('subagent-event', panel._onSubagentEvent);
   window.removeEventListener('hook-event', panel._onHookEvent);
   window.removeEventListener('rate-limit', panel._onRateLimit);

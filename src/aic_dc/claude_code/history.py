@@ -217,7 +217,7 @@ async def list_sessions(
 def summarise_session(
     info: Any, messages: list[SessionMessage]
 ) -> dict[str, Any]:
-    """The seven-field summary a session row is drawn from.
+    """The nine-field summary a session row is drawn from.
 
     ``total_cost_usd`` is always ``None``: cost is not in the transcript and
     the CLI computes it from a pricing table we do not have. ``None`` renders
@@ -278,6 +278,22 @@ def summarise_session(
         # what the browser labels non-resumable rather than failing on.
         "resumable": bool(messages),
         "total_cost_usd": None,
+        **session_label_fields(info),
+    }
+
+
+def session_label_fields(info: Any) -> dict[str, str]:
+    """A session's ``title`` and ``tag``, as the row and the label RPC carry them.
+
+    ``title`` is the SDK's ``custom_title``, which is already the right
+    precedence: a title the user gave wins over the one the CLI generates
+    (``aiTitle``), and the CLI generates one for nearly every session — so
+    most rows have a real name without anyone renaming them. Empty, never
+    ``None``, so the browser tests one falsy value rather than two.
+    """
+    return {
+        "title": getattr(info, "custom_title", None) or "",
+        "tag": getattr(info, "tag", None) or "",
     }
 
 
@@ -639,6 +655,108 @@ async def delete_session(
             "session_id": session_id,
         }
     )
+
+
+# ---------------------------------------------------------------------------
+# Titles and tags
+# ---------------------------------------------------------------------------
+
+
+async def session_label(
+    store: SessionStore,
+    session_id: str,
+    directory: str,
+) -> dict[str, str] | None:
+    """One session's ``{session_id, title, tag}``, or ``None`` if it has no transcript.
+
+    The SDK folds the transcript the same way the listing does, so this
+    is the row's answer for one session without parsing every message.
+    """
+    from claude_agent_sdk import get_session_info_from_store
+
+    info = await get_session_info_from_store(store, session_id, directory)
+    if info is None:
+        return None
+    return {"session_id": session_id, **session_label_fields(info)}
+
+
+async def rename_session(
+    store: SessionStore,
+    session_id: str,
+    title: str,
+    directory: str,
+) -> None:
+    """Give a session a title, through the SDK's own mutation.
+
+    Appends a ``custom-title`` entry, the record the CLI's ``/rename``
+    writes, so a resumed session carries its title into the CLI too.
+    Append-only like every other write to the store: the last title wins,
+    and the SDK raises ``ValueError`` on an empty one rather than reading
+    it as "clear".
+    """
+    from claude_agent_sdk import rename_session_via_store
+
+    await rename_session_via_store(store, session_id, title, directory)
+
+
+async def tag_session(
+    store: SessionStore,
+    session_id: str,
+    tag: str | None,
+    directory: str,
+) -> None:
+    """Tag a session, or clear its tag with ``None``. Append-only, last wins."""
+    from claude_agent_sdk import tag_session_via_store
+
+    await tag_session_via_store(store, session_id, tag, directory)
+
+
+_UNCHANGED: Any = object()
+
+
+async def relabel_session(
+    store: SessionStore,
+    session_id: str,
+    directory: str,
+    *,
+    title: Any = _UNCHANGED,
+    tag: Any = _UNCHANGED,
+) -> dict[str, Any]:
+    """Rename and/or tag one session, answering the label it now has.
+
+    The RPC half both engines share; what is left to each service is the
+    localhost gate and the broadcast. The session must already have a
+    transcript: the store would happily create a file holding nothing but
+    a title, and that file would list as a session with no conversation in
+    it. An empty or blank tag clears it, which is what an emptied input
+    means; an empty title is refused, because the SDK has no "clear" for
+    one and the CLI's title would simply come back.
+
+    Answers ``{session_id, title, tag}`` read back from the store, so the
+    caller broadcasts what the SDK actually stored (it strips both and
+    sanitises the tag) rather than what was asked for.
+    """
+    if not session_id:
+        return {"error": "A session ID is required", "reason": "no_session_id"}
+    if title is not _UNCHANGED:
+        title = str(title or "").strip()
+        if not title:
+            return {"error": "A title cannot be empty", "reason": "empty_title"}
+    if tag is not _UNCHANGED:
+        tag = str(tag or "").strip() or None
+    if await session_label(store, session_id, directory) is None:
+        return {"error": f"No session {session_id}", "reason": "not_found"}
+    try:
+        if title is not _UNCHANGED:
+            await rename_session(store, session_id, title, directory)
+        if tag is not _UNCHANGED:
+            await tag_session(store, session_id, tag, directory)
+    except ValueError as exc:
+        return {"error": str(exc), "reason": "invalid"}
+    label = await session_label(store, session_id, directory)
+    if label is None:  # deleted between the two reads
+        return {"error": f"No session {session_id}", "reason": "not_found"}
+    return label
 
 
 # ---------------------------------------------------------------------------

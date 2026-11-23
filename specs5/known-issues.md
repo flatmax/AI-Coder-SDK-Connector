@@ -265,3 +265,36 @@ running turn only in the browser (`stream-gate.js`), so a second instance's UI c
 turn: `commit_all` sweeps up its half-finished edits, `reset --hard` destroys them, and entering review
 moves the tree under it. Read, not run. Worktrees avoid all of it, by the code's own keying, and that is
 also untested — see the decision pending on parallel sessions, which has no entry in `next.md` yet.
+
+---
+
+**A session kept a lapsed access token after the laptop slept, and stayed broken after the parent was
+renewed.** Observed 2026-11-09 on the `startup` instance (pid 8364, port 18080): every turn failed with
+*"401 OAuth access token has expired"*, then *"OAuth token revoked"*, while `~/.claude/.credentials.json`
+had just been renewed by a terminal `claude` (rewritten 17:17:50, ~8h of life) and a second AIC⚡DC
+instance started after it worked.
+
+**Measured.** The child's `CLAUDE_CONFIG_DIR` (`/tmp/claude-resume-x9ra84zl`) held a token that expired
+~00:12, 17h earlier; its file was last written 2026-11-08 16:12 — a `propagate()`, so the watchdog was
+alive then. `journalctl`: suspend 2026-11-08 21:51 → resume 2026-11-09 17:14. `CLOCK_MONOTONIC` was 10.6h
+against `CLOCK_BOOTTIME` 33.1h.
+
+**The wrong belief: that `_token_watchdog`'s sleep ends near the wall-clock time it computed.** It
+computes `expiresAt − now − REFRESH_MARGIN_SECONDS` from the wall clock and hands it to `asyncio.sleep`,
+which runs on the loop's monotonic clock, and on Linux that clock stops during suspend. The ~7.75h sleep
+taken at 16:12 had 5.6h behind it at 21:51 and resumes counting at 17:14, so it wakes around 19:20 — long
+after the token lapsed. Nothing else renews the child's copy: a turn that fails with 401 does not trigger
+`ensure_fresh`/`propagate`, so a parent renewed by somebody else is invisible to the session until the
+sleep ends. *Revoked* rather than *expired* on later turns is the terminal's 17:17 refresh rotating the
+token family; it does not change the cause.
+
+✅ **Fixed 2026-11-09, both halves.** `run_turn` now calls `_sync_access_token` — `ensure_fresh` then
+`propagate` — before each turn is sent; it is two small file reads when nothing is due, and it lands
+exactly where it matters after any suspend. The watchdog's sleep is capped at `TOKEN_WATCHDOG_MAX_SLEEP`
+(300s), so it re-reads the wall clock rather than trusting one long monotonic sleep, and a parent renewed
+by somebody else reaches the child within five minutes even with no turn sent. Either alone would have
+recovered this instance by 17:18; the per-turn check is the one that does not depend on timing. Tests in
+`tests/test_claude_code_session.py` (`test_a_turn_hands_the_child_a_token_renewed_elsewhere`,
+`test_the_token_watchdog_never_sleeps_past_its_ceiling`), both shown to fail first. **Not done:** a turn that
+fails with a 401 still does not trigger a retry; with the per-turn check that would only matter for a
+token revoked mid-turn, which has not been seen. Left in the inbox until a live suspend/resume confirms it.

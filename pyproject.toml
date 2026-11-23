@@ -41,7 +41,7 @@ dependencies = [
     # package data (~297 MiB), which the SDK resolves in preference to a
     # `claude` on PATH; engine.json's cli_path overrides both
     # (specs5/6-deployment/build.md § The Engine Is Not Bundleable).
-    "claude-agent-sdk>=0.2.136",
+    "claude-agent-sdk>=0.2.182",
     # Imported directly (claude_code/consult_listener.py, mcp_server.py,
     # antigravity/bridge.py), so pinned here rather than left to the SDK's
     # transitive range. Capped below 2: mcp 2.x renamed FastMCP to

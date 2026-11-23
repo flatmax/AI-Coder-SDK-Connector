@@ -359,7 +359,8 @@ Module-level functions in `claude_agent_sdk` (`_internal/sessions.py`):
 - `get_session_info(session_id, directory=None)`
 - `get_session_messages(session_id, directory=None, limit=None, offset=0) -> list[SessionMessage]`
 - `list_subagents(session_id, directory=None) -> list[str]`
-- Mutations: `fork_session`, `rename_session`, `tag_session`, `delete_session`
+- Mutations: `fork_session`, `rename_session`, `tag_session`, `delete_session` (`rename_session_via_store`
+  and `tag_session_via_store` back `history_rename` / `history_tag`)
 - `*_from_store` variants of each, for use with a custom `SessionStore`
 
 On-disk default locations (relevant even with a custom store, for the migration path):
